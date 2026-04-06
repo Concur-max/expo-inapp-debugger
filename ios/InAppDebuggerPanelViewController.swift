@@ -1294,16 +1294,15 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     titleLabel.textColor = PanelColors.text
     titleLabel.text = title
 
-    let bodyLabel = UILabel()
-    bodyLabel.font = monospace
+    let bodyTextView = InAppDebuggerSelectableTextView()
+    bodyTextView.font = monospace
       ? .monospacedSystemFont(ofSize: 12, weight: .regular)
       : .systemFont(ofSize: 13, weight: .regular)
-    bodyLabel.textColor = PanelColors.text
-    bodyLabel.text = body
-    bodyLabel.numberOfLines = 0
-    bodyLabel.lineBreakMode = .byCharWrapping
+    bodyTextView.textColor = PanelColors.text
+    bodyTextView.text = body
+    bodyTextView.accessibilityLabel = title
 
-    let stack = UIStackView(arrangedSubviews: [titleLabel, bodyLabel])
+    let stack = UIStackView(arrangedSubviews: [titleLabel, bodyTextView])
     stack.axis = .vertical
     stack.spacing = 8
     container.addSubview(stack)
@@ -1321,6 +1320,115 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 private extension String {
   func ifEmpty(_ fallback: String) -> String {
     isEmpty ? fallback : self
+  }
+}
+
+private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate {
+  private var lastMeasuredWidth: CGFloat = 0
+  private var hasScheduledSelectionMenu = false
+
+  override var text: String! {
+    didSet {
+      invalidateIntrinsicContentSize()
+    }
+  }
+
+  override var attributedText: NSAttributedString! {
+    didSet {
+      invalidateIntrinsicContentSize()
+    }
+  }
+
+  override var intrinsicContentSize: CGSize {
+    let fittingWidth = bounds.width > 0 ? bounds.width : UIScreen.main.bounds.width - 52
+    let size = sizeThatFits(CGSize(width: fittingWidth, height: CGFloat.greatestFiniteMagnitude))
+    return CGSize(width: UIView.noIntrinsicMetric, height: ceil(size.height))
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    if abs(bounds.width - lastMeasuredWidth) > 0.5 {
+      lastMeasuredWidth = bounds.width
+      invalidateIntrinsicContentSize()
+    }
+  }
+
+  override var canBecomeFirstResponder: Bool {
+    true
+  }
+
+  override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+    if action == #selector(copy(_:)) {
+      return selectedRange.length > 0 || !(text ?? "").isEmpty
+    }
+    return super.canPerformAction(action, withSender: sender)
+  }
+
+  override func copy(_ sender: Any?) {
+    let fullText = text ?? ""
+    if selectedRange.length > 0,
+       let range = Range(selectedRange, in: fullText) {
+      UIPasteboard.general.string = String(fullText[range])
+    } else {
+      UIPasteboard.general.string = fullText
+    }
+  }
+
+  init() {
+    super.init(frame: .zero, textContainer: nil)
+    isEditable = false
+    isSelectable = true
+    isScrollEnabled = false
+    backgroundColor = .clear
+    textContainerInset = .zero
+    textContainer.lineFragmentPadding = 0
+    showsVerticalScrollIndicator = false
+    showsHorizontalScrollIndicator = false
+    dataDetectorTypes = []
+    adjustsFontForContentSizeCategory = true
+    delegate = self
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func textViewDidChangeSelection(_ textView: UITextView) {
+    guard selectedRange.length > 0 else {
+      hasScheduledSelectionMenu = false
+      return
+    }
+    guard !hasScheduledSelectionMenu else {
+      return
+    }
+
+    hasScheduledSelectionMenu = true
+    DispatchQueue.main.async { [weak self] in
+      guard let self else {
+        return
+      }
+      self.hasScheduledSelectionMenu = false
+      self.presentSelectionMenu()
+    }
+  }
+
+  private func presentSelectionMenu() {
+    guard window != nil else {
+      return
+    }
+    becomeFirstResponder()
+
+    let targetRect: CGRect
+    if let selectedTextRange {
+      let rect = firstRect(for: selectedTextRange)
+      targetRect = rect.isNull || rect.isInfinite || rect.isEmpty
+        ? bounds.insetBy(dx: 8, dy: 8)
+        : rect
+    } else {
+      targetRect = bounds.insetBy(dx: 8, dy: 8)
+    }
+
+    UIMenuController.shared.showMenu(from: self, rect: targetRect)
   }
 }
 
