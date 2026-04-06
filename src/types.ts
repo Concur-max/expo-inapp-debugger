@@ -17,6 +17,7 @@ export type DebugLogEntry = {
   type: DebugLevel;
   origin: DebugLogOrigin;
   context?: string;
+  details?: string;
   message: string;
   timestamp: string;
   fullTimestamp: string;

@@ -86,7 +86,7 @@ describe('DebugRuntime', () => {
     console.info('details');
     console.error('boom');
 
-    jest.advanceTimersByTime(15);
+    jest.advanceTimersByTime(63);
     await flushPromises();
     expect(nativeModule.ingestBatch).not.toHaveBeenCalled();
 
@@ -154,7 +154,7 @@ describe('DebugRuntime', () => {
     const handler = globalHandler as ((error: Error, isFatal?: boolean) => void) | null;
     handler?.(new Error('fatal crash'), true);
     listeners.get('unhandledrejection')?.({ reason: 'promise failed' });
-    jest.advanceTimersByTime(16);
+    jest.advanceTimersByTime(64);
     await flushPromises();
 
     const [batch] = nativeModule.ingestBatch.mock.calls[0];

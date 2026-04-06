@@ -5,7 +5,7 @@ public final class InAppDebuggerModule: Module {
     Name("InAppDebugger")
 
     OnCreate {
-      InAppDebuggerNativeLogCapture.shared.start()
+      InAppDebuggerNativeLogCapture.shared.prepare()
     }
 
     AsyncFunction("configure") { (rawConfig: [String: Any]) in
@@ -21,7 +21,7 @@ public final class InAppDebuggerModule: Module {
           partialResult[item.key] = item.value as? String ?? "\(item.value)"
         } ?? [:]
       )
-      InAppDebuggerNativeLogCapture.shared.start()
+      InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled)
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
 
@@ -46,6 +46,7 @@ public final class InAppDebuggerModule: Module {
     }
 
     OnDestroy {
+      InAppDebuggerNativeLogCapture.shared.setEnabled(false)
       InAppDebuggerOverlayManager.shared.hide()
     }
   }

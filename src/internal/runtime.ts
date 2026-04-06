@@ -39,6 +39,9 @@ type RuntimeNativeModule = {
   exportSnapshot(): Promise<any>;
 };
 
+const FLUSH_DELAY_MS = 64;
+const MAX_BUFFERED_BATCH_SIZE = 120;
+
 export type DebugRuntimeDependencies = {
   nativeModule: RuntimeNativeModule;
   now?: () => number;
@@ -76,8 +79,12 @@ export function formatMessage(args: unknown[]) {
 
 function formatTimestamps(nowValue: number) {
   const date = new Date(nowValue);
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  const milliseconds = String(date.getMilliseconds()).padStart(3, '0');
   return {
-    timestamp: date.toLocaleTimeString(),
+    timestamp: `${hours}:${minutes}:${seconds}.${milliseconds}`,
     fullTimestamp: date.toISOString(),
   };
 }
@@ -264,7 +271,7 @@ export class DebugRuntime {
     this.configured = true;
 
     if (resolvedEnabled) {
-      this.installCollectors();
+      this.installCollectors(nextConfig.enableNetworkTab);
       if (nextConfig.initialVisible) {
         await this.dependencies.nativeModule.show();
       } else {
@@ -277,7 +284,7 @@ export class DebugRuntime {
     await this.dependencies.nativeModule.hide();
   }
 
-  private installCollectors() {
+  private installCollectors(enableNetworkCapture: boolean) {
     if (!this.consolePatched) {
       this.consolePatched = true;
       console.log = (...args: unknown[]) => {
@@ -304,7 +311,11 @@ export class DebugRuntime {
 
     this.installGlobalErrorHandler();
     this.installUnhandledRejectionHandler();
-    this.networkCollector.enable();
+    if (enableNetworkCapture) {
+      this.networkCollector.enable();
+    } else {
+      this.networkCollector.disable();
+    }
   }
 
   private removeCollectors() {
@@ -375,13 +386,21 @@ export class DebugRuntime {
       return;
     }
     this.queue.push(entry);
+    if (this.queue.length >= MAX_BUFFERED_BATCH_SIZE) {
+      if (this.flushTimer) {
+        this.clearTimeoutFn(this.flushTimer);
+        this.flushTimer = null;
+      }
+      void this.flush();
+      return;
+    }
     if (this.flushTimer) {
       return;
     }
     this.flushTimer = this.setTimeoutFn(() => {
       this.flushTimer = null;
       void this.flush();
-    }, 16);
+    }, FLUSH_DELAY_MS);
   }
 
   private async flush() {

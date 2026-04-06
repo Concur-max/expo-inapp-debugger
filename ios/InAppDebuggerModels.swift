@@ -16,6 +16,7 @@ struct DebugLogEntry {
   let type: String
   let origin: String
   let context: String?
+  let details: String?
   let message: String
   let timestamp: String
   let fullTimestamp: String
@@ -28,16 +29,27 @@ struct DebugLogEntry {
     self.type = map.string("type") ?? "log"
     self.origin = map.string("origin") ?? "js"
     self.context = map.string("context")
+    self.details = map.string("details")
     self.message = map.string("message") ?? ""
     self.timestamp = map.string("timestamp") ?? ""
     self.fullTimestamp = map.string("fullTimestamp") ?? ""
   }
 
-  init(id: String, type: String, origin: String, context: String?, message: String, timestamp: String, fullTimestamp: String) {
+  init(
+    id: String,
+    type: String,
+    origin: String,
+    context: String?,
+    details: String?,
+    message: String,
+    timestamp: String,
+    fullTimestamp: String
+  ) {
     self.id = id
     self.type = type
     self.origin = origin
     self.context = context
+    self.details = details
     self.message = message
     self.timestamp = timestamp
     self.fullTimestamp = fullTimestamp
@@ -49,6 +61,7 @@ struct DebugLogEntry {
       "type": type,
       "origin": origin,
       "context": context as Any,
+      "details": details as Any,
       "message": message,
       "timestamp": timestamp,
       "fullTimestamp": fullTimestamp,

@@ -76,6 +76,11 @@ private func toneForNetwork(_ entry: DebugNetworkEntry) -> PanelTone {
 }
 
 final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate {
+  private enum ReloadReason {
+    case full
+    case dataOnly
+  }
+
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
   private var selectedLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
@@ -83,8 +88,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var sortAscending = false
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
+  private var displayedLogLookup: [String: DebugLogEntry] = [:]
+  private var displayedNetworkLookup: [String: DebugNetworkEntry] = [:]
   private var notificationObserver: NSObjectProtocol?
   private var currentConfig = DebugConfig()
+  private var scheduledReloadWorkItem: DispatchWorkItem?
+  private var isSuspendingLiveUpdatesForScroll = false
 
   private lazy var closeButton: UIButton = {
     var config = UIButton.Configuration.tinted()
@@ -183,7 +192,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     guard let self else { return nil }
 
     if self.activeTab == .logs {
-      guard let entry = self.displayedLogs.first(where: { $0.id == identifier }) else {
+      guard let entry = self.displayedLogLookup[identifier] else {
         return UITableViewCell()
       }
       let cell = tableView.dequeueReusableCell(
@@ -196,7 +205,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       return cell
     }
 
-    guard let entry = self.displayedNetwork.first(where: { $0.id == identifier }) else {
+    guard let entry = self.displayedNetworkLookup[identifier] else {
       return UITableViewCell()
     }
     let cell = tableView.dequeueReusableCell(
@@ -227,7 +236,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      self?.reloadFromStore()
+      self?.scheduleReloadFromStore()
     }
   }
 
@@ -236,7 +245,26 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     configureNavigationBar()
   }
 
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    InAppDebuggerStore.shared.setLiveUpdatesEnabled(true)
+    InAppDebuggerNativeLogCapture.shared.setPanelActive(true)
+    reloadFromStore()
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    scheduledReloadWorkItem?.cancel()
+    scheduledReloadWorkItem = nil
+    InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
+    InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
+    isSuspendingLiveUpdatesForScroll = false
+  }
+
   deinit {
+    scheduledReloadWorkItem?.cancel()
+    InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
+    InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
     if let notificationObserver {
       NotificationCenter.default.removeObserver(notificationObserver)
     }
@@ -327,66 +355,123 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
   }
 
-  private func reloadFromStore() {
+  private func reloadFromStore(reason: ReloadReason = .full) {
     let state = InAppDebuggerStore.shared.snapshotState()
-    currentConfig = state.0
+    if reason == .full {
+      currentConfig = state.0
 
-    if !currentConfig.enableNetworkTab && activeTab == .network {
-      activeTab = .logs
+      if !currentConfig.enableNetworkTab && activeTab == .network {
+        activeTab = .logs
+      }
+
+      configureNavigationBar()
+      segmentedControl.selectedSegmentIndex = activeTab.rawValue
+      segmentedControl.setTitle(currentConfig.strings["logsTab"] ?? "日志", forSegmentAt: 0)
+      segmentedControl.setTitle(currentConfig.strings["networkTab"] ?? "网络", forSegmentAt: 1)
+      segmentedControl.setEnabled(currentConfig.enableNetworkTab, forSegmentAt: 1)
+
+      searchField.placeholder = activeTab == .logs
+        ? currentConfig.strings["searchPlaceholder"] ?? "搜索日志..."
+        : localizedNetworkSearchPlaceholder()
+      originWrapView.isHidden = activeTab != .logs
+      filterWrapView.isHidden = activeTab != .logs
+      updateToolbarTitles()
+      updateOriginButtonStates()
+      updateFilterButtonStates()
+      updateSortButton()
     }
-
-    configureNavigationBar()
-    segmentedControl.selectedSegmentIndex = activeTab.rawValue
-    segmentedControl.setTitle(currentConfig.strings["logsTab"] ?? "日志", forSegmentAt: 0)
-    segmentedControl.setTitle(currentConfig.strings["networkTab"] ?? "网络", forSegmentAt: 1)
-    segmentedControl.setEnabled(currentConfig.enableNetworkTab, forSegmentAt: 1)
-
-    searchField.placeholder = activeTab == .logs
-      ? currentConfig.strings["searchPlaceholder"] ?? "搜索日志..."
-      : localizedNetworkSearchPlaceholder()
-    originWrapView.isHidden = activeTab != .logs
-    filterWrapView.isHidden = activeTab != .logs
-    updateToolbarTitles()
-    updateOriginButtonStates()
-    updateFilterButtonStates()
-    updateSortButton()
 
     displayedLogs = filteredLogs(from: state.1)
     displayedNetwork = filteredNetwork(from: state.3)
+    displayedLogLookup = Dictionary(uniqueKeysWithValues: displayedLogs.map { ($0.id, $0) })
+    displayedNetworkLookup = Dictionary(uniqueKeysWithValues: displayedNetwork.map { ($0.id, $0) })
     applySnapshot()
   }
 
   private func filteredLogs(from source: [DebugLogEntry]) -> [DebugLogEntry] {
-    var result = source.filter {
-      selectedLevels.contains($0.type) && selectedOrigins.contains($0.origin)
-    }
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !query.isEmpty {
-      result = result.filter {
-        $0.message.localizedCaseInsensitiveContains(query) ||
-          $0.type.localizedCaseInsensitiveContains(query) ||
-          $0.origin.localizedCaseInsensitiveContains(query) ||
-          ($0.context ?? "").localizedCaseInsensitiveContains(query)
+    var result: [DebugLogEntry] = []
+    result.reserveCapacity(source.count)
+    for entry in source {
+      guard selectedLevels.contains(entry.type), selectedOrigins.contains(entry.origin) else {
+        continue
       }
+      if !query.isEmpty {
+        let matchesQuery =
+          entry.message.localizedCaseInsensitiveContains(query) ||
+          entry.type.localizedCaseInsensitiveContains(query) ||
+          entry.origin.localizedCaseInsensitiveContains(query) ||
+          (entry.context ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.details ?? "").localizedCaseInsensitiveContains(query)
+        guard matchesQuery else {
+          continue
+        }
+      }
+      result.append(entry)
     }
-    return sortAscending
-      ? result.sorted(by: { $0.fullTimestamp < $1.fullTimestamp })
-      : result.sorted(by: { $0.fullTimestamp > $1.fullTimestamp })
+    if !sortAscending {
+      result.reverse()
+    }
+    return result
   }
 
   private func filteredNetwork(from source: [DebugNetworkEntry]) -> [DebugNetworkEntry] {
-    var result = source
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !query.isEmpty {
-      result = result.filter {
-        $0.url.localizedCaseInsensitiveContains(query) ||
-          $0.method.localizedCaseInsensitiveContains(query) ||
-          $0.state.localizedCaseInsensitiveContains(query)
+    var result: [DebugNetworkEntry] = []
+    result.reserveCapacity(source.count)
+    for entry in source {
+      if !query.isEmpty {
+        let matchesQuery =
+          entry.url.localizedCaseInsensitiveContains(query) ||
+          entry.method.localizedCaseInsensitiveContains(query) ||
+          entry.state.localizedCaseInsensitiveContains(query)
+        guard matchesQuery else {
+          continue
+        }
       }
+      result.append(entry)
     }
-    return sortAscending
-      ? result.sorted(by: { $0.updatedAt < $1.updatedAt })
-      : result.sorted(by: { $0.updatedAt > $1.updatedAt })
+    if !sortAscending {
+      result.reverse()
+    }
+    return result
+  }
+
+  private func scheduleReloadFromStore() {
+    guard !isSuspendingLiveUpdatesForScroll else {
+      return
+    }
+    scheduledReloadWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else {
+        return
+      }
+      if self.tableView.isDragging || self.tableView.isDecelerating {
+        return
+      }
+      self.reloadFromStore(reason: .dataOnly)
+    }
+    scheduledReloadWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+  }
+
+  private func suspendLiveUpdatesForScrollIfNeeded() {
+    guard !isSuspendingLiveUpdatesForScroll else {
+      return
+    }
+    isSuspendingLiveUpdatesForScroll = true
+    scheduledReloadWorkItem?.cancel()
+    scheduledReloadWorkItem = nil
+    InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
+  }
+
+  private func resumeLiveUpdatesAfterScrollIfNeeded() {
+    guard isSuspendingLiveUpdatesForScroll else {
+      return
+    }
+    isSuspendingLiveUpdatesForScroll = false
+    InAppDebuggerStore.shared.setLiveUpdatesEnabled(true)
+    reloadFromStore(reason: .dataOnly)
   }
 
   private func makeToolbarButton(title: String, imageName: String?, style: ToolbarButtonStyle) -> UIButton {
@@ -600,6 +685,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return strings["jsLogOrigin"] ?? "JS"
   }
 
+  private func logDetailBody(for entry: DebugLogEntry) -> String {
+    var metadataLines = ["timestamp: \(entry.fullTimestamp)"]
+    if let context = entry.context, !context.isEmpty {
+      metadataLines.append("context: \(context)")
+    }
+    if let details = entry.details, !details.isEmpty {
+      metadataLines.append(details)
+    }
+    return metadataLines.joined(separator: "\n") + "\n\n" + entry.message
+  }
+
   @objc private func closeTapped() {
     dismiss(animated: true)
   }
@@ -659,7 +755,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       let entry = displayedLogs[indexPath.row]
       let detail = InAppDebuggerTextDetailViewController(
         titleText: "[\(localizedLogOriginTitle(entry.origin))] [\(entry.type.uppercased())] \(entry.timestamp)",
-        bodyText: entry.context.map { "\($0)\n\n\(entry.message)" } ?? entry.message
+        bodyText: logDetailBody(for: entry)
       )
       navigationController?.pushViewController(detail, animated: true)
     } else {
@@ -670,6 +766,27 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       let detail = InAppDebuggerNetworkDetailViewController(entry: entry, strings: strings)
       navigationController?.pushViewController(detail, animated: true)
     }
+  }
+
+  func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    guard scrollView === tableView else {
+      return
+    }
+    suspendLiveUpdatesForScrollIfNeeded()
+  }
+
+  func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+    guard scrollView === tableView, !decelerate else {
+      return
+    }
+    resumeLiveUpdatesAfterScrollIfNeeded()
+  }
+
+  func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+    guard scrollView === tableView else {
+      return
+    }
+    resumeLiveUpdatesAfterScrollIfNeeded()
   }
 
   private func copy(text: String, successKey: String) {

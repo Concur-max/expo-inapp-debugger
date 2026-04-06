@@ -1,5 +1,18 @@
 import Foundation
 
+private let nativeLogClockFormatter: DateFormatter = {
+  let formatter = DateFormatter()
+  formatter.locale = Locale(identifier: "en_US_POSIX")
+  formatter.dateFormat = "HH:mm:ss.SSS"
+  return formatter
+}()
+
+private let nativeLogISOFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter
+}()
+
 extension Notification.Name {
   static let inAppDebuggerStoreDidChange = Notification.Name("InAppDebuggerStoreDidChange")
 }
@@ -10,17 +23,30 @@ final class InAppDebuggerStore {
   private let lock = NSLock()
   private var config = DebugConfig()
   private var logs: [DebugLogEntry] = []
+  private var pendingNativeLogs: [DebugLogEntry] = []
   private var errors: [DebugErrorEntry] = []
   private var network: [DebugNetworkEntry] = []
+  private var liveUpdatesEnabled = false
 
   private init() {}
 
   func update(config next: DebugConfig) {
     lock.lock()
+    let shouldFlushPendingNativeLogs = next.enabled && !pendingNativeLogs.isEmpty
     config = next
+    if shouldFlushPendingNativeLogs {
+      logs.append(contentsOf: pendingNativeLogs)
+      pendingNativeLogs.removeAll(keepingCapacity: true)
+    }
     trimLocked()
     lock.unlock()
     notifyChanged()
+  }
+
+  func setLiveUpdatesEnabled(_ enabled: Bool) {
+    lock.lock()
+    liveUpdatesEnabled = enabled
+    lock.unlock()
   }
 
   func currentConfig() -> DebugConfig {
@@ -41,25 +67,19 @@ final class InAppDebuggerStore {
       switch item["category"] as? String {
       case "log":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugLogEntry(map: entryMap) {
-          logs.insert(entry, at: 0)
-          while logs.count > config.maxLogs {
-            logs.removeLast()
-          }
+          logs.append(entry)
+          trimLogsLocked()
         }
       case "error":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugErrorEntry(map: entryMap) {
-          errors.insert(entry, at: 0)
-          while errors.count > config.maxErrors {
-            errors.removeLast()
-          }
+          errors.append(entry)
+          trimErrorsLocked()
         }
       case "network":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugNetworkEntry(map: entryMap) {
           network.removeAll(where: { $0.id == entry.id })
-          network.insert(entry, at: 0)
-          while network.count > config.maxRequests {
-            network.removeLast()
-          }
+          network.append(entry)
+          trimNetworkLocked()
         }
       default:
         break
@@ -69,25 +89,25 @@ final class InAppDebuggerStore {
     notifyChanged()
   }
 
-  func appendNativeLog(type: String, message: String, stream: String, date: Date = Date()) {
+  func appendNativeLog(type: String, message: String, stream: String, details: String? = nil, date: Date = Date()) {
     lock.lock()
-    guard config.enabled else {
-      lock.unlock()
-      return
-    }
-
     let entry = DebugLogEntry(
       id: "native_\(Int(date.timeIntervalSince1970 * 1000))_\(UUID().uuidString)",
       type: type,
       origin: "native",
       context: stream,
+      details: details,
       message: message,
-      timestamp: DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium),
-      fullTimestamp: ISO8601DateFormatter().string(from: date)
+      timestamp: nativeLogClockFormatter.string(from: date),
+      fullTimestamp: nativeLogISOFormatter.string(from: date)
     )
-    logs.insert(entry, at: 0)
-    while logs.count > config.maxLogs {
-      logs.removeLast()
+
+    if config.enabled {
+      logs.append(entry)
+      trimLogsLocked()
+    } else {
+      pendingNativeLogs.append(entry)
+      trimPendingNativeLogsLocked()
     }
     lock.unlock()
     notifyChanged()
@@ -98,6 +118,7 @@ final class InAppDebuggerStore {
     switch kind {
     case "logs":
       logs.removeAll()
+      pendingNativeLogs.removeAll()
     case "errors":
       errors.removeAll()
     case "network":
@@ -123,18 +144,43 @@ final class InAppDebuggerStore {
   }
 
   private func trimLocked() {
+    trimLogsLocked()
+    trimPendingNativeLogsLocked()
+    trimErrorsLocked()
+    trimNetworkLocked()
+  }
+
+  private func trimLogsLocked() {
     if logs.count > config.maxLogs {
-      logs = Array(logs.prefix(config.maxLogs))
+      logs = Array(logs.suffix(config.maxLogs))
     }
+  }
+
+  private func trimPendingNativeLogsLocked() {
+    if pendingNativeLogs.count > config.maxLogs {
+      pendingNativeLogs = Array(pendingNativeLogs.suffix(config.maxLogs))
+    }
+  }
+
+  private func trimErrorsLocked() {
     if errors.count > config.maxErrors {
-      errors = Array(errors.prefix(config.maxErrors))
+      errors = Array(errors.suffix(config.maxErrors))
     }
+  }
+
+  private func trimNetworkLocked() {
     if network.count > config.maxRequests {
-      network = Array(network.prefix(config.maxRequests))
+      network = Array(network.suffix(config.maxRequests))
     }
   }
 
   private func notifyChanged() {
+    lock.lock()
+    let shouldNotify = liveUpdatesEnabled
+    lock.unlock()
+    guard shouldNotify else {
+      return
+    }
     DispatchQueue.main.async {
       NotificationCenter.default.post(name: .inAppDebuggerStoreDidChange, object: nil)
     }
