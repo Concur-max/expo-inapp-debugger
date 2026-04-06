@@ -1,0 +1,28 @@
+{
+  "name": "expo-inapp-debugger-example",
+  "private": true,
+  "version": "0.1.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "start:clear": "expo start --dev-client -c",
+    "start:lan": "expo start --dev-client --host lan --scheme expo-inapp-debugger-example",
+    "start:lan:clear": "expo start --dev-client --host lan --scheme expo-inapp-debugger-example -c",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild": "expo prebuild"
+  },
+  "dependencies": {
+    "expo": "~54.0.31",
+    "expo-build-properties": "~1.0.10",
+    "expo-dev-client": "~6.0.20",
+    "expo-inapp-debugger": "file:..",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.17",
+    "babel-preset-expo": "54.0.9",
+    "typescript": "~5.9.3"
+  }
+}

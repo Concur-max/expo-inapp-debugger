@@ -1,0 +1,12 @@
+node_modules
+.expo
+.expo-shared
+example/.expo
+example/node_modules
+example/.expo-shared
+dist
+build
+android/.gradle
+android/build
+example/android
+example/ios

@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Expo InApp Debugger Example",
+    "slug": "expo-inapp-debugger-example",
+    "scheme": "expo-inapp-debugger-example",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.expoinappdebugger"
+    },
+    "android": {
+      "package": "com.example.expoinappdebugger"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "15.5"
+          },
+          "android": {
+            "minSdkVersion": 24
+          }
+        }
+      ]
+    ]
+  }
+}

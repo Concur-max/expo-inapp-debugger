@@ -1,0 +1,111 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'maven-publish'
+
+group = 'expo.modules.inappdebugger'
+version = '0.1.0'
+
+buildscript {
+  def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+  if (expoModulesCorePlugin.exists()) {
+    apply from: expoModulesCorePlugin
+    applyKotlinExpoModulesCorePlugin()
+  }
+
+  ext.safeExtGet = { prop, fallback ->
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+  }
+
+  ext.getKotlinVersion = {
+    if (ext.has("kotlinVersion")) {
+      ext.kotlinVersion()
+    } else {
+      ext.safeExtGet("kotlinVersion", "1.9.24")
+    }
+  }
+
+  repositories {
+    mavenCentral()
+    google()
+  }
+
+  dependencies {
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${getKotlinVersion()}")
+  }
+}
+
+afterEvaluate {
+  publishing {
+    publications {
+      release(MavenPublication) {
+        from components.release
+      }
+    }
+    repositories {
+      maven {
+        url = mavenLocal().url
+      }
+    }
+  }
+}
+
+android {
+  namespace "expo.modules.inappdebugger"
+  compileSdkVersion safeExtGet("compileSdkVersion", 34)
+
+  defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 24)
+    targetSdkVersion safeExtGet("targetSdkVersion", 34)
+    versionCode 1
+    versionName "0.1.0"
+    consumerProguardFiles "consumer-rules.pro"
+  }
+
+  buildFeatures {
+    compose true
+  }
+
+  composeOptions {
+    kotlinCompilerExtensionVersion safeExtGet("kotlinCompilerExtensionVersion", "1.5.14")
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = JavaVersion.VERSION_17.majorVersion
+  }
+
+  lintOptions {
+    abortOnError false
+  }
+
+  publishing {
+    singleVariant("release") {
+      withSourcesJar()
+    }
+  }
+}
+
+repositories {
+  google()
+  mavenCentral()
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  implementation project(':expo-modules-core')
+  implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:${getKotlinVersion()}"
+  implementation "androidx.core:core-ktx:1.13.1"
+  implementation "androidx.fragment:fragment-ktx:1.8.5"
+  implementation "androidx.activity:activity-compose:1.9.2"
+  implementation "androidx.lifecycle:lifecycle-runtime-compose:2.8.7"
+  implementation platform("androidx.compose:compose-bom:2024.09.01")
+  implementation "androidx.compose.ui:ui"
+  implementation "androidx.compose.ui:ui-tooling-preview"
+  implementation "androidx.compose.foundation:foundation"
+  implementation "androidx.compose.material3:material3"
+  implementation "androidx.compose.material:material-icons-extended"
+}
