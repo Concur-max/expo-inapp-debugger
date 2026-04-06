@@ -69,6 +69,30 @@ final class InAppDebuggerStore {
     notifyChanged()
   }
 
+  func appendNativeLog(type: String, message: String, stream: String, date: Date = Date()) {
+    lock.lock()
+    guard config.enabled else {
+      lock.unlock()
+      return
+    }
+
+    let entry = DebugLogEntry(
+      id: "native_\(Int(date.timeIntervalSince1970 * 1000))_\(UUID().uuidString)",
+      type: type,
+      origin: "native",
+      context: stream,
+      message: message,
+      timestamp: DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium),
+      fullTimestamp: ISO8601DateFormatter().string(from: date)
+    )
+    logs.insert(entry, at: 0)
+    while logs.count > config.maxLogs {
+      logs.removeLast()
+    }
+    lock.unlock()
+    notifyChanged()
+  }
+
   func clear(kind: String) {
     lock.lock()
     switch kind {

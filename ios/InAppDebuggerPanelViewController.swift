@@ -79,6 +79,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
   private var selectedLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
+  private var selectedOrigins: Set<String> = ["js", "native"]
   private var sortAscending = false
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
@@ -140,6 +141,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return button
   }()
 
+  private let originWrapView = InAppDebuggerWrapView()
   private let filterWrapView = InAppDebuggerWrapView()
 
   private lazy var sortToggleButton: UIButton = {
@@ -274,7 +276,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     sortRow.alignment = .center
     sortRow.spacing = 8
 
-    let filterGroup = UIStackView(arrangedSubviews: [filterWrapView, sortRow])
+    let filterGroup = UIStackView(arrangedSubviews: [originWrapView, filterWrapView, sortRow])
     filterGroup.axis = .vertical
     filterGroup.alignment = .fill
     filterGroup.spacing = 6
@@ -300,8 +302,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func rebuildFilterButtons() {
+    let originButtons = ["js", "native"].map { makeOriginButton(origin: $0) }
+    originWrapView.setArrangedSubviews(originButtons)
     let buttons = ["log", "info", "warn", "error", "debug"].map { makeLevelButton(level: $0) }
     filterWrapView.setArrangedSubviews(buttons)
+    updateOriginButtonStates()
     updateFilterButtonStates()
   }
 
@@ -339,8 +344,10 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     searchField.placeholder = activeTab == .logs
       ? currentConfig.strings["searchPlaceholder"] ?? "搜索日志..."
       : localizedNetworkSearchPlaceholder()
+    originWrapView.isHidden = activeTab != .logs
     filterWrapView.isHidden = activeTab != .logs
     updateToolbarTitles()
+    updateOriginButtonStates()
     updateFilterButtonStates()
     updateSortButton()
 
@@ -350,12 +357,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func filteredLogs(from source: [DebugLogEntry]) -> [DebugLogEntry] {
-    var result = source.filter { selectedLevels.contains($0.type) }
+    var result = source.filter {
+      selectedLevels.contains($0.type) && selectedOrigins.contains($0.origin)
+    }
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     if !query.isEmpty {
       result = result.filter {
         $0.message.localizedCaseInsensitiveContains(query) ||
-          $0.type.localizedCaseInsensitiveContains(query)
+          $0.type.localizedCaseInsensitiveContains(query) ||
+          $0.origin.localizedCaseInsensitiveContains(query) ||
+          ($0.context ?? "").localizedCaseInsensitiveContains(query)
       }
     }
     return sortAscending
@@ -408,6 +419,33 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return button
   }
 
+  private func makeOriginButton(origin: String) -> UIButton {
+    let button = UIButton(type: .system)
+    button.accessibilityIdentifier = origin
+    button.addTarget(self, action: #selector(originTapped(_:)), for: .touchUpInside)
+    button.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
+    styleOriginButton(button)
+    return button
+  }
+
+  private func styleOriginButton(_ button: UIButton) {
+    guard let origin = button.accessibilityIdentifier else {
+      return
+    }
+    button.isSelected = selectedOrigins.contains(origin)
+    var config = button.isSelected ? UIButton.Configuration.filled() : UIButton.Configuration.tinted()
+    config.title = localizedLogOriginTitle(origin)
+    config.cornerStyle = .small
+    config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 9, bottom: 4, trailing: 9)
+    config.baseForegroundColor = button.isSelected ? .white : PanelColors.mutedText
+    config.baseBackgroundColor = button.isSelected ? PanelColors.primary : UIColor(red: 0.97, green: 0.98, blue: 0.99, alpha: 1)
+    button.configuration = config
+    button.layer.borderWidth = button.isSelected ? 0 : 1.2
+    button.layer.borderColor = (button.isSelected ? PanelColors.primary : PanelColors.border).cgColor
+    button.layer.cornerRadius = 7
+    button.invalidateIntrinsicContentSize()
+  }
+
   private func styleLevelButton(_ button: UIButton) {
     guard let level = button.accessibilityIdentifier else {
       return
@@ -432,6 +470,13 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       .compactMap { $0 as? UIButton }
       .forEach { styleLevelButton($0) }
     filterWrapView.invalidateIntrinsicContentSize()
+  }
+
+  private func updateOriginButtonStates() {
+    originWrapView.arrangedSubviews
+      .compactMap { $0 as? UIButton }
+      .forEach { styleOriginButton($0) }
+    originWrapView.invalidateIntrinsicContentSize()
   }
 
   private func updateToolbarTitles() {
@@ -470,7 +515,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       title = hasSearch || selectedLevels.isEmpty
         ? strings["noSearchResult"] ?? "未找到匹配的日志"
         : strings["noLogs"] ?? "暂无日志"
-      detail = selectedLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint()
+      detail = selectedOrigins.isEmpty
+        ? localizedNoOriginHint()
+        : (selectedLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint())
     } else {
       title = hasSearch
         ? strings["noSearchResult"] ?? "未找到匹配的日志"
@@ -533,6 +580,26 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return "至少选择一个日志级别。"
   }
 
+  private func localizedNoOriginHint() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Select JS or Native to show logs."
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "JS または Native を選択してください。"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "請選擇 JS 或原生日誌。"
+    }
+    return "请选择 JS 或原生日志。"
+  }
+
+  private func localizedLogOriginTitle(_ origin: String) -> String {
+    if origin == "native" {
+      return strings["nativeLogOrigin"] ?? (currentConfig.locale.hasPrefix("zh") ? "原生" : "Native")
+    }
+    return strings["jsLogOrigin"] ?? "JS"
+  }
+
   @objc private func closeTapped() {
     dismiss(animated: true)
   }
@@ -571,6 +638,18 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore()
   }
 
+  @objc private func originTapped(_ sender: UIButton) {
+    guard let origin = sender.accessibilityIdentifier else {
+      return
+    }
+    if selectedOrigins.contains(origin) {
+      selectedOrigins.remove(origin)
+    } else {
+      selectedOrigins.insert(origin)
+    }
+    reloadFromStore()
+  }
+
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     if activeTab == .logs {
@@ -579,8 +658,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       let entry = displayedLogs[indexPath.row]
       let detail = InAppDebuggerTextDetailViewController(
-        titleText: "[\(entry.type.uppercased())] \(entry.timestamp)",
-        bodyText: entry.message
+        titleText: "[\(localizedLogOriginTitle(entry.origin))] [\(entry.type.uppercased())] \(entry.timestamp)",
+        bodyText: entry.context.map { "\($0)\n\n\(entry.message)" } ?? entry.message
       )
       navigationController?.pushViewController(detail, animated: true)
     } else {
@@ -604,8 +683,10 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
   private let cardView = UIView()
   private let accentView = UIView()
+  private let originLabel = InAppDebuggerPaddedLabel()
   private let levelLabel = InAppDebuggerPaddedLabel()
   private let timeLabel = UILabel()
+  private let contextLabel = UILabel()
   private let messageLabel = UILabel()
   private let copyButton = UIButton(type: .system)
   private var onCopy: (() -> Void)?
@@ -628,10 +709,18 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     self.onCopy = onCopy
     let tone = toneForLogLevel(entry.type)
     accentView.backgroundColor = tone.foreground
+    originLabel.text = entry.origin == "native"
+      ? strings["nativeLogOrigin"] ?? "原生"
+      : strings["jsLogOrigin"] ?? "JS"
+    originLabel.textColor = entry.origin == "native" ? .white : PanelColors.mutedText
+    originLabel.backgroundColor = entry.origin == "native" ? PanelColors.primary : PanelColors.controlBackground
     levelLabel.text = entry.type.uppercased()
     levelLabel.textColor = tone.foreground
     levelLabel.backgroundColor = tone.background
     timeLabel.text = entry.timestamp
+    let contextText = entry.context ?? ""
+    contextLabel.text = contextText
+    contextLabel.isHidden = entry.origin != "native" || contextText.isEmpty
     messageLabel.text = entry.message
     copyButton.tintColor = tone.foreground
     copyButton.accessibilityLabel = strings["copySingleA11y"] ?? "复制该条日志"
@@ -649,6 +738,10 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     cardView.layer.masksToBounds = true
     contentView.addSubview(cardView)
 
+    originLabel.font = .systemFont(ofSize: 11, weight: .bold)
+    originLabel.layer.cornerRadius = 8
+    originLabel.layer.masksToBounds = true
+
     levelLabel.font = .systemFont(ofSize: 12, weight: .bold)
     levelLabel.layer.cornerRadius = 8
     levelLabel.layer.masksToBounds = true
@@ -656,6 +749,11 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     timeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
     timeLabel.textColor = PanelColors.mutedText
     timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+    contextLabel.font = .systemFont(ofSize: 11, weight: .medium)
+    contextLabel.textColor = PanelColors.mutedText
+    contextLabel.numberOfLines = 1
+    contextLabel.lineBreakMode = .byTruncatingMiddle
 
     messageLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
     messageLabel.textColor = PanelColors.text
@@ -668,12 +766,12 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     copyButton.configuration = copyConfig
     copyButton.addTarget(self, action: #selector(copyTapped), for: .touchUpInside)
 
-    let headerStack = UIStackView(arrangedSubviews: [levelLabel, timeLabel, UIView(), copyButton])
+    let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView(), copyButton])
     headerStack.axis = .horizontal
     headerStack.alignment = .center
     headerStack.spacing = 8
 
-    let bodyStack = UIStackView(arrangedSubviews: [headerStack, messageLabel])
+    let bodyStack = UIStackView(arrangedSubviews: [headerStack, contextLabel, messageLabel])
     bodyStack.axis = .vertical
     bodyStack.spacing = 8
 

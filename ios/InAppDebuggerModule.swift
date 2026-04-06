@@ -4,6 +4,10 @@ public final class InAppDebuggerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("InAppDebugger")
 
+    OnCreate {
+      InAppDebuggerNativeLogCapture.shared.start()
+    }
+
     AsyncFunction("configure") { (rawConfig: [String: Any]) in
       let config = DebugConfig(
         enabled: rawConfig["enabled"] as? Bool ?? false,
@@ -17,6 +21,7 @@ public final class InAppDebuggerModule: Module {
           partialResult[item.key] = item.value as? String ?? "\(item.value)"
         } ?? [:]
       )
+      InAppDebuggerNativeLogCapture.shared.start()
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
 

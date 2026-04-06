@@ -2,6 +2,8 @@ import type * as React from 'react';
 
 export type DebugLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
 
+export type DebugLogOrigin = 'js' | 'native' | string;
+
 export type DebugErrorSource = 'console' | 'global' | 'promise' | 'react' | string;
 
 export type DebugNetworkKind = 'http' | 'websocket';
@@ -13,6 +15,8 @@ export type SupportedLocale = 'auto' | 'en-US' | 'zh-CN' | 'zh-TW' | 'ja';
 export type DebugLogEntry = {
   id: string;
   type: DebugLevel;
+  origin: DebugLogOrigin;
+  context?: string;
   message: string;
   timestamp: string;
   fullTimestamp: string;
@@ -61,6 +65,8 @@ export type InAppDebugStrings = {
   title: string;
   logsTab: string;
   networkTab: string;
+  jsLogOrigin: string;
+  nativeLogOrigin: string;
   close: string;
   searchPlaceholder: string;
   clear: string;

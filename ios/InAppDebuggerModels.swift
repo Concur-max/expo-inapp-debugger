@@ -14,6 +14,8 @@ struct DebugConfig {
 struct DebugLogEntry {
   let id: String
   let type: String
+  let origin: String
+  let context: String?
   let message: String
   let timestamp: String
   let fullTimestamp: String
@@ -24,15 +26,29 @@ struct DebugLogEntry {
     }
     self.id = id
     self.type = map.string("type") ?? "log"
+    self.origin = map.string("origin") ?? "js"
+    self.context = map.string("context")
     self.message = map.string("message") ?? ""
     self.timestamp = map.string("timestamp") ?? ""
     self.fullTimestamp = map.string("fullTimestamp") ?? ""
+  }
+
+  init(id: String, type: String, origin: String, context: String?, message: String, timestamp: String, fullTimestamp: String) {
+    self.id = id
+    self.type = type
+    self.origin = origin
+    self.context = context
+    self.message = message
+    self.timestamp = timestamp
+    self.fullTimestamp = fullTimestamp
   }
 
   func asDictionary() -> [String: Any] {
     [
       "id": id,
       "type": type,
+      "origin": origin,
+      "context": context as Any,
       "message": message,
       "timestamp": timestamp,
       "fullTimestamp": fullTimestamp,

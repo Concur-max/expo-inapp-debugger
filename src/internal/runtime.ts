@@ -218,6 +218,8 @@ export class DebugRuntime {
     const entry: DebugLogEntry = {
       id: createId(nowValue),
       type: level,
+      origin: 'js',
+      context: 'console',
       message: formatMessage(args),
       ...formatTimestamps(nowValue),
     };
