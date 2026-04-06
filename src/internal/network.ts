@@ -59,30 +59,33 @@ function safeStringify(value: unknown) {
   }
 }
 
-function tryRequire<T>(ids: string[]): T | null {
-  for (const id of ids) {
-    try {
-      const mod = require(id);
-      return (mod.default ?? mod) as T;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
+let cachedXHRInterceptor: XHRInterceptorModule | null | undefined;
+let cachedWebSocketInterceptor: WebSocketInterceptorModule | null | undefined;
 
 function resolveXHRInterceptor() {
-  return tryRequire<XHRInterceptorModule>([
-    'react-native/src/private/devsupport/devmenu/elementinspector/XHRInterceptor',
-    'react-native/src/private/inspector/XHRInterceptor',
-    'react-native/Libraries/Network/XHRInterceptor',
-  ]);
+  if (cachedXHRInterceptor !== undefined) {
+    return cachedXHRInterceptor;
+  }
+  try {
+    const mod = require('react-native/src/private/devsupport/devmenu/elementinspector/XHRInterceptor');
+    cachedXHRInterceptor = (mod.default ?? mod) as XHRInterceptorModule;
+  } catch {
+    cachedXHRInterceptor = null;
+  }
+  return cachedXHRInterceptor;
 }
 
 function resolveWebSocketInterceptor() {
-  return tryRequire<WebSocketInterceptorModule>([
-    'react-native/Libraries/WebSocket/WebSocketInterceptor',
-  ]);
+  if (cachedWebSocketInterceptor !== undefined) {
+    return cachedWebSocketInterceptor;
+  }
+  try {
+    const mod = require('react-native/Libraries/WebSocket/WebSocketInterceptor');
+    cachedWebSocketInterceptor = (mod.default ?? mod) as WebSocketInterceptorModule;
+  } catch {
+    cachedWebSocketInterceptor = null;
+  }
+  return cachedWebSocketInterceptor;
 }
 
 export class NetworkCollector {

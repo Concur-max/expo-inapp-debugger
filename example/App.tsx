@@ -1,7 +1,6 @@
 import * as React from 'react';
 import {
   Alert,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -87,7 +86,7 @@ export default function App() {
     <InAppDebugProvider enabled={enabled} initialVisible enableNetworkTab>
       <InAppDebugBoundary>
         <StatusBar barStyle="dark-content" />
-        <SafeAreaView style={styles.safeArea}>
+        <View style={styles.safeArea}>
           <DemoCrash shouldCrash={shouldCrash} />
           <ScrollView contentContainerStyle={styles.container}>
             <Text style={styles.kicker}>expo-inapp-debugger</Text>
@@ -136,7 +135,7 @@ export default function App() {
               />
             </View>
           </ScrollView>
-        </SafeAreaView>
+        </View>
       </InAppDebugBoundary>
     </InAppDebugProvider>
   );

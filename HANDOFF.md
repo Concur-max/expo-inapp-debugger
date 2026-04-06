@@ -2,7 +2,7 @@
 
 最后更新：2026-04-06 17:40，Asia/Shanghai。
 
-这份文档用于新对话快速接手 `/Users/xingyuyang/Projects/expo-inapp-debugger`。当前项目不是一个 git repo，`git status` 会失败；不要依赖 git diff 判断改动。
+这份文档用于新对话快速接手 `/Users/xingyuyang/Projects/expo-inapp-debugger`。
 
 ## 当前目标
 

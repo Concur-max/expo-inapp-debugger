@@ -9,7 +9,73 @@ private enum ActiveTab: Int {
   case network
 }
 
-final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UISearchBarDelegate {
+private enum ToolbarButtonStyle {
+  case primary
+  case neutral
+}
+
+private enum PanelColors {
+  static let background = UIColor(red: 0.95, green: 0.96, blue: 0.98, alpha: 1)
+  static let card = UIColor.white
+  static let controlBackground = UIColor(red: 0.91, green: 0.94, blue: 0.96, alpha: 1)
+  static let border = UIColor(red: 0.86, green: 0.88, blue: 0.91, alpha: 1)
+  static let primary = UIColor(red: 0.05, green: 0.47, blue: 0.42, alpha: 1)
+  static let text = UIColor(red: 0.07, green: 0.09, blue: 0.13, alpha: 1)
+  static let mutedText = UIColor(red: 0.40, green: 0.45, blue: 0.52, alpha: 1)
+}
+
+private struct PanelTone {
+  let foreground: UIColor
+  let background: UIColor
+}
+
+private func toneForLogLevel(_ level: String) -> PanelTone {
+  switch level.lowercased() {
+  case "error":
+    return PanelTone(
+      foreground: UIColor(red: 0.70, green: 0.13, blue: 0.10, alpha: 1),
+      background: UIColor(red: 1.00, green: 0.91, blue: 0.91, alpha: 1)
+    )
+  case "warn":
+    return PanelTone(
+      foreground: UIColor(red: 0.71, green: 0.33, blue: 0.04, alpha: 1),
+      background: UIColor(red: 1.00, green: 0.96, blue: 0.86, alpha: 1)
+    )
+  case "info":
+    return PanelTone(
+      foreground: UIColor(red: 0.14, green: 0.39, blue: 0.92, alpha: 1),
+      background: UIColor(red: 0.91, green: 0.95, blue: 1.00, alpha: 1)
+    )
+  case "debug":
+    return PanelTone(
+      foreground: UIColor(red: 0.29, green: 0.36, blue: 0.45, alpha: 1),
+      background: UIColor(red: 0.93, green: 0.95, blue: 0.98, alpha: 1)
+    )
+  default:
+    return PanelTone(
+      foreground: PanelColors.primary,
+      background: UIColor(red: 0.89, green: 0.96, blue: 0.94, alpha: 1)
+    )
+  }
+}
+
+private func toneForNetwork(_ entry: DebugNetworkEntry) -> PanelTone {
+  if entry.state == "error" || (entry.status ?? 0) >= 400 {
+    return toneForLogLevel("error")
+  }
+  if entry.state == "pending" {
+    return PanelTone(
+      foreground: UIColor(red: 0.29, green: 0.36, blue: 0.45, alpha: 1),
+      background: UIColor(red: 0.93, green: 0.95, blue: 0.98, alpha: 1)
+    )
+  }
+  if entry.state == "closed" {
+    return toneForLogLevel("warn")
+  }
+  return toneForLogLevel("log")
+}
+
+final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate {
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
   private var selectedLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
@@ -17,109 +83,139 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
   private var notificationObserver: NSObjectProtocol?
+  private var currentConfig = DebugConfig()
+
+  private lazy var closeButton: UIButton = {
+    var config = UIButton.Configuration.tinted()
+    config.image = UIImage(systemName: "xmark")
+    config.baseForegroundColor = PanelColors.text
+    config.baseBackgroundColor = PanelColors.controlBackground
+    config.cornerStyle = .small
+    let button = UIButton(configuration: config)
+    button.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+    button.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      button.widthAnchor.constraint(equalToConstant: 36),
+      button.heightAnchor.constraint(equalToConstant: 36),
+    ])
+    return button
+  }()
 
   private lazy var segmentedControl: UISegmentedControl = {
     let control = UISegmentedControl(items: ["日志", "网络"])
     control.selectedSegmentIndex = 0
+    control.backgroundColor = PanelColors.controlBackground
+    control.selectedSegmentTintColor = PanelColors.card
+    control.setTitleTextAttributes([
+      .foregroundColor: PanelColors.mutedText,
+      .font: UIFont.systemFont(ofSize: 14, weight: .semibold),
+    ], for: .normal)
+    control.setTitleTextAttributes([
+      .foregroundColor: PanelColors.text,
+      .font: UIFont.systemFont(ofSize: 14, weight: .bold),
+    ], for: .selected)
     control.addTarget(self, action: #selector(handleSegmentChange(_:)), for: .valueChanged)
     return control
   }()
 
-  private lazy var searchBar: UISearchBar = {
-    let view = UISearchBar()
-    view.delegate = self
-    view.searchBarStyle = .minimal
-    return view
-  }()
-
-  private lazy var copyVisibleButton: UIButton = {
-    var config = UIButton.Configuration.filled()
-    config.title = "复制"
-    let button = UIButton(configuration: config)
-    button.addTarget(self, action: #selector(copyVisibleTapped), for: .touchUpInside)
-    return button
+  private lazy var searchField: UISearchTextField = {
+    let field = UISearchTextField()
+    field.font = .systemFont(ofSize: 15, weight: .regular)
+    field.textColor = PanelColors.text
+    field.tintColor = PanelColors.primary
+    field.backgroundColor = PanelColors.card
+    field.clearButtonMode = .whileEditing
+    field.layer.cornerRadius = 8
+    field.layer.borderColor = PanelColors.border.cgColor
+    field.layer.borderWidth = 1
+    field.addTarget(self, action: #selector(searchTextChanged(_:)), for: .editingChanged)
+    return field
   }()
 
   private lazy var clearButton: UIButton = {
-    var config = UIButton.Configuration.tinted()
-    config.title = "清空"
-    let button = UIButton(configuration: config)
+    let button = makeToolbarButton(title: "清空", imageName: nil, style: .neutral)
     button.addTarget(self, action: #selector(clearTapped), for: .touchUpInside)
+    button.setContentHuggingPriority(.required, for: .horizontal)
+    button.setContentCompressionResistancePriority(.required, for: .horizontal)
     return button
   }()
 
-  private lazy var filterScrollView = UIScrollView()
-  private lazy var filterStackView: UIStackView = {
-    let stack = UIStackView()
-    stack.axis = .horizontal
-    stack.spacing = 8
-    return stack
-  }()
+  private let filterWrapView = InAppDebuggerWrapView()
 
-  private lazy var sortStackView: UIStackView = {
-    let asc = makeActionButton(title: "时间升序", action: #selector(sortAscTapped))
-    let desc = makeActionButton(title: "时间倒序", action: #selector(sortDescTapped))
-    let stack = UIStackView(arrangedSubviews: [UIView(), asc, desc])
-    stack.spacing = 8
-    return stack
+  private lazy var sortToggleButton: UIButton = {
+    var config = UIButton.Configuration.tinted()
+    config.title = "时间倒序"
+    config.image = UIImage(systemName: "arrow.down")
+    config.imagePadding = 4
+    config.cornerStyle = .small
+    config.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 9, bottom: 5, trailing: 9)
+    config.baseForegroundColor = PanelColors.primary
+    config.baseBackgroundColor = PanelColors.controlBackground
+    let button = UIButton(configuration: config)
+    button.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
+    button.addTarget(self, action: #selector(sortToggleTapped), for: .touchUpInside)
+    button.setContentHuggingPriority(.required, for: .horizontal)
+    button.setContentCompressionResistancePriority(.required, for: .horizontal)
+    return button
   }()
 
   private lazy var tableView: UITableView = {
     let table = UITableView(frame: .zero, style: .plain)
-    table.backgroundColor = UIColor(red: 0.96, green: 0.95, blue: 0.92, alpha: 1)
+    table.backgroundColor = PanelColors.background
     table.separatorStyle = .none
     table.delegate = self
-    table.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+    table.rowHeight = UITableView.automaticDimension
+    table.estimatedRowHeight = 108
+    table.keyboardDismissMode = .onDrag
+    table.contentInset = UIEdgeInsets(top: 4, left: 0, bottom: 18, right: 0)
+    table.register(InAppDebuggerLogCell.self, forCellReuseIdentifier: InAppDebuggerLogCell.reuseIdentifier)
+    table.register(InAppDebuggerNetworkCell.self, forCellReuseIdentifier: InAppDebuggerNetworkCell.reuseIdentifier)
     return table
   }()
+
+  private let emptyStateView = InAppDebuggerEmptyStateView()
 
   private lazy var dataSource = UITableViewDiffableDataSource<PanelSection, String>(
     tableView: tableView
   ) { [weak self] tableView, indexPath, identifier in
     guard let self else { return nil }
-    let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
-    cell.selectionStyle = .none
-    cell.backgroundColor = .clear
-    cell.contentView.backgroundColor = .white
-    cell.contentView.layer.cornerRadius = 14
-    cell.contentView.layer.masksToBounds = true
 
-    if self.activeTab == .logs, let entry = self.displayedLogs.first(where: { $0.id == identifier }) {
-      cell.textLabel?.text = "[\(entry.type.uppercased())] \(entry.timestamp)"
-      cell.textLabel?.font = UIFont.systemFont(ofSize: 14, weight: .bold)
-      cell.detailTextLabel?.text = entry.message
-      cell.detailTextLabel?.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-      cell.detailTextLabel?.numberOfLines = 3
-      let copyButton = UIButton(type: .system)
-      copyButton.setImage(UIImage(systemName: "doc.on.doc"), for: .normal)
-      copyButton.addAction(UIAction { [weak self] _ in
+    if self.activeTab == .logs {
+      guard let entry = self.displayedLogs.first(where: { $0.id == identifier }) else {
+        return UITableViewCell()
+      }
+      let cell = tableView.dequeueReusableCell(
+        withIdentifier: InAppDebuggerLogCell.reuseIdentifier,
+        for: indexPath
+      ) as? InAppDebuggerLogCell
+      cell?.configure(entry: entry, strings: self.strings) { [weak self] in
         self?.copy(text: entry.message, successKey: "copySingleSuccess")
-      }, for: .touchUpInside)
-      cell.accessoryView = copyButton
-    } else if let entry = self.displayedNetwork.first(where: { $0.id == identifier }) {
-      cell.textLabel?.text = "\(entry.method)  \(entry.status.map(String.init) ?? "-")  \(entry.state.uppercased())"
-      cell.textLabel?.font = UIFont.systemFont(ofSize: 14, weight: .bold)
-      cell.detailTextLabel?.text = "\(entry.url)\n\((strings["duration"] ?? "耗时")): \(entry.durationMs ?? 0)ms"
-      cell.detailTextLabel?.numberOfLines = 3
-      cell.accessoryType = .disclosureIndicator
+      }
+      return cell
     }
 
+    guard let entry = self.displayedNetwork.first(where: { $0.id == identifier }) else {
+      return UITableViewCell()
+    }
+    let cell = tableView.dequeueReusableCell(
+      withIdentifier: InAppDebuggerNetworkCell.reuseIdentifier,
+      for: indexPath
+    ) as? InAppDebuggerNetworkCell
+    cell?.configure(entry: entry, strings: self.strings)
     return cell
   }
 
   private var strings: [String: String] {
-    InAppDebuggerStore.shared.currentConfig().strings
+    currentConfig.strings
   }
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    view.backgroundColor = UIColor(red: 0.96, green: 0.95, blue: 0.92, alpha: 1)
-    navigationItem.rightBarButtonItem = UIBarButtonItem(
-      barButtonSystemItem: .close,
-      target: self,
-      action: #selector(closeTapped)
-    )
+    currentConfig = InAppDebuggerStore.shared.currentConfig()
+    view.backgroundColor = PanelColors.background
+    navigationItem.largeTitleDisplayMode = .never
 
+    configureNavigationBar()
     layoutUI()
     rebuildFilterButtons()
     reloadFromStore()
@@ -133,60 +229,80 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
   }
 
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    configureNavigationBar()
+  }
+
   deinit {
     if let notificationObserver {
       NotificationCenter.default.removeObserver(notificationObserver)
     }
   }
 
-  override func viewDidLayoutSubviews() {
-    super.viewDidLayoutSubviews()
+  private func configureNavigationBar() {
     title = strings["title"] ?? "调试面板"
+    closeButton.accessibilityLabel = strings["close"] ?? "关闭"
+    navigationItem.rightBarButtonItem = UIBarButtonItem(customView: closeButton)
+
+    guard let navigationBar = navigationController?.navigationBar else {
+      return
+    }
+    navigationController?.navigationBar.prefersLargeTitles = false
+    let appearance = UINavigationBarAppearance()
+    appearance.configureWithOpaqueBackground()
+    appearance.backgroundColor = PanelColors.background
+    appearance.shadowColor = .clear
+    appearance.titleTextAttributes = [
+      .foregroundColor: PanelColors.text,
+      .font: UIFont.systemFont(ofSize: 18, weight: .bold),
+    ]
+    navigationBar.standardAppearance = appearance
+    navigationBar.scrollEdgeAppearance = appearance
+    navigationBar.compactAppearance = appearance
+    navigationBar.tintColor = PanelColors.primary
   }
 
   private func layoutUI() {
-    let actionRow = UIStackView(arrangedSubviews: [copyVisibleButton, clearButton])
-    actionRow.axis = .horizontal
-    actionRow.spacing = 8
+    let searchRow = UIStackView(arrangedSubviews: [searchField, clearButton])
+    searchRow.axis = .horizontal
+    searchRow.alignment = .center
+    searchRow.spacing = 8
 
-    filterScrollView.showsHorizontalScrollIndicator = false
-    filterScrollView.addSubview(filterStackView)
+    let sortRow = UIStackView(arrangedSubviews: [UIView(), sortToggleButton])
+    sortRow.axis = .horizontal
+    sortRow.alignment = .center
+    sortRow.spacing = 8
 
-    let stack = UIStackView(arrangedSubviews: [segmentedControl, searchBar, actionRow, filterScrollView, sortStackView, tableView])
+    let filterGroup = UIStackView(arrangedSubviews: [filterWrapView, sortRow])
+    filterGroup.axis = .vertical
+    filterGroup.alignment = .fill
+    filterGroup.spacing = 6
+
+    let stack = UIStackView(arrangedSubviews: [segmentedControl, searchRow, filterGroup, tableView])
     stack.axis = .vertical
     stack.spacing = 10
     view.addSubview(stack)
     stack.translatesAutoresizingMaskIntoConstraints = false
-    filterStackView.translatesAutoresizingMaskIntoConstraints = false
-    tableView.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
-      stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-      stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-      stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-      stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-      filterScrollView.heightAnchor.constraint(equalToConstant: 38),
+      stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+      stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+      stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+      stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
 
-      filterStackView.topAnchor.constraint(equalTo: filterScrollView.topAnchor),
-      filterStackView.bottomAnchor.constraint(equalTo: filterScrollView.bottomAnchor),
-      filterStackView.leadingAnchor.constraint(equalTo: filterScrollView.leadingAnchor),
-      filterStackView.trailingAnchor.constraint(equalTo: filterScrollView.trailingAnchor),
-      filterStackView.heightAnchor.constraint(equalTo: filterScrollView.heightAnchor),
-
-      tableView.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
+      segmentedControl.heightAnchor.constraint(equalToConstant: 36),
+      searchField.heightAnchor.constraint(equalToConstant: 38),
+      clearButton.heightAnchor.constraint(equalToConstant: 34),
+      clearButton.widthAnchor.constraint(equalToConstant: 58),
+      sortToggleButton.heightAnchor.constraint(equalToConstant: 30),
     ])
   }
 
   private func rebuildFilterButtons() {
-    filterStackView.arrangedSubviews.forEach {
-      filterStackView.removeArrangedSubview($0)
-      $0.removeFromSuperview()
-    }
-    ["log", "info", "warn", "error", "debug"].forEach { level in
-      let button = makeActionButton(title: level.uppercased(), action: #selector(levelTapped(_:)))
-      button.accessibilityIdentifier = level
-      filterStackView.addArrangedSubview(button)
-    }
+    let buttons = ["log", "info", "warn", "error", "debug"].map { makeLevelButton(level: $0) }
+    filterWrapView.setArrangedSubviews(buttons)
+    updateFilterButtonStates()
   }
 
   private func applySnapshot() {
@@ -197,55 +313,224 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     } else {
       snapshot.appendItems(displayedNetwork.map(\.id))
     }
-    dataSource.apply(snapshot, animatingDifferences: false)
+
+    updateEmptyState()
+    if #available(iOS 15.0, *) {
+      dataSource.applySnapshotUsingReloadData(snapshot)
+    } else {
+      dataSource.apply(snapshot, animatingDifferences: false)
+    }
   }
 
   private func reloadFromStore() {
     let state = InAppDebuggerStore.shared.snapshotState()
-    navigationItem.title = state.0.strings["title"] ?? "调试面板"
-    searchBar.placeholder = state.0.strings["searchPlaceholder"] ?? "搜索日志..."
-    copyVisibleButton.configuration?.title = state.0.strings["copyVisibleA11y"] ?? "复制当前显示的日志"
-    clearButton.configuration?.title = state.0.strings["clear"] ?? "清空"
-    sortStackView.arrangedSubviews.compactMap { $0 as? UIButton }.enumerated().forEach { index, button in
-      button.configuration?.title = index == 0 ? state.0.strings["sortAsc"] ?? "时间升序" : state.0.strings["sortDesc"] ?? "时间倒序"
+    currentConfig = state.0
+
+    if !currentConfig.enableNetworkTab && activeTab == .network {
+      activeTab = .logs
     }
-    segmentedControl.setTitle(state.0.strings["logsTab"] ?? "日志", forSegmentAt: 0)
-    segmentedControl.setTitle(state.0.strings["networkTab"] ?? "网络", forSegmentAt: 1)
+
+    configureNavigationBar()
+    segmentedControl.selectedSegmentIndex = activeTab.rawValue
+    segmentedControl.setTitle(currentConfig.strings["logsTab"] ?? "日志", forSegmentAt: 0)
+    segmentedControl.setTitle(currentConfig.strings["networkTab"] ?? "网络", forSegmentAt: 1)
+    segmentedControl.setEnabled(currentConfig.enableNetworkTab, forSegmentAt: 1)
+
+    searchField.placeholder = activeTab == .logs
+      ? currentConfig.strings["searchPlaceholder"] ?? "搜索日志..."
+      : localizedNetworkSearchPlaceholder()
+    filterWrapView.isHidden = activeTab != .logs
+    updateToolbarTitles()
+    updateFilterButtonStates()
+    updateSortButton()
 
     displayedLogs = filteredLogs(from: state.1)
     displayedNetwork = filteredNetwork(from: state.3)
-    tableView.reloadData()
     applySnapshot()
   }
 
   private func filteredLogs(from source: [DebugLogEntry]) -> [DebugLogEntry] {
     var result = source.filter { selectedLevels.contains($0.type) }
-    if !searchText.isEmpty {
+    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !query.isEmpty {
       result = result.filter {
-        $0.message.localizedCaseInsensitiveContains(searchText) ||
-          $0.type.localizedCaseInsensitiveContains(searchText)
+        $0.message.localizedCaseInsensitiveContains(query) ||
+          $0.type.localizedCaseInsensitiveContains(query)
       }
     }
-    return sortAscending ? result.sorted(by: { $0.fullTimestamp < $1.fullTimestamp }) : result.sorted(by: { $0.fullTimestamp > $1.fullTimestamp })
+    return sortAscending
+      ? result.sorted(by: { $0.fullTimestamp < $1.fullTimestamp })
+      : result.sorted(by: { $0.fullTimestamp > $1.fullTimestamp })
   }
 
   private func filteredNetwork(from source: [DebugNetworkEntry]) -> [DebugNetworkEntry] {
-    guard !searchText.isEmpty else {
-      return source
+    var result = source
+    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !query.isEmpty {
+      result = result.filter {
+        $0.url.localizedCaseInsensitiveContains(query) ||
+          $0.method.localizedCaseInsensitiveContains(query) ||
+          $0.state.localizedCaseInsensitiveContains(query)
+      }
     }
-    return source.filter {
-      $0.url.localizedCaseInsensitiveContains(searchText) ||
-        $0.method.localizedCaseInsensitiveContains(searchText) ||
-        $0.state.localizedCaseInsensitiveContains(searchText)
-    }
+    return sortAscending
+      ? result.sorted(by: { $0.updatedAt < $1.updatedAt })
+      : result.sorted(by: { $0.updatedAt > $1.updatedAt })
   }
 
-  private func makeActionButton(title: String, action: Selector) -> UIButton {
-    var config = UIButton.Configuration.tinted()
+  private func makeToolbarButton(title: String, imageName: String?, style: ToolbarButtonStyle) -> UIButton {
+    var config = style == .primary ? UIButton.Configuration.filled() : UIButton.Configuration.tinted()
     config.title = title
+    config.image = imageName.flatMap { UIImage(systemName: $0) }
+    config.imagePadding = imageName == nil ? 0 : 6
+    config.cornerStyle = .small
+    config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10)
+    switch style {
+    case .primary:
+      config.baseForegroundColor = .white
+      config.baseBackgroundColor = PanelColors.primary
+    case .neutral:
+      config.baseForegroundColor = PanelColors.primary
+      config.baseBackgroundColor = PanelColors.controlBackground
+    }
+
     let button = UIButton(configuration: config)
-    button.addTarget(self, action: action, for: .touchUpInside)
+    button.titleLabel?.font = .systemFont(ofSize: 13, weight: .bold)
     return button
+  }
+
+  private func makeLevelButton(level: String) -> UIButton {
+    let button = UIButton(type: .system)
+    button.accessibilityIdentifier = level
+    button.addTarget(self, action: #selector(levelTapped(_:)), for: .touchUpInside)
+    button.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
+    styleLevelButton(button)
+    return button
+  }
+
+  private func styleLevelButton(_ button: UIButton) {
+    guard let level = button.accessibilityIdentifier else {
+      return
+    }
+    button.isSelected = selectedLevels.contains(level)
+    let tone = toneForLogLevel(level)
+    var config = button.isSelected ? UIButton.Configuration.filled() : UIButton.Configuration.tinted()
+    config.title = level.uppercased()
+    config.cornerStyle = .small
+    config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 9, bottom: 4, trailing: 9)
+    config.baseForegroundColor = button.isSelected ? .white : PanelColors.mutedText
+    config.baseBackgroundColor = button.isSelected ? tone.foreground : UIColor(red: 0.97, green: 0.98, blue: 0.99, alpha: 1)
+    button.configuration = config
+    button.layer.borderWidth = button.isSelected ? 0 : 1.2
+    button.layer.borderColor = (button.isSelected ? tone.foreground : PanelColors.border).cgColor
+    button.layer.cornerRadius = 7
+    button.invalidateIntrinsicContentSize()
+  }
+
+  private func updateFilterButtonStates() {
+    filterWrapView.arrangedSubviews
+      .compactMap { $0 as? UIButton }
+      .forEach { styleLevelButton($0) }
+    filterWrapView.invalidateIntrinsicContentSize()
+  }
+
+  private func updateToolbarTitles() {
+    setButtonTitle(clearButton, title: strings["clear"] ?? "清空")
+    clearButton.accessibilityLabel = strings["clear"] ?? "清空"
+  }
+
+  private func updateSortButton() {
+    guard var config = sortToggleButton.configuration else {
+      return
+    }
+    config.title = localizedSortTitle(ascending: sortAscending)
+    config.image = UIImage(systemName: sortAscending ? "arrow.up" : "arrow.down")
+    sortToggleButton.configuration = config
+  }
+
+  private func setButtonTitle(_ button: UIButton, title: String) {
+    guard var config = button.configuration else {
+      return
+    }
+    config.title = title
+    button.configuration = config
+  }
+
+  private func updateEmptyState() {
+    let isEmpty = activeTab == .logs ? displayedLogs.isEmpty : displayedNetwork.isEmpty
+    guard isEmpty else {
+      tableView.backgroundView = nil
+      return
+    }
+
+    let hasSearch = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let title: String
+    let detail: String
+    if activeTab == .logs {
+      title = hasSearch || selectedLevels.isEmpty
+        ? strings["noSearchResult"] ?? "未找到匹配的日志"
+        : strings["noLogs"] ?? "暂无日志"
+      detail = selectedLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint()
+    } else {
+      title = hasSearch
+        ? strings["noSearchResult"] ?? "未找到匹配的日志"
+        : strings["noNetworkRequests"] ?? "暂无网络请求"
+      detail = localizedEmptyHint()
+    }
+    emptyStateView.configure(title: title, detail: detail)
+    tableView.backgroundView = emptyStateView
+  }
+
+  private func localizedSortTitle(ascending: Bool) -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return ascending ? "Time Asc" : "Time Desc"
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return ascending ? "時間昇順" : "時間降順"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return ascending ? "時間升序" : "時間倒序"
+    }
+    return ascending ? "时间升序" : "时间倒序"
+  }
+
+  private func localizedNetworkSearchPlaceholder() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Search network..."
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "通信を検索..."
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "搜尋網路請求..."
+    }
+    return "搜索网络请求..."
+  }
+
+  private func localizedEmptyHint() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Try another keyword or generate new events."
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "別のキーワードを試すか、新しいイベントを生成してください。"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "換個關鍵字，或產生新的事件。"
+    }
+    return "换个关键词，或生成新的调试事件。"
+  }
+
+  private func localizedNoLevelHint() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Select at least one level to show logs."
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "少なくとも 1 つのレベルを選択してください。"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "至少選擇一個級別。"
+    }
+    return "至少选择一个日志级别。"
   }
 
   @objc private func closeTapped() {
@@ -254,30 +539,23 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   @objc private func handleSegmentChange(_ sender: UISegmentedControl) {
     activeTab = ActiveTab(rawValue: sender.selectedSegmentIndex) ?? .logs
+    if activeTab == .network && !currentConfig.enableNetworkTab {
+      activeTab = .logs
+    }
     reloadFromStore()
   }
 
-  @objc private func copyVisibleTapped() {
-    if activeTab == .logs {
-      let text = displayedLogs.map { "[\($0.type.uppercased())] \($0.timestamp) \($0.message)" }.joined(separator: "\n")
-      copy(text: text, successKey: "copyVisibleSuccess")
-    } else {
-      let text = displayedNetwork.map { "\($0.method) \($0.url) \($0.status.map(String.init) ?? "-") \($0.state)" }.joined(separator: "\n")
-      copy(text: text, successKey: "copyVisibleSuccess")
-    }
+  @objc private func searchTextChanged(_ sender: UITextField) {
+    searchText = sender.text ?? ""
+    reloadFromStore()
   }
 
   @objc private func clearTapped() {
     InAppDebuggerStore.shared.clear(kind: activeTab == .logs ? "logs" : "network")
   }
 
-  @objc private func sortAscTapped() {
-    sortAscending = true
-    reloadFromStore()
-  }
-
-  @objc private func sortDescTapped() {
-    sortAscending = false
+  @objc private func sortToggleTapped() {
+    sortAscending.toggle()
     reloadFromStore()
   }
 
@@ -293,17 +571,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore()
   }
 
-  func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
-    self.searchText = searchText
-    reloadFromStore()
-  }
-
-  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    activeTab == .logs ? displayedLogs.count : displayedNetwork.count
-  }
-
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    tableView.deselectRow(at: indexPath, animated: true)
     if activeTab == .logs {
+      guard displayedLogs.indices.contains(indexPath.row) else {
+        return
+      }
       let entry = displayedLogs[indexPath.row]
       let detail = InAppDebuggerTextDetailViewController(
         titleText: "[\(entry.type.uppercased())] \(entry.timestamp)",
@@ -311,6 +584,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       )
       navigationController?.pushViewController(detail, animated: true)
     } else {
+      guard displayedNetwork.indices.contains(indexPath.row) else {
+        return
+      }
       let entry = displayedNetwork[indexPath.row]
       let detail = InAppDebuggerNetworkDetailViewController(entry: entry, strings: strings)
       navigationController?.pushViewController(detail, animated: true)
@@ -320,6 +596,347 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private func copy(text: String, successKey: String) {
     UIPasteboard.general.string = text
     showToast(message: strings[successKey] ?? "已复制")
+  }
+}
+
+private final class InAppDebuggerLogCell: UITableViewCell {
+  static let reuseIdentifier = "InAppDebuggerLogCell"
+
+  private let cardView = UIView()
+  private let accentView = UIView()
+  private let levelLabel = InAppDebuggerPaddedLabel()
+  private let timeLabel = UILabel()
+  private let messageLabel = UILabel()
+  private let copyButton = UIButton(type: .system)
+  private var onCopy: (() -> Void)?
+
+  override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    super.init(style: style, reuseIdentifier: reuseIdentifier)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  override func prepareForReuse() {
+    super.prepareForReuse()
+    onCopy = nil
+  }
+
+  func configure(entry: DebugLogEntry, strings: [String: String], onCopy: @escaping () -> Void) {
+    self.onCopy = onCopy
+    let tone = toneForLogLevel(entry.type)
+    accentView.backgroundColor = tone.foreground
+    levelLabel.text = entry.type.uppercased()
+    levelLabel.textColor = tone.foreground
+    levelLabel.backgroundColor = tone.background
+    timeLabel.text = entry.timestamp
+    messageLabel.text = entry.message
+    copyButton.tintColor = tone.foreground
+    copyButton.accessibilityLabel = strings["copySingleA11y"] ?? "复制该条日志"
+  }
+
+  private func buildUI() {
+    backgroundColor = .clear
+    contentView.backgroundColor = .clear
+    selectionStyle = .none
+
+    cardView.backgroundColor = PanelColors.card
+    cardView.layer.cornerRadius = 8
+    cardView.layer.borderWidth = 1
+    cardView.layer.borderColor = PanelColors.border.cgColor
+    cardView.layer.masksToBounds = true
+    contentView.addSubview(cardView)
+
+    levelLabel.font = .systemFont(ofSize: 12, weight: .bold)
+    levelLabel.layer.cornerRadius = 8
+    levelLabel.layer.masksToBounds = true
+
+    timeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    timeLabel.textColor = PanelColors.mutedText
+    timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+    messageLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+    messageLabel.textColor = PanelColors.text
+    messageLabel.numberOfLines = 4
+    messageLabel.lineBreakMode = .byTruncatingTail
+
+    var copyConfig = UIButton.Configuration.plain()
+    copyConfig.image = UIImage(systemName: "doc.on.doc")
+    copyConfig.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4)
+    copyButton.configuration = copyConfig
+    copyButton.addTarget(self, action: #selector(copyTapped), for: .touchUpInside)
+
+    let headerStack = UIStackView(arrangedSubviews: [levelLabel, timeLabel, UIView(), copyButton])
+    headerStack.axis = .horizontal
+    headerStack.alignment = .center
+    headerStack.spacing = 8
+
+    let bodyStack = UIStackView(arrangedSubviews: [headerStack, messageLabel])
+    bodyStack.axis = .vertical
+    bodyStack.spacing = 8
+
+    cardView.addSubview(accentView)
+    cardView.addSubview(bodyStack)
+
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    accentView.translatesAutoresizingMaskIntoConstraints = false
+    bodyStack.translatesAutoresizingMaskIntoConstraints = false
+    copyButton.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5),
+      cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+      cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+      cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5),
+
+      accentView.topAnchor.constraint(equalTo: cardView.topAnchor),
+      accentView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor),
+      accentView.bottomAnchor.constraint(equalTo: cardView.bottomAnchor),
+      accentView.widthAnchor.constraint(equalToConstant: 4),
+
+      bodyStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+      bodyStack.leadingAnchor.constraint(equalTo: accentView.trailingAnchor, constant: 12),
+      bodyStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+      bodyStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
+
+      copyButton.widthAnchor.constraint(equalToConstant: 30),
+      copyButton.heightAnchor.constraint(equalToConstant: 30),
+    ])
+  }
+
+  @objc private func copyTapped() {
+    onCopy?()
+  }
+}
+
+private final class InAppDebuggerNetworkCell: UITableViewCell {
+  static let reuseIdentifier = "InAppDebuggerNetworkCell"
+
+  private let cardView = UIView()
+  private let accentView = UIView()
+  private let methodLabel = InAppDebuggerPaddedLabel()
+  private let statusLabel = InAppDebuggerPaddedLabel()
+  private let stateLabel = UILabel()
+  private let urlLabel = UILabel()
+  private let durationLabel = UILabel()
+  private let chevronView = UIImageView(image: UIImage(systemName: "chevron.right"))
+
+  override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    super.init(style: style, reuseIdentifier: reuseIdentifier)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(entry: DebugNetworkEntry, strings: [String: String]) {
+    let tone = toneForNetwork(entry)
+    accentView.backgroundColor = tone.foreground
+    methodLabel.text = entry.method.uppercased()
+    methodLabel.textColor = PanelColors.primary
+    methodLabel.backgroundColor = UIColor(red: 0.89, green: 0.96, blue: 0.94, alpha: 1)
+    statusLabel.text = entry.status.map(String.init) ?? entry.kind.uppercased()
+    statusLabel.textColor = tone.foreground
+    statusLabel.backgroundColor = tone.background
+    stateLabel.text = entry.state.uppercased()
+    urlLabel.text = entry.url
+    durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-")"
+  }
+
+  private func buildUI() {
+    backgroundColor = .clear
+    contentView.backgroundColor = .clear
+    selectionStyle = .none
+
+    cardView.backgroundColor = PanelColors.card
+    cardView.layer.cornerRadius = 8
+    cardView.layer.borderWidth = 1
+    cardView.layer.borderColor = PanelColors.border.cgColor
+    cardView.layer.masksToBounds = true
+    contentView.addSubview(cardView)
+
+    methodLabel.font = .systemFont(ofSize: 12, weight: .bold)
+    methodLabel.layer.cornerRadius = 8
+    methodLabel.layer.masksToBounds = true
+
+    statusLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+    statusLabel.layer.cornerRadius = 8
+    statusLabel.layer.masksToBounds = true
+
+    stateLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+    stateLabel.textColor = PanelColors.mutedText
+
+    urlLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+    urlLabel.textColor = PanelColors.text
+    urlLabel.numberOfLines = 2
+    urlLabel.lineBreakMode = .byTruncatingMiddle
+
+    durationLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    durationLabel.textColor = PanelColors.mutedText
+
+    chevronView.tintColor = PanelColors.mutedText
+    chevronView.setContentHuggingPriority(.required, for: .horizontal)
+
+    let headerStack = UIStackView(arrangedSubviews: [methodLabel, statusLabel, stateLabel, UIView(), chevronView])
+    headerStack.axis = .horizontal
+    headerStack.alignment = .center
+    headerStack.spacing = 8
+
+    let bodyStack = UIStackView(arrangedSubviews: [headerStack, urlLabel, durationLabel])
+    bodyStack.axis = .vertical
+    bodyStack.spacing = 8
+
+    cardView.addSubview(accentView)
+    cardView.addSubview(bodyStack)
+
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    accentView.translatesAutoresizingMaskIntoConstraints = false
+    bodyStack.translatesAutoresizingMaskIntoConstraints = false
+    chevronView.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5),
+      cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+      cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+      cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -5),
+
+      accentView.topAnchor.constraint(equalTo: cardView.topAnchor),
+      accentView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor),
+      accentView.bottomAnchor.constraint(equalTo: cardView.bottomAnchor),
+      accentView.widthAnchor.constraint(equalToConstant: 4),
+
+      bodyStack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+      bodyStack.leadingAnchor.constraint(equalTo: accentView.trailingAnchor, constant: 12),
+      bodyStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+      bodyStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
+
+      chevronView.widthAnchor.constraint(equalToConstant: 10),
+      chevronView.heightAnchor.constraint(equalToConstant: 16),
+    ])
+  }
+}
+
+private final class InAppDebuggerEmptyStateView: UIView {
+  private let titleLabel = UILabel()
+  private let detailLabel = UILabel()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(title: String, detail: String) {
+    titleLabel.text = title
+    detailLabel.text = detail
+  }
+
+  private func buildUI() {
+    titleLabel.font = .systemFont(ofSize: 16, weight: .bold)
+    titleLabel.textColor = PanelColors.text
+    titleLabel.textAlignment = .center
+
+    detailLabel.font = .systemFont(ofSize: 13, weight: .regular)
+    detailLabel.textColor = PanelColors.mutedText
+    detailLabel.textAlignment = .center
+    detailLabel.numberOfLines = 0
+
+    let stack = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
+    stack.axis = .vertical
+    stack.alignment = .center
+    stack.spacing = 8
+    addSubview(stack)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+      stack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -40),
+      stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+      stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+    ])
+  }
+}
+
+private final class InAppDebuggerWrapView: UIView {
+  private(set) var arrangedSubviews: [UIView] = []
+  private let itemSpacing: CGFloat = 6
+  private let rowSpacing: CGFloat = 6
+  private var lastMeasuredWidth: CGFloat = 0
+
+  func setArrangedSubviews(_ views: [UIView]) {
+    arrangedSubviews.forEach { $0.removeFromSuperview() }
+    arrangedSubviews = views
+    arrangedSubviews.forEach { addSubview($0) }
+    setNeedsLayout()
+    invalidateIntrinsicContentSize()
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    if abs(bounds.width - lastMeasuredWidth) > 0.5 {
+      lastMeasuredWidth = bounds.width
+      invalidateIntrinsicContentSize()
+    }
+    _ = layoutItems(for: bounds.width, updateFrames: true)
+  }
+
+  override var intrinsicContentSize: CGSize {
+    let width = bounds.width > 0 ? bounds.width : UIScreen.main.bounds.width - 28
+    return CGSize(width: UIView.noIntrinsicMetric, height: layoutItems(for: width, updateFrames: false))
+  }
+
+  private func layoutItems(for width: CGFloat, updateFrames: Bool) -> CGFloat {
+    guard !arrangedSubviews.isEmpty else {
+      return 0
+    }
+
+    let availableWidth = max(width, 1)
+    var x: CGFloat = 0
+    var y: CGFloat = 0
+    var rowHeight: CGFloat = 0
+
+    arrangedSubviews.forEach { view in
+      let fittingSize = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+      let itemWidth = min(ceil(fittingSize.width), availableWidth)
+      let itemHeight = ceil(max(fittingSize.height, 28))
+
+      if x > 0, x + itemWidth > availableWidth {
+        x = 0
+        y += rowHeight + rowSpacing
+        rowHeight = 0
+      }
+
+      if updateFrames {
+        view.frame = CGRect(x: x, y: y, width: itemWidth, height: itemHeight)
+      }
+
+      x += itemWidth + itemSpacing
+      rowHeight = max(rowHeight, itemHeight)
+    }
+
+    return y + rowHeight
+  }
+}
+
+private final class InAppDebuggerPaddedLabel: UILabel {
+  var contentInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+
+  override var intrinsicContentSize: CGSize {
+    let size = super.intrinsicContentSize
+    return CGSize(
+      width: size.width + contentInsets.left + contentInsets.right,
+      height: size.height + contentInsets.top + contentInsets.bottom
+    )
+  }
+
+  override func drawText(in rect: CGRect) {
+    super.drawText(in: rect.inset(by: contentInsets))
   }
 }
 
@@ -338,19 +955,38 @@ final class InAppDebuggerTextDetailViewController: UIViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    view.backgroundColor = .systemBackground
+    view.backgroundColor = PanelColors.background
+    navigationItem.rightBarButtonItem = UIBarButtonItem(
+      image: UIImage(systemName: "doc.on.doc"),
+      style: .plain,
+      target: self,
+      action: #selector(copyTapped)
+    )
+
     let textView = UITextView()
     textView.text = bodyText
     textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+    textView.textColor = PanelColors.text
+    textView.backgroundColor = PanelColors.card
     textView.isEditable = false
+    textView.alwaysBounceVertical = true
+    textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+    textView.layer.cornerRadius = 8
+    textView.layer.borderColor = PanelColors.border.cgColor
+    textView.layer.borderWidth = 1
     view.addSubview(textView)
     textView.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-      textView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+      textView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
     ])
+  }
+
+  @objc private func copyTapped() {
+    UIPasteboard.general.string = bodyText
+    showToast(message: "已复制")
   }
 }
 
@@ -371,12 +1007,12 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    view.backgroundColor = .systemBackground
+    view.backgroundColor = PanelColors.background
 
     let scrollView = UIScrollView()
     let stack = UIStackView()
     stack.axis = .vertical
-    stack.spacing = 12
+    stack.spacing = 10
     view.addSubview(scrollView)
     scrollView.addSubview(stack)
     scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -388,11 +1024,11 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-      stack.topAnchor.constraint(equalTo: scrollView.topAnchor, constant: 12),
-      stack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 12),
-      stack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -12),
-      stack.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -12),
-      stack.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -24),
+      stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 12),
+      stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 14),
+      stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -14),
+      stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -12),
+      stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -28),
     ])
 
     let requestHeaders = entry.requestHeaders
@@ -403,47 +1039,54 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       .map { "\($0.key): \($0.value)" }
       .joined(separator: "\n")
       .ifEmpty("-")
-    let durationText = "\(entry.durationMs ?? 0)ms"
+    let durationText = entry.durationMs.map { "\($0)ms" } ?? "-"
     let noRequestBodyText = strings["noRequestBody"] ?? "无请求体"
     let noResponseBodyText = strings["noResponseBody"] ?? "无响应体"
     let noMessagesText = strings["noMessages"] ?? "暂无消息"
 
-    let sections: [(title: String, body: String)] = [
-      (title: strings["method"] ?? "方法", body: entry.method),
-      (title: strings["status"] ?? "状态码", body: entry.status.map(String.init) ?? "-"),
-      (title: strings["state"] ?? "状态", body: entry.state),
-      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-"),
-      (title: "URL", body: entry.url),
-      (title: strings["duration"] ?? "耗时", body: durationText),
-      (title: strings["requestHeaders"] ?? "请求头", body: requestHeaders),
-      (title: strings["responseHeaders"] ?? "响应头", body: responseHeaders),
-      (title: strings["requestBody"] ?? "请求体", body: entry.requestBody ?? noRequestBodyText),
-      (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText),
-      (title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText),
+    let sections: [(title: String, body: String, monospace: Bool)] = [
+      (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
+      (title: strings["status"] ?? "状态码", body: entry.status.map(String.init) ?? "-", monospace: false),
+      (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
+      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
+      (title: "URL", body: entry.url, monospace: true),
+      (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
+      (title: strings["requestHeaders"] ?? "请求头", body: requestHeaders, monospace: true),
+      (title: strings["responseHeaders"] ?? "响应头", body: responseHeaders, monospace: true),
+      (title: strings["requestBody"] ?? "请求体", body: entry.requestBody ?? noRequestBodyText, monospace: true),
+      (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText, monospace: true),
+      (title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText, monospace: true),
     ]
 
-    sections.forEach { title, body in
-      stack.addArrangedSubview(makeSection(title: title, body: body))
+    sections.forEach { title, body, monospace in
+      stack.addArrangedSubview(makeSection(title: title, body: body, monospace: monospace))
     }
 
     if let error = entry.error, !error.isEmpty {
-      stack.addArrangedSubview(makeSection(title: "错误", body: error))
+      stack.addArrangedSubview(makeSection(title: "错误", body: error, monospace: true))
     }
   }
 
-  private func makeSection(title: String, body: String) -> UIView {
+  private func makeSection(title: String, body: String, monospace: Bool) -> UIView {
     let container = UIView()
-    container.backgroundColor = .secondarySystemBackground
-    container.layer.cornerRadius = 14
+    container.backgroundColor = PanelColors.card
+    container.layer.cornerRadius = 8
+    container.layer.borderWidth = 1
+    container.layer.borderColor = PanelColors.border.cgColor
 
     let titleLabel = UILabel()
     titleLabel.font = .systemFont(ofSize: 14, weight: .bold)
+    titleLabel.textColor = PanelColors.text
     titleLabel.text = title
 
     let bodyLabel = UILabel()
-    bodyLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    bodyLabel.font = monospace
+      ? .monospacedSystemFont(ofSize: 12, weight: .regular)
+      : .systemFont(ofSize: 13, weight: .regular)
+    bodyLabel.textColor = PanelColors.text
     bodyLabel.text = body
     bodyLabel.numberOfLines = 0
+    bodyLabel.lineBreakMode = .byCharWrapping
 
     let stack = UIStackView(arrangedSubviews: [titleLabel, bodyLabel])
     stack.axis = .vertical
@@ -471,9 +1114,10 @@ private extension UIViewController {
     let label = UILabel()
     label.text = message
     label.textColor = .white
-    label.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+    label.backgroundColor = UIColor.black.withAlphaComponent(0.76)
     label.textAlignment = .center
-    label.layer.cornerRadius = 12
+    label.font = .systemFont(ofSize: 14, weight: .semibold)
+    label.layer.cornerRadius = 8
     label.layer.masksToBounds = true
     label.alpha = 0
     view.addSubview(label)
@@ -483,6 +1127,7 @@ private extension UIViewController {
       label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
       label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
       label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+      label.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
     ])
     UIView.animate(withDuration: 0.2, animations: {
       label.alpha = 1
