@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Network
+import ObjectiveC.runtime
 import OSLog
 import UIKit
 
@@ -129,26 +130,18 @@ final class InAppDebuggerNativeLogCapture {
 
   func setEnabled(_ enabled: Bool) {
     queue.sync {
-      prepareLocked()
       captureEnabled = enabled
-      if enabled {
-        ensureStreamCaptureLocked()
-        startLifecycleObserversIfNeeded()
-        logSessionStartIfNeeded()
-      } else {
+      if !enabled {
         panelActive = false
-        stopDetailedCollectorsLocked()
-        stopLifecycleObserversLocked()
-        stopStreamCaptureLocked()
       }
-      refreshDetailedCollectorsLocked()
+      refreshCaptureStateLocked()
     }
   }
 
   func setPanelActive(_ active: Bool) {
     queue.async {
       self.panelActive = active
-      self.refreshDetailedCollectorsLocked()
+      self.refreshCaptureStateLocked()
     }
   }
 
@@ -234,19 +227,21 @@ final class InAppDebuggerNativeLogCapture {
     isRunning = false
   }
 
-  private func refreshDetailedCollectorsLocked() {
-    guard captureEnabled else {
+  private func refreshCaptureStateLocked() {
+    guard captureEnabled, panelActive else {
       stopDetailedCollectorsLocked()
+      stopLifecycleObserversLocked()
+      stopStreamCaptureLocked()
       return
     }
 
-    if panelActive {
-      startOSLogPolling()
-      startNetworkPathMonitoringIfNeeded()
-      startDiagnosticObserversIfNeeded()
-    } else {
-      stopDetailedCollectorsLocked()
-    }
+    prepareLocked()
+    ensureStreamCaptureLocked()
+    startLifecycleObserversIfNeeded()
+    logSessionStartIfNeeded()
+    startOSLogPolling()
+    startNetworkPathMonitoringIfNeeded()
+    startDiagnosticObserversIfNeeded()
   }
 
   private func stopDetailedCollectorsLocked() {
@@ -462,7 +457,7 @@ final class InAppDebuggerNativeLogCapture {
 
   private func startLifecycleObserversIfNeeded() {
     OperationQueue.main.addOperation(BlockOperation { [weak self] in
-      guard let self, self.captureEnabled, self.lifecycleObservers.isEmpty else {
+      guard let self, self.captureEnabled, self.panelActive, self.lifecycleObservers.isEmpty else {
         return
       }
 
@@ -662,7 +657,7 @@ final class InAppDebuggerNativeLogCapture {
 
   private func logSessionStartIfNeeded() {
     OperationQueue.main.addOperation(BlockOperation { [weak self] in
-      guard let self, self.captureEnabled, !self.didLogSessionStart else {
+      guard let self, self.captureEnabled, self.panelActive, !self.didLogSessionStart else {
         return
       }
 
@@ -675,7 +670,7 @@ final class InAppDebuggerNativeLogCapture {
 
       InAppDebuggerStore.shared.appendNativeLog(
         type: "info",
-        message: "Native capture started for the current process.",
+        message: "native capture started for the current process.",
         stream: "session.start · \(processInfo.processName)(\(processInfo.processIdentifier))",
         details: self.buildDetailsString([
           ("collector", "session-start"),
@@ -701,7 +696,7 @@ final class InAppDebuggerNativeLogCapture {
   }
 
   private func recordApplicationEvent(event: String, type: String, message: String) {
-    guard captureEnabled else {
+    guard captureEnabled, panelActive else {
       return
     }
     let processInfo = ProcessInfo.processInfo
@@ -791,7 +786,7 @@ final class InAppDebuggerNativeLogCapture {
   }
 
   private func process(data: Data, stream: String) {
-    guard captureEnabled else {
+    guard captureEnabled, panelActive else {
       return
     }
     if stream == "stdout" {
@@ -1126,5 +1121,807 @@ final class InAppDebuggerNativeLogCapture {
       return
     }
     parts.append(value)
+  }
+}
+
+private let nativeWebSocketClockFormatter: DateFormatter = {
+  let formatter = DateFormatter()
+  formatter.locale = Locale(identifier: "en_US_POSIX")
+  formatter.dateFormat = "HH:mm:ss.SSS"
+  return formatter
+}()
+
+private let nativeWebSocketByteCountFormatter: ByteCountFormatter = {
+  let formatter = ByteCountFormatter()
+  formatter.allowedUnits = [.useBytes, .useKB, .useMB]
+  formatter.countStyle = .file
+  formatter.includesUnit = true
+  formatter.isAdaptive = true
+  return formatter
+}()
+
+private struct PendingWebSocketMetadata {
+  let method: String
+  let url: String
+  let requestHeaders: [String: String]
+  let requestedProtocols: String?
+}
+
+private final class TrackedWebSocketState {
+  let id: String
+  let socketId: Int
+  var kind = "websocket"
+  var method: String
+  var url: String
+  var origin = "js"
+  var state: String
+  var startedAt: Int
+  var updatedAt: Int
+  var endedAt: Int?
+  var durationMs: Int?
+  var status: Int?
+  var requestHeaders: [String: String]
+  var responseHeaders: [String: String] = [:]
+  var error: String?
+  var `protocol`: String?
+  var requestedProtocols: String?
+  var closeReason: String?
+  var closeCode: Int?
+  var requestedCloseCode: Int?
+  var requestedCloseReason: String?
+  var cleanClose: Bool?
+  var messageCountIn = 0
+  var messageCountOut = 0
+  var bytesIn = 0
+  var bytesOut = 0
+  var eventsList: [String] = []
+  var messagesList: [String] = []
+
+  init(
+    socketId: Int,
+    method: String,
+    url: String,
+    state: String,
+    startedAt: Int,
+    requestHeaders: [String: String],
+    requestedProtocols: String?
+  ) {
+    self.id = "ws_\(socketId)"
+    self.socketId = socketId
+    self.method = method
+    self.url = url
+    self.state = state
+    self.startedAt = startedAt
+    self.updatedAt = startedAt
+    self.requestHeaders = requestHeaders
+    self.requestedProtocols = requestedProtocols
+  }
+
+  func asEntry() -> DebugNetworkEntry {
+    DebugNetworkEntry(
+      id: id,
+      kind: kind,
+      method: method,
+      url: url,
+      origin: origin,
+      state: state,
+      startedAt: startedAt,
+      updatedAt: updatedAt,
+      endedAt: endedAt,
+      durationMs: durationMs,
+      status: status,
+      requestHeaders: requestHeaders,
+      responseHeaders: responseHeaders,
+      error: error,
+      protocol: `protocol`,
+      requestedProtocols: requestedProtocols,
+      closeReason: closeReason,
+      closeCode: closeCode,
+      requestedCloseCode: requestedCloseCode,
+      requestedCloseReason: requestedCloseReason,
+      cleanClose: cleanClose,
+      messageCountIn: messageCountIn,
+      messageCountOut: messageCountOut,
+      bytesIn: bytesIn,
+      bytesOut: bytesOut,
+      events: eventsList.joined(separator: "\n"),
+      messages: messagesList.joined(separator: "\n")
+    )
+  }
+}
+
+final class InAppDebuggerNativeWebSocketCapture {
+  static let shared = InAppDebuggerNativeWebSocketCapture()
+
+  private let lock = NSLock()
+  private var enabled = false
+  private var panelActive = false
+  private var trackedSockets: [Int: TrackedWebSocketState] = [:]
+  private var pendingSockets: [String: PendingWebSocketMetadata] = [:]
+
+  private init() {}
+
+  func setEnabled(_ enabled: Bool) {
+    lock.lock()
+    self.enabled = enabled
+    if !enabled {
+      panelActive = false
+      trackedSockets.removeAll(keepingCapacity: false)
+      pendingSockets.removeAll(keepingCapacity: false)
+    }
+    lock.unlock()
+
+    if enabled {
+      InAppDebuggerNativeWebSocketHookInstaller.installIfNeeded()
+    }
+  }
+
+  func setPanelActive(_ active: Bool) {
+    var snapshots: [DebugNetworkEntry] = []
+
+    lock.lock()
+    panelActive = enabled && active
+    if panelActive {
+      snapshots = trackedSockets.values
+        .sorted { $0.startedAt > $1.startedAt }
+        .map { $0.asEntry() }
+    }
+    lock.unlock()
+
+    guard active else {
+      return
+    }
+
+    for entry in snapshots {
+      InAppDebuggerStore.shared.upsertNetworkEntry(entry)
+    }
+  }
+
+  func refreshVisibleEntries() {
+    var snapshots: [DebugNetworkEntry] = []
+
+    lock.lock()
+    if panelActive {
+      snapshots = trackedSockets.values
+        .sorted { $0.startedAt > $1.startedAt }
+        .map { $0.asEntry() }
+    }
+    lock.unlock()
+
+    for entry in snapshots {
+      InAppDebuggerStore.shared.upsertNetworkEntry(entry)
+    }
+  }
+
+  fileprivate func recordInitializedSocket(_ socket: AnyObject, request: URLRequest, protocols: [String]?) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard enabled else {
+      return
+    }
+
+    pendingSockets[objectKey(for: socket)] = PendingWebSocketMetadata(
+      method: webSocketMethod(for: request.url?.absoluteString ?? ""),
+      url: request.url?.absoluteString ?? "",
+      requestHeaders: request.allHTTPHeaderFields ?? [:],
+      requestedProtocols: protocols?.joined(separator: ", ").nilIfEmpty
+    )
+  }
+
+  fileprivate func recordOpenRequested(_ socket: AnyObject) {
+    mutateSocket(socket, defaultState: "connecting") { tracked, timestamp, isPanelActive in
+      tracked.state = "connecting"
+      tracked.updatedAt = timestamp
+      tracked.endedAt = nil
+      tracked.durationMs = nil
+      tracked.error = nil
+      tracked.closeCode = nil
+      tracked.closeReason = nil
+      tracked.cleanClose = nil
+      tracked.requestedCloseCode = nil
+      tracked.requestedCloseReason = nil
+      appendEvent("connect", to: tracked, at: timestamp)
+      return isPanelActive ? .emitNow : .none
+    }
+  }
+
+  fileprivate func recordOpened(_ socket: AnyObject) {
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+      tracked.state = "open"
+      tracked.updatedAt = timestamp
+      tracked.protocol = socketStringValue(socket, selectorName: "protocol") ?? tracked.protocol
+      appendEvent(
+        tracked.protocol.nilIfEmpty.map { "open protocol=\($0)" } ?? "open",
+        to: tracked,
+        at: timestamp
+      )
+      return isPanelActive ? .emitNow : .none
+    }
+  }
+
+  fileprivate func recordSendString(_ socket: AnyObject, text: String) {
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+      let byteCount = text.lengthOfBytes(using: .utf8)
+      tracked.state = tracked.state == "connecting" ? "open" : tracked.state
+      tracked.updatedAt = timestamp
+      tracked.messageCountOut += 1
+      tracked.bytesOut += byteCount
+      if isPanelActive {
+        appendMessage(
+          direction: ">>",
+          kind: "text",
+          preview: sanitizeTextPreview(text),
+          byteCount: byteCount,
+          to: tracked,
+          at: timestamp
+        )
+        return .emitNow
+      }
+      return .none
+    }
+  }
+
+  fileprivate func recordSendData(_ socket: AnyObject, data: Data?) {
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+      let payload = data ?? Data()
+      tracked.state = tracked.state == "connecting" ? "open" : tracked.state
+      tracked.updatedAt = timestamp
+      tracked.messageCountOut += 1
+      tracked.bytesOut += payload.count
+      if isPanelActive {
+        appendMessage(
+          direction: ">>",
+          kind: "binary",
+          preview: hexPreview(for: payload),
+          byteCount: payload.count,
+          to: tracked,
+          at: timestamp
+        )
+        return .emitNow
+      }
+      return .none
+    }
+  }
+
+  fileprivate func recordPing(_ socket: AnyObject, data: Data?) {
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+      tracked.updatedAt = timestamp
+      if isPanelActive {
+        appendEvent("ping \(formatByteCount(data?.count ?? 0))", to: tracked, at: timestamp)
+        return .emitNow
+      }
+      return .none
+    }
+  }
+
+  fileprivate func recordReceivedMessage(_ socket: AnyObject, message: Any?) {
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+      tracked.state = tracked.state == "connecting" ? "open" : tracked.state
+      tracked.updatedAt = timestamp
+
+      let payload = describeMessagePayload(message)
+      tracked.messageCountIn += 1
+      tracked.bytesIn += payload.byteCount
+
+      if isPanelActive {
+        appendMessage(
+          direction: "<<",
+          kind: payload.kind,
+          preview: payload.preview,
+          byteCount: payload.byteCount,
+          to: tracked,
+          at: timestamp
+        )
+        return .emitNow
+      }
+      return .none
+    }
+  }
+
+  fileprivate func recordCloseRequested(_ socket: AnyObject, code: Int, reason: String?) {
+    mutateSocket(socket, defaultState: "closing") { tracked, timestamp, isPanelActive in
+      tracked.state = "closing"
+      tracked.updatedAt = timestamp
+      tracked.requestedCloseCode = code
+      tracked.requestedCloseReason = reason?.nilIfEmpty
+      appendEvent(
+        "close requested code=\(code)\(formatReasonSuffix(reason))",
+        to: tracked,
+        at: timestamp
+      )
+      return isPanelActive ? .emitNow : .none
+    }
+  }
+
+  fileprivate func recordFailed(_ socket: AnyObject, error: NSError) {
+    finishSocket(socket) { tracked, timestamp, _ in
+      tracked.state = "error"
+      tracked.updatedAt = timestamp
+      tracked.endedAt = timestamp
+      tracked.durationMs = max(0, timestamp - tracked.startedAt)
+      tracked.error = error.localizedDescription.nilIfEmpty ?? "WebSocket error"
+      appendEvent("error \(tracked.error ?? "WebSocket error")", to: tracked, at: timestamp)
+      return .emitNow
+    }
+  }
+
+  fileprivate func recordClosed(_ socket: AnyObject, code: Int, reason: String?, wasClean: Bool) {
+    finishSocket(socket) { tracked, timestamp, _ in
+      tracked.state = tracked.error == nil ? "closed" : "error"
+      tracked.updatedAt = timestamp
+      tracked.endedAt = timestamp
+      tracked.durationMs = max(0, timestamp - tracked.startedAt)
+      tracked.closeCode = code
+      tracked.closeReason = reason?.nilIfEmpty
+      tracked.cleanClose = wasClean
+      appendEvent(
+        "closed code=\(code) clean=\(wasClean ? "true" : "false")\(formatReasonSuffix(reason))",
+        to: tracked,
+        at: timestamp
+      )
+      return .emitNow
+    }
+  }
+
+  private enum SocketMutationResult {
+    case none
+    case emitNow
+  }
+
+  private func mutateSocket(
+    _ socket: AnyObject,
+    defaultState: String,
+    mutation: (_ tracked: TrackedWebSocketState, _ timestamp: Int, _ isPanelActive: Bool) -> SocketMutationResult
+  ) {
+    var emittedEntry: DebugNetworkEntry?
+
+    lock.lock()
+    guard enabled, let tracked = trackedSocket(for: socket, defaultState: defaultState) else {
+      lock.unlock()
+      return
+    }
+
+    let timestamp = currentTimestamp()
+    let shouldEmit = mutation(tracked, timestamp, panelActive)
+    if shouldEmit == .emitNow {
+      emittedEntry = tracked.asEntry()
+    }
+    lock.unlock()
+
+    if let emittedEntry {
+      InAppDebuggerStore.shared.upsertNetworkEntry(emittedEntry)
+    }
+  }
+
+  private func finishSocket(
+    _ socket: AnyObject,
+    mutation: (_ tracked: TrackedWebSocketState, _ timestamp: Int, _ isPanelActive: Bool) -> SocketMutationResult
+  ) {
+    var emittedEntry: DebugNetworkEntry?
+
+    lock.lock()
+    guard enabled, let tracked = trackedSocket(for: socket, defaultState: "open") else {
+      lock.unlock()
+      return
+    }
+
+    let timestamp = currentTimestamp()
+    let shouldEmit = mutation(tracked, timestamp, panelActive)
+    if shouldEmit == .emitNow {
+      emittedEntry = tracked.asEntry()
+    }
+    trackedSockets.removeValue(forKey: tracked.socketId)
+    pendingSockets.removeValue(forKey: objectKey(for: socket))
+    lock.unlock()
+
+    if let emittedEntry {
+      InAppDebuggerStore.shared.upsertNetworkEntry(emittedEntry)
+    }
+  }
+
+  private func trackedSocket(for socket: AnyObject, defaultState: String) -> TrackedWebSocketState? {
+    guard let socketObject = socket as? NSObject,
+          let socketId = socketID(for: socketObject) else {
+      return nil
+    }
+
+    if let tracked = trackedSockets[socketId] {
+      if tracked.url.isEmpty, let socketURL = socketURL(for: socketObject) {
+        tracked.url = socketURL
+        tracked.method = webSocketMethod(for: socketURL)
+      }
+      if tracked.protocol == nil {
+        tracked.protocol = socketStringValue(socketObject, selectorName: "protocol")
+      }
+      return tracked
+    }
+
+    let metadata = pendingSockets.removeValue(forKey: objectKey(for: socketObject))
+    let url = metadata?.url.nilIfEmpty ?? socketURL(for: socketObject) ?? ""
+    let tracked = TrackedWebSocketState(
+      socketId: socketId,
+      method: metadata?.method ?? webSocketMethod(for: url),
+      url: url,
+      state: defaultState,
+      startedAt: currentTimestamp(),
+      requestHeaders: metadata?.requestHeaders ?? [:],
+      requestedProtocols: metadata?.requestedProtocols
+    )
+    tracked.protocol = socketStringValue(socketObject, selectorName: "protocol")
+    trackedSockets[socketId] = tracked
+    return tracked
+  }
+}
+
+private extension InAppDebuggerNativeWebSocketCapture {
+  func currentTimestamp() -> Int {
+    Int(Date().timeIntervalSince1970 * 1000)
+  }
+
+  func appendEvent(_ text: String, to tracked: TrackedWebSocketState, at timestamp: Int) {
+    tracked.eventsList.append("\(formatClock(timestamp)) \(text)")
+    if tracked.eventsList.count > 120 {
+      tracked.eventsList.removeFirst(tracked.eventsList.count - 120)
+    }
+  }
+
+  func appendMessage(
+    direction: String,
+    kind: String,
+    preview: String,
+    byteCount: Int,
+    to tracked: TrackedWebSocketState,
+    at timestamp: Int
+  ) {
+    let previewSuffix = preview.isEmpty ? "" : " \(preview)"
+    tracked.messagesList.append(
+      "\(formatClock(timestamp)) \(direction) \(kind) \(formatByteCount(byteCount))\(previewSuffix)"
+    )
+    if tracked.messagesList.count > 100 {
+      tracked.messagesList.removeFirst(tracked.messagesList.count - 100)
+    }
+  }
+
+  func formatClock(_ timestamp: Int) -> String {
+    nativeWebSocketClockFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp) / 1000))
+  }
+
+  func objectKey(for object: AnyObject) -> String {
+    String(UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque()))
+  }
+
+  func webSocketMethod(for url: String) -> String {
+    guard let scheme = URL(string: url)?.scheme?.lowercased() else {
+      return "WS"
+    }
+    return scheme == "wss" ? "WSS" : "WS"
+  }
+
+  func socketID(for socket: NSObject) -> Int? {
+    guard socket.responds(to: NSSelectorFromString("reactTag")),
+          let tag = socket.perform(NSSelectorFromString("reactTag"))?.takeUnretainedValue() as? NSNumber else {
+      return nil
+    }
+    return tag.intValue
+  }
+
+  func socketURL(for socket: NSObject) -> String? {
+    guard socket.responds(to: NSSelectorFromString("url")),
+          let url = socket.perform(NSSelectorFromString("url"))?.takeUnretainedValue() as? NSURL else {
+      return nil
+    }
+    return (url as URL).absoluteString
+  }
+
+  func socketStringValue(_ object: AnyObject, selectorName: String) -> String? {
+    guard let object = object as? NSObject else {
+      return nil
+    }
+    let selector = NSSelectorFromString(selectorName)
+    guard object.responds(to: selector),
+          let value = object.perform(selector)?.takeUnretainedValue() as? NSString else {
+      return nil
+    }
+    return (value as String).nilIfEmpty
+  }
+
+  func describeMessagePayload(_ message: Any?) -> (kind: String, preview: String, byteCount: Int) {
+    if let text = message as? String {
+      return ("text", sanitizeTextPreview(text), text.lengthOfBytes(using: .utf8))
+    }
+    if let string = message as? NSString {
+      let value = string as String
+      return ("text", sanitizeTextPreview(value), value.lengthOfBytes(using: .utf8))
+    }
+    if let data = message as? Data {
+      return ("binary", hexPreview(for: data), data.count)
+    }
+    if let data = message as? NSData {
+      let value = data as Data
+      return ("binary", hexPreview(for: value), value.count)
+    }
+    let fallback = message.map { String(describing: $0) } ?? ""
+    return ("unknown", sanitizeTextPreview(fallback), fallback.lengthOfBytes(using: .utf8))
+  }
+
+  func sanitizeTextPreview(_ text: String) -> String {
+    let normalized = text
+      .replacingOccurrences(of: "\r\n", with: "\\n")
+      .replacingOccurrences(of: "\n", with: "\\n")
+      .replacingOccurrences(of: "\r", with: "\\r")
+      .replacingOccurrences(of: "\t", with: "\\t")
+    if normalized.count <= 240 {
+      return normalized
+    }
+    let endIndex = normalized.index(normalized.startIndex, offsetBy: 240)
+    return String(normalized[..<endIndex]) + "..."
+  }
+
+  func hexPreview(for data: Data) -> String {
+    guard !data.isEmpty else {
+      return "empty"
+    }
+    let previewBytes = data.prefix(24).map { String(format: "%02X", $0) }.joined(separator: " ")
+    return data.count > 24 ? "\(previewBytes) ..." : previewBytes
+  }
+
+  func formatByteCount(_ count: Int) -> String {
+    nativeWebSocketByteCountFormatter.string(fromByteCount: Int64(max(0, count)))
+  }
+
+  func formatReasonSuffix(_ reason: String?) -> String {
+    guard let reason = reason?.nilIfEmpty else {
+      return ""
+    }
+    return " reason=\(sanitizeTextPreview(reason))"
+  }
+}
+
+private extension String {
+  var nilIfEmpty: String? {
+    let value = trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+}
+
+private extension Optional where Wrapped == String {
+  var nilIfEmpty: String? {
+    switch self {
+    case .some(let value):
+      return value.nilIfEmpty
+    case .none:
+      return nil
+    }
+  }
+}
+
+private enum InAppDebuggerNativeWebSocketHookInstaller {
+  private static let lock = NSLock()
+  private static var didInstall = false
+
+  private typealias InitWithURLRequestProtocolsIMP = @convention(c) (
+    AnyObject,
+    Selector,
+    NSURLRequest,
+    NSArray?
+  ) -> AnyObject
+  private typealias OpenIMP = @convention(c) (AnyObject, Selector) -> Void
+  private typealias SendStringIMP = @convention(c) (
+    AnyObject,
+    Selector,
+    NSString,
+    UnsafeMutablePointer<NSError?>?
+  ) -> Bool
+  private typealias SendDataIMP = @convention(c) (
+    AnyObject,
+    Selector,
+    NSData?,
+    UnsafeMutablePointer<NSError?>?
+  ) -> Bool
+  private typealias SendPingIMP = @convention(c) (
+    AnyObject,
+    Selector,
+    NSData?,
+    UnsafeMutablePointer<NSError?>?
+  ) -> Bool
+  private typealias CloseWithCodeIMP = @convention(c) (
+    AnyObject,
+    Selector,
+    Int,
+    NSString?
+  ) -> Void
+  private typealias WebSocketDidOpenIMP = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+  private typealias DidReceiveMessageIMP = @convention(c) (AnyObject, Selector, AnyObject, Any?) -> Void
+  private typealias DidFailWithErrorIMP = @convention(c) (AnyObject, Selector, AnyObject, NSError) -> Void
+  private typealias DidCloseWithCodeIMP = @convention(c) (
+    AnyObject,
+    Selector,
+    AnyObject,
+    Int,
+    NSString?,
+    ObjCBool
+  ) -> Void
+
+  static func installIfNeeded() {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !didInstall else {
+      return
+    }
+
+    guard let socketClass = NSClassFromString("SRWebSocket"),
+          let moduleClass = NSClassFromString("RCTWebSocketModule") else {
+      return
+    }
+
+    installInitHook(on: socketClass)
+    installOpenHook(on: socketClass)
+    installSendStringHook(on: socketClass)
+    installSendDataHook(on: socketClass)
+    installSendPingHook(on: socketClass)
+    installCloseWithCodeHook(on: socketClass)
+    installDidOpenHook(on: moduleClass)
+    installDidReceiveMessageHook(on: moduleClass)
+    installDidFailHook(on: moduleClass)
+    installDidCloseHook(on: moduleClass)
+
+    didInstall = true
+  }
+
+  private static func installInitHook(on socketClass: AnyClass) {
+    let selector = NSSelectorFromString("initWithURLRequest:protocols:")
+    guard let method = class_getInstanceMethod(socketClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: InitWithURLRequestProtocolsIMP.self)
+    let block: @convention(block) (AnyObject, NSURLRequest, NSArray?) -> AnyObject = { receiver, request, protocols in
+      let socket = original(receiver, selector, request, protocols)
+      InAppDebuggerNativeWebSocketCapture.shared.recordInitializedSocket(
+        socket,
+        request: request as URLRequest,
+        protocols: protocols as? [String]
+      )
+      return socket
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installOpenHook(on socketClass: AnyClass) {
+    let selector = NSSelectorFromString("open")
+    guard let method = class_getInstanceMethod(socketClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: OpenIMP.self)
+    let block: @convention(block) (AnyObject) -> Void = { receiver in
+      InAppDebuggerNativeWebSocketCapture.shared.recordOpenRequested(receiver)
+      original(receiver, selector)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installSendStringHook(on socketClass: AnyClass) {
+    let selector = NSSelectorFromString("sendString:error:")
+    guard let method = class_getInstanceMethod(socketClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: SendStringIMP.self)
+    let block: @convention(block) (AnyObject, NSString, UnsafeMutablePointer<NSError?>?) -> Bool = {
+      receiver, text, error in
+      let result = original(receiver, selector, text, error)
+      if result {
+        InAppDebuggerNativeWebSocketCapture.shared.recordSendString(receiver, text: text as String)
+      }
+      return result
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installSendDataHook(on socketClass: AnyClass) {
+    let selector = NSSelectorFromString("sendData:error:")
+    guard let method = class_getInstanceMethod(socketClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: SendDataIMP.self)
+    let block: @convention(block) (AnyObject, NSData?, UnsafeMutablePointer<NSError?>?) -> Bool = {
+      receiver, data, error in
+      let result = original(receiver, selector, data, error)
+      if result {
+        InAppDebuggerNativeWebSocketCapture.shared.recordSendData(receiver, data: data as Data?)
+      }
+      return result
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installSendPingHook(on socketClass: AnyClass) {
+    let selector = NSSelectorFromString("sendPing:error:")
+    guard let method = class_getInstanceMethod(socketClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: SendPingIMP.self)
+    let block: @convention(block) (AnyObject, NSData?, UnsafeMutablePointer<NSError?>?) -> Bool = {
+      receiver, data, error in
+      let result = original(receiver, selector, data, error)
+      if result {
+        InAppDebuggerNativeWebSocketCapture.shared.recordPing(receiver, data: data as Data?)
+      }
+      return result
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installCloseWithCodeHook(on socketClass: AnyClass) {
+    let selector = NSSelectorFromString("closeWithCode:reason:")
+    guard let method = class_getInstanceMethod(socketClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: CloseWithCodeIMP.self)
+    let block: @convention(block) (AnyObject, Int, NSString?) -> Void = { receiver, code, reason in
+      InAppDebuggerNativeWebSocketCapture.shared.recordCloseRequested(
+        receiver,
+        code: code,
+        reason: reason as String?
+      )
+      original(receiver, selector, code, reason)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installDidOpenHook(on moduleClass: AnyClass) {
+    let selector = NSSelectorFromString("webSocketDidOpen:")
+    guard let method = class_getInstanceMethod(moduleClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: WebSocketDidOpenIMP.self)
+    let block: @convention(block) (AnyObject, AnyObject) -> Void = { receiver, socket in
+      InAppDebuggerNativeWebSocketCapture.shared.recordOpened(socket)
+      original(receiver, selector, socket)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installDidReceiveMessageHook(on moduleClass: AnyClass) {
+    let selector = NSSelectorFromString("webSocket:didReceiveMessage:")
+    guard let method = class_getInstanceMethod(moduleClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: DidReceiveMessageIMP.self)
+    let block: @convention(block) (AnyObject, AnyObject, Any?) -> Void = { receiver, socket, message in
+      InAppDebuggerNativeWebSocketCapture.shared.recordReceivedMessage(socket, message: message)
+      original(receiver, selector, socket, message)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installDidFailHook(on moduleClass: AnyClass) {
+    let selector = NSSelectorFromString("webSocket:didFailWithError:")
+    guard let method = class_getInstanceMethod(moduleClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: DidFailWithErrorIMP.self)
+    let block: @convention(block) (AnyObject, AnyObject, NSError) -> Void = { receiver, socket, error in
+      InAppDebuggerNativeWebSocketCapture.shared.recordFailed(socket, error: error)
+      original(receiver, selector, socket, error)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
+  }
+
+  private static func installDidCloseHook(on moduleClass: AnyClass) {
+    let selector = NSSelectorFromString("webSocket:didCloseWithCode:reason:wasClean:")
+    guard let method = class_getInstanceMethod(moduleClass, selector) else {
+      return
+    }
+    let original = unsafeBitCast(method_getImplementation(method), to: DidCloseWithCodeIMP.self)
+    let block: @convention(block) (AnyObject, AnyObject, Int, NSString?, ObjCBool) -> Void = {
+      receiver, socket, code, reason, wasClean in
+      InAppDebuggerNativeWebSocketCapture.shared.recordClosed(
+        socket,
+        code: code,
+        reason: reason as String?,
+        wasClean: wasClean.boolValue
+      )
+      original(receiver, selector, socket, code, reason, wasClean)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
   }
 }

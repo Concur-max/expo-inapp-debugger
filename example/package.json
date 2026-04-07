@@ -10,11 +10,13 @@
     "start:lan:clear": "expo start --dev-client --host lan --scheme expo-inapp-debugger-example -c",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "prebuild": "expo prebuild"
+    "prebuild": "expo prebuild",
+    "ws:echo": "node ./scripts/ws-echo-server.mjs"
   },
   "dependencies": {
     "expo": "~54.0.31",
     "expo-build-properties": "~1.0.10",
+    "expo-constants": "~18.0.13",
     "expo-dev-client": "~6.0.20",
     "expo-inapp-debugger": "link:..",
     "react": "19.1.0",
@@ -23,6 +25,7 @@
   "devDependencies": {
     "@types/react": "~19.1.17",
     "babel-preset-expo": "54.0.9",
-    "typescript": "~5.9.3"
+    "typescript": "~5.9.3",
+    "ws": "^8.18.3"
   }
 }

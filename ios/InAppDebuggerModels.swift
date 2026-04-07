@@ -103,6 +103,7 @@ struct DebugNetworkEntry {
   let kind: String
   let method: String
   let url: String
+  let origin: String
   let state: String
   let startedAt: Int
   let updatedAt: Int
@@ -118,8 +119,86 @@ struct DebugNetworkEntry {
   let responseSize: Int?
   let error: String?
   let `protocol`: String?
+  let requestedProtocols: String?
   let closeReason: String?
+  let closeCode: Int?
+  let requestedCloseCode: Int?
+  let requestedCloseReason: String?
+  let cleanClose: Bool?
+  let messageCountIn: Int?
+  let messageCountOut: Int?
+  let bytesIn: Int?
+  let bytesOut: Int?
+  let events: String?
   let messages: String?
+
+  init(
+    id: String,
+    kind: String,
+    method: String,
+    url: String,
+    origin: String = "js",
+    state: String,
+    startedAt: Int,
+    updatedAt: Int,
+    endedAt: Int? = nil,
+    durationMs: Int? = nil,
+    status: Int? = nil,
+    requestHeaders: [String: String] = [:],
+    responseHeaders: [String: String] = [:],
+    requestBody: String? = nil,
+    responseBody: String? = nil,
+    responseType: String? = nil,
+    responseContentType: String? = nil,
+    responseSize: Int? = nil,
+    error: String? = nil,
+    protocol: String? = nil,
+    requestedProtocols: String? = nil,
+    closeReason: String? = nil,
+    closeCode: Int? = nil,
+    requestedCloseCode: Int? = nil,
+    requestedCloseReason: String? = nil,
+    cleanClose: Bool? = nil,
+    messageCountIn: Int? = nil,
+    messageCountOut: Int? = nil,
+    bytesIn: Int? = nil,
+    bytesOut: Int? = nil,
+    events: String? = nil,
+    messages: String? = nil
+  ) {
+    self.id = id
+    self.kind = kind
+    self.method = method
+    self.url = url
+    self.origin = origin
+    self.state = state
+    self.startedAt = startedAt
+    self.updatedAt = updatedAt
+    self.endedAt = endedAt
+    self.durationMs = durationMs
+    self.status = status
+    self.requestHeaders = requestHeaders
+    self.responseHeaders = responseHeaders
+    self.requestBody = requestBody
+    self.responseBody = responseBody
+    self.responseType = responseType
+    self.responseContentType = responseContentType
+    self.responseSize = responseSize
+    self.error = error
+    self.protocol = `protocol`
+    self.requestedProtocols = requestedProtocols
+    self.closeReason = closeReason
+    self.closeCode = closeCode
+    self.requestedCloseCode = requestedCloseCode
+    self.requestedCloseReason = requestedCloseReason
+    self.cleanClose = cleanClose
+    self.messageCountIn = messageCountIn
+    self.messageCountOut = messageCountOut
+    self.bytesIn = bytesIn
+    self.bytesOut = bytesOut
+    self.events = events
+    self.messages = messages
+  }
 
   init?(map: [String: Any]) {
     guard let id = map.string("id") else {
@@ -129,6 +208,7 @@ struct DebugNetworkEntry {
     self.kind = map.string("kind") ?? "http"
     self.method = map.string("method") ?? "GET"
     self.url = map.string("url") ?? ""
+    self.origin = map.string("origin") ?? "js"
     self.state = map.string("state") ?? "pending"
     self.startedAt = map.int("startedAt") ?? 0
     self.updatedAt = map.int("updatedAt") ?? startedAt
@@ -144,7 +224,17 @@ struct DebugNetworkEntry {
     self.responseSize = map.int("responseSize")
     self.error = map.string("error")
     self.protocol = map.string("protocol")
+    self.requestedProtocols = map.string("requestedProtocols")
     self.closeReason = map.string("closeReason")
+    self.closeCode = map.int("closeCode")
+    self.requestedCloseCode = map.int("requestedCloseCode")
+    self.requestedCloseReason = map.string("requestedCloseReason")
+    self.cleanClose = map.bool("cleanClose")
+    self.messageCountIn = map.int("messageCountIn")
+    self.messageCountOut = map.int("messageCountOut")
+    self.bytesIn = map.int("bytesIn")
+    self.bytesOut = map.int("bytesOut")
+    self.events = map.string("events")
     self.messages = map.string("messages")
   }
 
@@ -154,6 +244,7 @@ struct DebugNetworkEntry {
       "kind": kind,
       "method": method,
       "url": url,
+      "origin": origin,
       "state": state,
       "startedAt": startedAt,
       "updatedAt": updatedAt,
@@ -169,7 +260,17 @@ struct DebugNetworkEntry {
       "responseSize": responseSize as Any,
       "error": error as Any,
       "protocol": `protocol` as Any,
+      "requestedProtocols": requestedProtocols as Any,
       "closeReason": closeReason as Any,
+      "closeCode": closeCode as Any,
+      "requestedCloseCode": requestedCloseCode as Any,
+      "requestedCloseReason": requestedCloseReason as Any,
+      "cleanClose": cleanClose as Any,
+      "messageCountIn": messageCountIn as Any,
+      "messageCountOut": messageCountOut as Any,
+      "bytesIn": bytesIn as Any,
+      "bytesOut": bytesOut as Any,
+      "events": events as Any,
       "messages": messages as Any,
     ]
   }
@@ -182,6 +283,10 @@ extension Dictionary where Key == String, Value == Any {
 
   func int(_ key: String) -> Int? {
     (self[key] as? NSNumber)?.intValue
+  }
+
+  func bool(_ key: String) -> Bool? {
+    (self[key] as? NSNumber)?.boolValue
   }
 
   func stringDictionary(_ key: String) -> [String: String] {

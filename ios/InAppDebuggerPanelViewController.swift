@@ -63,16 +63,94 @@ private func toneForNetwork(_ entry: DebugNetworkEntry) -> PanelTone {
   if entry.state == "error" || (entry.status ?? 0) >= 400 {
     return toneForLogLevel("error")
   }
-  if entry.state == "pending" {
+  if entry.state == "pending" || entry.state == "connecting" {
     return PanelTone(
       foreground: UIColor(red: 0.29, green: 0.36, blue: 0.45, alpha: 1),
       background: UIColor(red: 0.93, green: 0.95, blue: 0.98, alpha: 1)
     )
   }
-  if entry.state == "closed" {
+  if entry.state == "closed" || entry.state == "closing" {
     return toneForLogLevel("warn")
   }
   return toneForLogLevel("log")
+}
+
+private func isNativeOrigin(_ origin: String) -> Bool {
+  origin.lowercased() == "native"
+}
+
+private func localizedOriginTitle(_ origin: String, strings: [String: String]) -> String {
+  if isNativeOrigin(origin) {
+    return strings["nativeLogOrigin"] ?? "native"
+  }
+  return strings["jsLogOrigin"] ?? "JS"
+}
+
+private let panelByteCountFormatter: ByteCountFormatter = {
+  let formatter = ByteCountFormatter()
+  formatter.allowedUnits = [.useBytes, .useKB, .useMB]
+  formatter.countStyle = .file
+  formatter.includesUnit = true
+  formatter.isAdaptive = true
+  return formatter
+}()
+
+private func formatNetworkByteCount(_ count: Int?) -> String {
+  guard let count else {
+    return "-"
+  }
+  return panelByteCountFormatter.string(fromByteCount: Int64(max(0, count)))
+}
+
+private enum PanelFilterPreferences {
+  static let selectedLogLevelsKey = "expo.inappdebugger.panel.selectedLevels"
+  static let selectedLogOriginsKey = "expo.inappdebugger.panel.selectedOrigins"
+  static let selectedNetworkOriginsKey = "expo.inappdebugger.panel.selectedNetworkOrigins"
+  static let allLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
+  static let allOrigins: Set<String> = ["js", "native"]
+  static let defaultOrigins: Set<String> = ["js"]
+
+  static func loadLogLevels() -> Set<String> {
+    loadSet(forKey: selectedLogLevelsKey, allowedValues: allLevels, defaultValues: allLevels)
+  }
+
+  static func loadLogOrigins() -> Set<String> {
+    loadSet(forKey: selectedLogOriginsKey, allowedValues: allOrigins, defaultValues: defaultOrigins)
+  }
+
+  static func loadNetworkOrigins() -> Set<String> {
+    loadSet(forKey: selectedNetworkOriginsKey, allowedValues: allOrigins, defaultValues: defaultOrigins)
+  }
+
+  static func saveLogLevels(_ levels: Set<String>) {
+    saveSet(levels, forKey: selectedLogLevelsKey)
+  }
+
+  static func saveLogOrigins(_ origins: Set<String>) {
+    saveSet(origins, forKey: selectedLogOriginsKey)
+  }
+
+  static func saveNetworkOrigins(_ origins: Set<String>) {
+    saveSet(origins, forKey: selectedNetworkOriginsKey)
+  }
+
+  private static func loadSet(
+    forKey key: String,
+    allowedValues: Set<String>,
+    defaultValues: Set<String>
+  ) -> Set<String> {
+    let defaults = UserDefaults.standard
+    guard defaults.object(forKey: key) != nil else {
+      return defaultValues
+    }
+
+    let values = defaults.stringArray(forKey: key) ?? []
+    return Set(values.filter { allowedValues.contains($0) })
+  }
+
+  private static func saveSet(_ values: Set<String>, forKey key: String) {
+    UserDefaults.standard.set(Array(values).sorted(), forKey: key)
+  }
 }
 
 final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate {
@@ -83,8 +161,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
-  private var selectedLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
-  private var selectedOrigins: Set<String> = ["js", "native"]
+  private var selectedLogLevels: Set<String> = PanelFilterPreferences.loadLogLevels()
+  private var selectedLogOrigins: Set<String> = PanelFilterPreferences.loadLogOrigins()
+  private var selectedNetworkOrigins: Set<String> = PanelFilterPreferences.loadNetworkOrigins()
   private var sortAscending = false
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
@@ -133,37 +212,48 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     field.font = .systemFont(ofSize: 15, weight: .regular)
     field.textColor = PanelColors.text
     field.tintColor = PanelColors.primary
-    field.backgroundColor = PanelColors.card
+    field.backgroundColor = PanelColors.controlBackground
+    field.borderStyle = .none
+    field.layer.cornerRadius = 10
+    field.layer.masksToBounds = true
     field.clearButtonMode = .whileEditing
-    field.layer.cornerRadius = 8
-    field.layer.borderColor = PanelColors.border.cgColor
-    field.layer.borderWidth = 1
     field.addTarget(self, action: #selector(searchTextChanged(_:)), for: .editingChanged)
     return field
   }()
 
   private lazy var clearButton: UIButton = {
-    let button = makeToolbarButton(title: "清空", imageName: nil, style: .neutral)
+    var config = UIButton.Configuration.tinted()
+    config.image = UIImage(systemName: "trash")
+    config.baseForegroundColor = PanelColors.text
+    config.baseBackgroundColor = PanelColors.controlBackground
+    config.cornerStyle = .medium
+    let button = UIButton(configuration: config)
     button.addTarget(self, action: #selector(clearTapped), for: .touchUpInside)
     button.setContentHuggingPriority(.required, for: .horizontal)
     button.setContentCompressionResistancePriority(.required, for: .horizontal)
     return button
   }()
 
-  private let originWrapView = InAppDebuggerWrapView()
-  private let filterWrapView = InAppDebuggerWrapView()
+  private lazy var filterButton: UIButton = {
+    var config = UIButton.Configuration.tinted()
+    config.image = UIImage(systemName: "line.3.horizontal.decrease")
+    config.baseForegroundColor = PanelColors.primary
+    config.baseBackgroundColor = PanelColors.controlBackground
+    config.cornerStyle = .medium
+    let button = UIButton(configuration: config)
+    button.showsMenuAsPrimaryAction = true
+    button.setContentHuggingPriority(.required, for: .horizontal)
+    button.setContentCompressionResistancePriority(.required, for: .horizontal)
+    return button
+  }()
 
   private lazy var sortToggleButton: UIButton = {
     var config = UIButton.Configuration.tinted()
-    config.title = "时间倒序"
     config.image = UIImage(systemName: "arrow.down")
-    config.imagePadding = 4
-    config.cornerStyle = .small
-    config.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 9, bottom: 5, trailing: 9)
-    config.baseForegroundColor = PanelColors.primary
+    config.baseForegroundColor = PanelColors.text
     config.baseBackgroundColor = PanelColors.controlBackground
+    config.cornerStyle = .medium
     let button = UIButton(configuration: config)
-    button.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
     button.addTarget(self, action: #selector(sortToggleTapped), for: .touchUpInside)
     button.setContentHuggingPriority(.required, for: .horizontal)
     button.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -228,7 +318,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
     configureNavigationBar()
     layoutUI()
-    rebuildFilterButtons()
+    updateFilterMenu()
     reloadFromStore()
 
     notificationObserver = NotificationCenter.default.addObserver(
@@ -248,7 +338,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(true)
-    InAppDebuggerNativeLogCapture.shared.setPanelActive(true)
+    syncNativeCaptureStates()
     reloadFromStore()
   }
 
@@ -258,6 +348,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     scheduledReloadWorkItem = nil
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
     InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
+    InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
     isSuspendingLiveUpdatesForScroll = false
   }
 
@@ -265,6 +356,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     scheduledReloadWorkItem?.cancel()
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
     InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
+    InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
     if let notificationObserver {
       NotificationCenter.default.removeObserver(notificationObserver)
     }
@@ -294,48 +386,128 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func layoutUI() {
-    let searchRow = UIStackView(arrangedSubviews: [searchField, clearButton])
-    searchRow.axis = .horizontal
-    searchRow.alignment = .center
-    searchRow.spacing = 8
+    let actionRow = UIStackView(arrangedSubviews: [searchField, filterButton, sortToggleButton, clearButton])
+    actionRow.axis = .horizontal
+    actionRow.alignment = .fill
+    actionRow.spacing = 8
 
-    let sortRow = UIStackView(arrangedSubviews: [UIView(), sortToggleButton])
-    sortRow.axis = .horizontal
-    sortRow.alignment = .center
-    sortRow.spacing = 8
-
-    let filterGroup = UIStackView(arrangedSubviews: [originWrapView, filterWrapView, sortRow])
-    filterGroup.axis = .vertical
-    filterGroup.alignment = .fill
-    filterGroup.spacing = 6
-
-    let stack = UIStackView(arrangedSubviews: [segmentedControl, searchRow, filterGroup, tableView])
-    stack.axis = .vertical
-    stack.spacing = 10
-    view.addSubview(stack)
-    stack.translatesAutoresizingMaskIntoConstraints = false
+    let topStack = UIStackView(arrangedSubviews: [segmentedControl, actionRow])
+    topStack.axis = .vertical
+    topStack.spacing = 12
+    
+    view.addSubview(topStack)
+    view.addSubview(tableView)
+    
+    topStack.translatesAutoresizingMaskIntoConstraints = false
+    tableView.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
-      stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
-      stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-      stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
-      stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+      topStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+      topStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+      topStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+
+      tableView.topAnchor.constraint(equalTo: topStack.bottomAnchor, constant: 10),
+      tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+      tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+      tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
       segmentedControl.heightAnchor.constraint(equalToConstant: 36),
-      searchField.heightAnchor.constraint(equalToConstant: 38),
-      clearButton.heightAnchor.constraint(equalToConstant: 34),
-      clearButton.widthAnchor.constraint(equalToConstant: 58),
-      sortToggleButton.heightAnchor.constraint(equalToConstant: 30),
+      searchField.heightAnchor.constraint(equalToConstant: 36),
+      filterButton.widthAnchor.constraint(equalToConstant: 36),
+      filterButton.heightAnchor.constraint(equalToConstant: 36),
+      sortToggleButton.widthAnchor.constraint(equalToConstant: 36),
+      sortToggleButton.heightAnchor.constraint(equalToConstant: 36),
+      clearButton.widthAnchor.constraint(equalToConstant: 36),
+      clearButton.heightAnchor.constraint(equalToConstant: 36),
     ])
   }
 
-  private func rebuildFilterButtons() {
-    let originButtons = ["js", "native"].map { makeOriginButton(origin: $0) }
-    originWrapView.setArrangedSubviews(originButtons)
-    let buttons = ["log", "info", "warn", "error", "debug"].map { makeLevelButton(level: $0) }
-    filterWrapView.setArrangedSubviews(buttons)
-    updateOriginButtonStates()
-    updateFilterButtonStates()
+  private func updateFilterMenu() {
+    let selectedOrigins = activeTab == .logs ? selectedLogOrigins : selectedNetworkOrigins
+    let originOptions = ["js", "native"].map { origin -> UIAction in
+      let title = localizedOriginTitle(origin, strings: strings)
+      let isSelected = selectedOrigins.contains(origin)
+      var attributes: UIMenuElement.Attributes = []
+      if #available(iOS 16.0, *) { attributes.insert(.keepsMenuPresented) }
+      return UIAction(title: title, attributes: attributes, state: isSelected ? .on : .off) { [weak self] _ in
+        self?.toggleOrigin(origin)
+      }
+    }
+
+    let originMenu = UIMenu(title: strings["origin"] ?? "来源", options: .displayInline, children: originOptions)
+    var menuChildren: [UIMenuElement] = [originMenu]
+    if activeTab == .logs {
+      let levelOptions = ["log", "info", "warn", "error", "debug"].map { level -> UIAction in
+        let isSelected = selectedLogLevels.contains(level)
+        var attributes: UIMenuElement.Attributes = []
+        if #available(iOS 16.0, *) { attributes.insert(.keepsMenuPresented) }
+        return UIAction(title: level.uppercased(), attributes: attributes, state: isSelected ? .on : .off) { [weak self] _ in
+          self?.toggleLevel(level)
+        }
+      }
+      let levelMenu = UIMenu(title: strings["level"] ?? "级别", options: .displayInline, children: levelOptions)
+      menuChildren.append(levelMenu)
+    }
+
+    filterButton.menu = UIMenu(title: strings["filter"] ?? "筛选", children: menuChildren)
+    
+    let hasFilters: Bool
+    if activeTab == .logs {
+      hasFilters =
+        selectedLogOrigins.count < PanelFilterPreferences.allOrigins.count ||
+        selectedLogLevels.count < PanelFilterPreferences.allLevels.count
+    } else {
+      hasFilters = selectedNetworkOrigins.count < PanelFilterPreferences.allOrigins.count
+    }
+    var config = filterButton.configuration
+    config?.baseForegroundColor = hasFilters ? .white : PanelColors.primary
+    config?.baseBackgroundColor = hasFilters ? PanelColors.primary : PanelColors.controlBackground
+    filterButton.configuration = config
+  }
+
+  private func toggleOrigin(_ origin: String) {
+    switch activeTab {
+    case .logs:
+      if selectedLogOrigins.contains(origin) {
+        selectedLogOrigins.remove(origin)
+      } else {
+        selectedLogOrigins.insert(origin)
+      }
+      PanelFilterPreferences.saveLogOrigins(selectedLogOrigins)
+    case .network:
+      if selectedNetworkOrigins.contains(origin) {
+        selectedNetworkOrigins.remove(origin)
+      } else {
+        selectedNetworkOrigins.insert(origin)
+      }
+      PanelFilterPreferences.saveNetworkOrigins(selectedNetworkOrigins)
+    }
+    updateFilterMenu()
+    syncNativeCaptureStates()
+    reloadFromStore()
+  }
+
+  private func toggleLevel(_ level: String) {
+    if selectedLogLevels.contains(level) {
+      selectedLogLevels.remove(level)
+    } else {
+      selectedLogLevels.insert(level)
+    }
+    PanelFilterPreferences.saveLogLevels(selectedLogLevels)
+    updateFilterMenu()
+    reloadFromStore()
+  }
+
+  private func syncNativeCaptureStates() {
+    let shouldActivateNativeLogs = activeTab == .logs && selectedLogOrigins.contains("native")
+    InAppDebuggerNativeLogCapture.shared.setPanelActive(shouldActivateNativeLogs)
+
+    // The current native WebSocket hook captures RN-managed sockets, which are still JS-origin requests.
+    let shouldActivateNativeWebSocket =
+      currentConfig.enableNetworkTab &&
+      activeTab == .network &&
+      selectedNetworkOrigins.contains("js")
+    InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(shouldActivateNativeWebSocket)
   }
 
   private func applySnapshot() {
@@ -373,12 +545,13 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       searchField.placeholder = activeTab == .logs
         ? currentConfig.strings["searchPlaceholder"] ?? "搜索日志..."
         : localizedNetworkSearchPlaceholder()
-      originWrapView.isHidden = activeTab != .logs
-      filterWrapView.isHidden = activeTab != .logs
+      filterButton.isHidden = false
       updateToolbarTitles()
-      updateOriginButtonStates()
-      updateFilterButtonStates()
+      updateFilterMenu()
       updateSortButton()
+      if view.window != nil {
+        syncNativeCaptureStates()
+      }
     }
 
     displayedLogs = filteredLogs(from: state.1)
@@ -393,7 +566,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     var result: [DebugLogEntry] = []
     result.reserveCapacity(source.count)
     for entry in source {
-      guard selectedLevels.contains(entry.type), selectedOrigins.contains(entry.origin) else {
+      guard selectedLogLevels.contains(entry.type), selectedLogOrigins.contains(entry.origin) else {
         continue
       }
       if !query.isEmpty {
@@ -420,11 +593,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     var result: [DebugNetworkEntry] = []
     result.reserveCapacity(source.count)
     for entry in source {
+      guard selectedNetworkOrigins.contains(entry.origin) else {
+        continue
+      }
       if !query.isEmpty {
         let matchesQuery =
           entry.url.localizedCaseInsensitiveContains(query) ||
+          entry.origin.localizedCaseInsensitiveContains(query) ||
           entry.method.localizedCaseInsensitiveContains(query) ||
-          entry.state.localizedCaseInsensitiveContains(query)
+          entry.state.localizedCaseInsensitiveContains(query) ||
+          (entry.protocol ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.requestedProtocols ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.closeReason ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.error ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.events ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.messages ?? "").localizedCaseInsensitiveContains(query)
         guard matchesQuery else {
           continue
         }
@@ -474,116 +657,18 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore(reason: .dataOnly)
   }
 
-  private func makeToolbarButton(title: String, imageName: String?, style: ToolbarButtonStyle) -> UIButton {
-    var config = style == .primary ? UIButton.Configuration.filled() : UIButton.Configuration.tinted()
-    config.title = title
-    config.image = imageName.flatMap { UIImage(systemName: $0) }
-    config.imagePadding = imageName == nil ? 0 : 6
-    config.cornerStyle = .small
-    config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10)
-    switch style {
-    case .primary:
-      config.baseForegroundColor = .white
-      config.baseBackgroundColor = PanelColors.primary
-    case .neutral:
-      config.baseForegroundColor = PanelColors.primary
-      config.baseBackgroundColor = PanelColors.controlBackground
-    }
-
-    let button = UIButton(configuration: config)
-    button.titleLabel?.font = .systemFont(ofSize: 13, weight: .bold)
-    return button
-  }
-
-  private func makeLevelButton(level: String) -> UIButton {
-    let button = UIButton(type: .system)
-    button.accessibilityIdentifier = level
-    button.addTarget(self, action: #selector(levelTapped(_:)), for: .touchUpInside)
-    button.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
-    styleLevelButton(button)
-    return button
-  }
-
-  private func makeOriginButton(origin: String) -> UIButton {
-    let button = UIButton(type: .system)
-    button.accessibilityIdentifier = origin
-    button.addTarget(self, action: #selector(originTapped(_:)), for: .touchUpInside)
-    button.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
-    styleOriginButton(button)
-    return button
-  }
-
-  private func styleOriginButton(_ button: UIButton) {
-    guard let origin = button.accessibilityIdentifier else {
-      return
-    }
-    button.isSelected = selectedOrigins.contains(origin)
-    var config = button.isSelected ? UIButton.Configuration.filled() : UIButton.Configuration.tinted()
-    config.title = localizedLogOriginTitle(origin)
-    config.cornerStyle = .small
-    config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 9, bottom: 4, trailing: 9)
-    config.baseForegroundColor = button.isSelected ? .white : PanelColors.mutedText
-    config.baseBackgroundColor = button.isSelected ? PanelColors.primary : UIColor(red: 0.97, green: 0.98, blue: 0.99, alpha: 1)
-    button.configuration = config
-    button.layer.borderWidth = button.isSelected ? 0 : 1.2
-    button.layer.borderColor = (button.isSelected ? PanelColors.primary : PanelColors.border).cgColor
-    button.layer.cornerRadius = 7
-    button.invalidateIntrinsicContentSize()
-  }
-
-  private func styleLevelButton(_ button: UIButton) {
-    guard let level = button.accessibilityIdentifier else {
-      return
-    }
-    button.isSelected = selectedLevels.contains(level)
-    let tone = toneForLogLevel(level)
-    var config = button.isSelected ? UIButton.Configuration.filled() : UIButton.Configuration.tinted()
-    config.title = level.uppercased()
-    config.cornerStyle = .small
-    config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 9, bottom: 4, trailing: 9)
-    config.baseForegroundColor = button.isSelected ? .white : PanelColors.mutedText
-    config.baseBackgroundColor = button.isSelected ? tone.foreground : UIColor(red: 0.97, green: 0.98, blue: 0.99, alpha: 1)
-    button.configuration = config
-    button.layer.borderWidth = button.isSelected ? 0 : 1.2
-    button.layer.borderColor = (button.isSelected ? tone.foreground : PanelColors.border).cgColor
-    button.layer.cornerRadius = 7
-    button.invalidateIntrinsicContentSize()
-  }
-
-  private func updateFilterButtonStates() {
-    filterWrapView.arrangedSubviews
-      .compactMap { $0 as? UIButton }
-      .forEach { styleLevelButton($0) }
-    filterWrapView.invalidateIntrinsicContentSize()
-  }
-
-  private func updateOriginButtonStates() {
-    originWrapView.arrangedSubviews
-      .compactMap { $0 as? UIButton }
-      .forEach { styleOriginButton($0) }
-    originWrapView.invalidateIntrinsicContentSize()
-  }
-
   private func updateToolbarTitles() {
-    setButtonTitle(clearButton, title: strings["clear"] ?? "清空")
     clearButton.accessibilityLabel = strings["clear"] ?? "清空"
+    filterButton.accessibilityLabel = strings["filter"] ?? "筛选"
   }
 
   private func updateSortButton() {
     guard var config = sortToggleButton.configuration else {
       return
     }
-    config.title = localizedSortTitle(ascending: sortAscending)
     config.image = UIImage(systemName: sortAscending ? "arrow.up" : "arrow.down")
     sortToggleButton.configuration = config
-  }
-
-  private func setButtonTitle(_ button: UIButton, title: String) {
-    guard var config = button.configuration else {
-      return
-    }
-    config.title = title
-    button.configuration = config
+    sortToggleButton.accessibilityLabel = localizedSortTitle(ascending: sortAscending)
   }
 
   private func updateEmptyState() {
@@ -597,17 +682,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let title: String
     let detail: String
     if activeTab == .logs {
-      title = hasSearch || selectedLevels.isEmpty
+      title = hasSearch || selectedLogLevels.isEmpty
         ? strings["noSearchResult"] ?? "未找到匹配的日志"
         : strings["noLogs"] ?? "暂无日志"
-      detail = selectedOrigins.isEmpty
-        ? localizedNoOriginHint()
-        : (selectedLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint())
+      detail = selectedLogOrigins.isEmpty
+        ? localizedNoLogOriginHint()
+        : (selectedLogLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint())
     } else {
-      title = hasSearch
-        ? strings["noSearchResult"] ?? "未找到匹配的日志"
+      title = hasSearch || selectedNetworkOrigins.isEmpty
+        ? localizedNoNetworkResultTitle()
         : strings["noNetworkRequests"] ?? "暂无网络请求"
-      detail = localizedEmptyHint()
+      detail = selectedNetworkOrigins.isEmpty ? localizedNoNetworkOriginHint() : localizedEmptyHint()
     }
     emptyStateView.configure(title: title, detail: detail)
     tableView.backgroundView = emptyStateView
@@ -665,24 +750,43 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return "至少选择一个日志级别。"
   }
 
-  private func localizedNoOriginHint() -> String {
+  private func localizedNoLogOriginHint() -> String {
     if currentConfig.locale.hasPrefix("en") {
-      return "Select JS or Native to show logs."
+      return "Select JS or native to show logs."
     }
     if currentConfig.locale.hasPrefix("ja") {
-      return "JS または Native を選択してください。"
+      return "JS または native を選択してください。"
     }
     if currentConfig.locale == "zh-TW" {
-      return "請選擇 JS 或原生日誌。"
+      return "請選擇 JS 或 native 日誌。"
     }
-    return "请选择 JS 或原生日志。"
+    return "请选择 JS 或 native 日志。"
   }
 
-  private func localizedLogOriginTitle(_ origin: String) -> String {
-    if origin == "native" {
-      return strings["nativeLogOrigin"] ?? (currentConfig.locale.hasPrefix("zh") ? "原生" : "Native")
+  private func localizedNoNetworkOriginHint() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Select JS or native to show network entries."
     }
-    return strings["jsLogOrigin"] ?? "JS"
+    if currentConfig.locale.hasPrefix("ja") {
+      return "JS または native を選択してください。"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "請選擇 JS 或 native 網路請求。"
+    }
+    return "请选择 JS 或 native 网络请求。"
+  }
+
+  private func localizedNoNetworkResultTitle() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "No matching network requests found"
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "一致する通信が見つかりません"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "未找到符合的網路請求"
+    }
+    return "未找到匹配的网络请求"
   }
 
   private func logDetailBody(for entry: DebugLogEntry) -> String {
@@ -705,6 +809,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     if activeTab == .network && !currentConfig.enableNetworkTab {
       activeTab = .logs
     }
+    syncNativeCaptureStates()
     reloadFromStore()
   }
 
@@ -715,6 +820,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   @objc private func clearTapped() {
     InAppDebuggerStore.shared.clear(kind: activeTab == .logs ? "logs" : "network")
+    if activeTab == .network && selectedNetworkOrigins.contains("js") {
+      InAppDebuggerNativeWebSocketCapture.shared.refreshVisibleEntries()
+    }
   }
 
   @objc private func sortToggleTapped() {
@@ -722,29 +830,6 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore()
   }
 
-  @objc private func levelTapped(_ sender: UIButton) {
-    guard let level = sender.accessibilityIdentifier else {
-      return
-    }
-    if selectedLevels.contains(level) {
-      selectedLevels.remove(level)
-    } else {
-      selectedLevels.insert(level)
-    }
-    reloadFromStore()
-  }
-
-  @objc private func originTapped(_ sender: UIButton) {
-    guard let origin = sender.accessibilityIdentifier else {
-      return
-    }
-    if selectedOrigins.contains(origin) {
-      selectedOrigins.remove(origin)
-    } else {
-      selectedOrigins.insert(origin)
-    }
-    reloadFromStore()
-  }
 
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
@@ -754,7 +839,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       let entry = displayedLogs[indexPath.row]
       let detail = InAppDebuggerTextDetailViewController(
-        titleText: "[\(localizedLogOriginTitle(entry.origin))] [\(entry.type.uppercased())] \(entry.timestamp)",
+        titleText: "[\(localizedOriginTitle(entry.origin, strings: strings))] [\(entry.type.uppercased())] \(entry.timestamp)",
         bodyText: logDetailBody(for: entry)
       )
       navigationController?.pushViewController(detail, animated: true)
@@ -826,11 +911,9 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     self.onCopy = onCopy
     let tone = toneForLogLevel(entry.type)
     accentView.backgroundColor = tone.foreground
-    originLabel.text = entry.origin == "native"
-      ? strings["nativeLogOrigin"] ?? "原生"
-      : strings["jsLogOrigin"] ?? "JS"
-    originLabel.textColor = entry.origin == "native" ? .white : PanelColors.mutedText
-    originLabel.backgroundColor = entry.origin == "native" ? PanelColors.primary : PanelColors.controlBackground
+    originLabel.text = localizedOriginTitle(entry.origin, strings: strings)
+    originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
+    originLabel.backgroundColor = isNativeOrigin(entry.origin) ? PanelColors.primary : PanelColors.controlBackground
     levelLabel.text = entry.type.uppercased()
     levelLabel.textColor = tone.foreground
     levelLabel.backgroundColor = tone.background
@@ -931,6 +1014,7 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
 
   private let cardView = UIView()
   private let accentView = UIView()
+  private let originLabel = InAppDebuggerPaddedLabel()
   private let methodLabel = InAppDebuggerPaddedLabel()
   private let statusLabel = InAppDebuggerPaddedLabel()
   private let stateLabel = UILabel()
@@ -950,15 +1034,24 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
   func configure(entry: DebugNetworkEntry, strings: [String: String]) {
     let tone = toneForNetwork(entry)
     accentView.backgroundColor = tone.foreground
+    originLabel.text = localizedOriginTitle(entry.origin, strings: strings)
+    originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
+    originLabel.backgroundColor = isNativeOrigin(entry.origin) ? PanelColors.primary : PanelColors.controlBackground
     methodLabel.text = entry.method.uppercased()
     methodLabel.textColor = PanelColors.primary
     methodLabel.backgroundColor = UIColor(red: 0.89, green: 0.96, blue: 0.94, alpha: 1)
-    statusLabel.text = entry.status.map(String.init) ?? entry.kind.uppercased()
+    statusLabel.text = entry.status.map(String.init) ?? (entry.kind == "websocket" ? "WS" : entry.kind.uppercased())
     statusLabel.textColor = tone.foreground
     statusLabel.backgroundColor = tone.background
     stateLabel.text = entry.state.uppercased()
     urlLabel.text = entry.url
-    durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-")"
+    if entry.kind == "websocket" {
+      let incoming = entry.messageCountIn ?? 0
+      let outgoing = entry.messageCountOut ?? 0
+      durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-") · IN \(incoming) / OUT \(outgoing)"
+    } else {
+      durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-")"
+    }
   }
 
   private func buildUI() {
@@ -972,6 +1065,10 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     cardView.layer.borderColor = PanelColors.border.cgColor
     cardView.layer.masksToBounds = true
     contentView.addSubview(cardView)
+
+    originLabel.font = .systemFont(ofSize: 11, weight: .bold)
+    originLabel.layer.cornerRadius = 8
+    originLabel.layer.masksToBounds = true
 
     methodLabel.font = .systemFont(ofSize: 12, weight: .bold)
     methodLabel.layer.cornerRadius = 8
@@ -995,7 +1092,7 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     chevronView.tintColor = PanelColors.mutedText
     chevronView.setContentHuggingPriority(.required, for: .horizontal)
 
-    let headerStack = UIStackView(arrangedSubviews: [methodLabel, statusLabel, stateLabel, UIView(), chevronView])
+    let headerStack = UIStackView(arrangedSubviews: [originLabel, methodLabel, statusLabel, stateLabel, UIView(), chevronView])
     headerStack.axis = .horizontal
     headerStack.alignment = .center
     headerStack.spacing = 8
@@ -1078,66 +1175,6 @@ private final class InAppDebuggerEmptyStateView: UIView {
   }
 }
 
-private final class InAppDebuggerWrapView: UIView {
-  private(set) var arrangedSubviews: [UIView] = []
-  private let itemSpacing: CGFloat = 6
-  private let rowSpacing: CGFloat = 6
-  private var lastMeasuredWidth: CGFloat = 0
-
-  func setArrangedSubviews(_ views: [UIView]) {
-    arrangedSubviews.forEach { $0.removeFromSuperview() }
-    arrangedSubviews = views
-    arrangedSubviews.forEach { addSubview($0) }
-    setNeedsLayout()
-    invalidateIntrinsicContentSize()
-  }
-
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    if abs(bounds.width - lastMeasuredWidth) > 0.5 {
-      lastMeasuredWidth = bounds.width
-      invalidateIntrinsicContentSize()
-    }
-    _ = layoutItems(for: bounds.width, updateFrames: true)
-  }
-
-  override var intrinsicContentSize: CGSize {
-    let width = bounds.width > 0 ? bounds.width : UIScreen.main.bounds.width - 28
-    return CGSize(width: UIView.noIntrinsicMetric, height: layoutItems(for: width, updateFrames: false))
-  }
-
-  private func layoutItems(for width: CGFloat, updateFrames: Bool) -> CGFloat {
-    guard !arrangedSubviews.isEmpty else {
-      return 0
-    }
-
-    let availableWidth = max(width, 1)
-    var x: CGFloat = 0
-    var y: CGFloat = 0
-    var rowHeight: CGFloat = 0
-
-    arrangedSubviews.forEach { view in
-      let fittingSize = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-      let itemWidth = min(ceil(fittingSize.width), availableWidth)
-      let itemHeight = ceil(max(fittingSize.height, 28))
-
-      if x > 0, x + itemWidth > availableWidth {
-        x = 0
-        y += rowHeight + rowSpacing
-        rowHeight = 0
-      }
-
-      if updateFrames {
-        view.frame = CGRect(x: x, y: y, width: itemWidth, height: itemHeight)
-      }
-
-      x += itemWidth + itemSpacing
-      rowHeight = max(rowHeight, itemHeight)
-    }
-
-    return y + rowHeight
-  }
-}
 
 private final class InAppDebuggerPaddedLabel: UILabel {
   var contentInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
@@ -1195,7 +1232,7 @@ final class InAppDebuggerTextDetailViewController: UIViewController {
       textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
       textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
       textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
-      textView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+      textView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
   }
 
@@ -1246,32 +1283,9 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -28),
     ])
 
-    let requestHeaders = entry.requestHeaders
-      .map { "\($0.key): \($0.value)" }
-      .joined(separator: "\n")
-      .ifEmpty("-")
-    let responseHeaders = entry.responseHeaders
-      .map { "\($0.key): \($0.value)" }
-      .joined(separator: "\n")
-      .ifEmpty("-")
-    let durationText = entry.durationMs.map { "\($0)ms" } ?? "-"
-    let noRequestBodyText = strings["noRequestBody"] ?? "无请求体"
-    let noResponseBodyText = strings["noResponseBody"] ?? "无响应体"
-    let noMessagesText = strings["noMessages"] ?? "暂无消息"
-
-    let sections: [(title: String, body: String, monospace: Bool)] = [
-      (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
-      (title: strings["status"] ?? "状态码", body: entry.status.map(String.init) ?? "-", monospace: false),
-      (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
-      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
-      (title: "URL", body: entry.url, monospace: true),
-      (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
-      (title: strings["requestHeaders"] ?? "请求头", body: requestHeaders, monospace: true),
-      (title: strings["responseHeaders"] ?? "响应头", body: responseHeaders, monospace: true),
-      (title: strings["requestBody"] ?? "请求体", body: entry.requestBody ?? noRequestBodyText, monospace: true),
-      (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText, monospace: true),
-      (title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText, monospace: true),
-    ]
+    let sections = entry.kind == "websocket"
+      ? webSocketSections()
+      : httpSections()
 
     sections.forEach { title, body, monospace in
       stack.addArrangedSubview(makeSection(title: title, body: body, monospace: monospace))
@@ -1280,6 +1294,89 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     if let error = entry.error, !error.isEmpty {
       stack.addArrangedSubview(makeSection(title: "错误", body: error, monospace: true))
     }
+  }
+
+  private func httpSections() -> [(title: String, body: String, monospace: Bool)] {
+    let durationText = entry.durationMs.map { "\($0)ms" } ?? "-"
+    let noRequestBodyText = strings["noRequestBody"] ?? "无请求体"
+    let noResponseBodyText = strings["noResponseBody"] ?? "无响应体"
+    let noMessagesText = strings["noMessages"] ?? "暂无消息"
+
+    return [
+      (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
+      (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
+      (title: strings["status"] ?? "状态码", body: entry.status.map(String.init) ?? "-", monospace: false),
+      (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
+      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
+      (title: "URL", body: entry.url, monospace: true),
+      (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
+      (title: strings["requestHeaders"] ?? "请求头", body: headerText(entry.requestHeaders), monospace: true),
+      (title: strings["responseHeaders"] ?? "响应头", body: headerText(entry.responseHeaders), monospace: true),
+      (title: strings["requestBody"] ?? "请求体", body: entry.requestBody ?? noRequestBodyText, monospace: true),
+      (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText, monospace: true),
+      (title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText, monospace: true),
+    ]
+  }
+
+  private func webSocketSections() -> [(title: String, body: String, monospace: Bool)] {
+    let durationText = entry.durationMs.map { "\($0)ms" } ?? "-"
+    let noMessagesText = strings["noMessages"] ?? "暂无消息"
+    let noEventsText = "暂无事件"
+    let messageSummary = "IN \(entry.messageCountIn ?? 0) / OUT \(entry.messageCountOut ?? 0)"
+    let byteSummary = "IN \(formatNetworkByteCount(entry.bytesIn)) / OUT \(formatNetworkByteCount(entry.bytesOut))"
+
+    var sections: [(title: String, body: String, monospace: Bool)] = [
+      (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
+      (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
+      (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
+      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
+      (title: "Requested protocols", body: entry.requestedProtocols ?? "-", monospace: false),
+      (title: "URL", body: entry.url, monospace: true),
+      (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
+      (title: "Messages", body: messageSummary, monospace: false),
+      (title: "Bytes", body: byteSummary, monospace: false),
+      (title: strings["requestHeaders"] ?? "请求头", body: headerText(entry.requestHeaders), monospace: true),
+    ]
+
+    if !entry.responseHeaders.isEmpty {
+      sections.append((title: strings["responseHeaders"] ?? "响应头", body: headerText(entry.responseHeaders), monospace: true))
+    }
+
+    if let status = entry.status {
+      sections.append((title: strings["status"] ?? "状态码", body: String(status), monospace: false))
+    }
+
+    if entry.requestedCloseCode != nil || (entry.requestedCloseReason?.isEmpty == false) {
+      sections.append((title: "Close requested", body: closeRequestSummary(), monospace: false))
+    }
+
+    if entry.closeCode != nil || entry.cleanClose != nil || (entry.closeReason?.isEmpty == false) {
+      sections.append((title: "Close result", body: closeResultSummary(), monospace: false))
+    }
+
+    sections.append((title: "Event timeline", body: entry.events ?? noEventsText, monospace: true))
+    sections.append((title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText, monospace: true))
+    return sections
+  }
+
+  private func headerText(_ headers: [String: String]) -> String {
+    headers
+      .map { "\($0.key): \($0.value)" }
+      .joined(separator: "\n")
+      .ifEmpty("-")
+  }
+
+  private func closeRequestSummary() -> String {
+    let code = entry.requestedCloseCode.map(String.init) ?? "-"
+    let reason = entry.requestedCloseReason?.ifEmpty("-") ?? "-"
+    return "code: \(code)\nreason: \(reason)"
+  }
+
+  private func closeResultSummary() -> String {
+    let code = entry.closeCode.map(String.init) ?? "-"
+    let reason = entry.closeReason?.ifEmpty("-") ?? "-"
+    let clean = entry.cleanClose.map { $0 ? "true" : "false" } ?? "-"
+    return "code: \(code)\nclean: \(clean)\nreason: \(reason)"
   }
 
   private func makeSection(title: String, body: String, monospace: Bool) -> UIView {

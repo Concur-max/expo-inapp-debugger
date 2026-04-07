@@ -8,7 +8,14 @@ export type DebugErrorSource = 'console' | 'global' | 'promise' | 'react' | stri
 
 export type DebugNetworkKind = 'http' | 'websocket';
 
-export type DebugNetworkState = 'pending' | 'success' | 'error' | 'closed';
+export type DebugNetworkState =
+  | 'pending'
+  | 'success'
+  | 'error'
+  | 'closed'
+  | 'connecting'
+  | 'open'
+  | 'closing';
 
 export type SupportedLocale = 'auto' | 'en-US' | 'zh-CN' | 'zh-TW' | 'ja';
 
@@ -36,6 +43,7 @@ export type DebugNetworkEntry = {
   kind: DebugNetworkKind;
   method: string;
   url: string;
+  origin: DebugLogOrigin;
   state: DebugNetworkState;
   startedAt: number;
   updatedAt: number;
@@ -51,7 +59,17 @@ export type DebugNetworkEntry = {
   responseSize?: number;
   error?: string;
   protocol?: string;
+  requestedProtocols?: string;
   closeReason?: string;
+  closeCode?: number;
+  requestedCloseCode?: number;
+  requestedCloseReason?: string;
+  cleanClose?: boolean;
+  messageCountIn?: number;
+  messageCountOut?: number;
+  bytesIn?: number;
+  bytesOut?: number;
+  events?: string;
   messages?: string;
 };
 

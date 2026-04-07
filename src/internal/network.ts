@@ -61,6 +61,7 @@ function safeStringify(value: unknown) {
 
 let cachedXHRInterceptor: XHRInterceptorModule | null | undefined;
 let cachedWebSocketInterceptor: WebSocketInterceptorModule | null | undefined;
+let cachedUseNativeWebSocketCapture: boolean | undefined;
 
 function resolveXHRInterceptor() {
   if (cachedXHRInterceptor !== undefined) {
@@ -86,6 +87,19 @@ function resolveWebSocketInterceptor() {
     cachedWebSocketInterceptor = null;
   }
   return cachedWebSocketInterceptor;
+}
+
+function shouldUseNativeWebSocketCapture() {
+  if (cachedUseNativeWebSocketCapture !== undefined) {
+    return cachedUseNativeWebSocketCapture;
+  }
+  try {
+    const reactNative = require('react-native');
+    cachedUseNativeWebSocketCapture = reactNative.Platform?.OS === 'ios';
+  } catch {
+    cachedUseNativeWebSocketCapture = false;
+  }
+  return cachedUseNativeWebSocketCapture;
 }
 
 export class NetworkCollector {
@@ -148,6 +162,7 @@ export class NetworkCollector {
         kind: 'http',
         method: method || 'GET',
         url,
+        origin: 'js',
         state: 'pending',
         startedAt: now(),
         updatedAt: now(),
@@ -226,6 +241,10 @@ export class NetworkCollector {
   }
 
   private attachWebSocket() {
+    if (shouldUseNativeWebSocketCapture()) {
+      return;
+    }
+
     this.webSocketInterceptor = resolveWebSocketInterceptor();
     if (!this.webSocketInterceptor) {
       this.options.onInternalWarning?.('WebSocket interceptor was not found');
@@ -239,6 +258,7 @@ export class NetworkCollector {
           kind: 'websocket',
           method: 'WS',
           url,
+          origin: 'js',
           protocol: protocols?.join(', ') || '',
           state: 'pending',
           startedAt: now(),

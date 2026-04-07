@@ -1,11 +1,14 @@
 import * as React from 'react';
+import Constants from 'expo-constants';
 import {
   Alert,
+  NativeModules,
   ScrollView,
   StatusBar,
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -23,10 +26,81 @@ function DemoCrash({ shouldCrash }: { shouldCrash: boolean }) {
   return null;
 }
 
+function extractHost(candidate?: string | null) {
+  if (!candidate) {
+    return null;
+  }
+  const trimmed = candidate.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withProtocol = /^[a-z]+:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  try {
+    const url = new URL(withProtocol);
+    return url.hostname || null;
+  } catch {
+    const match = trimmed.match(/^([^/:]+)(?::\d+)?/);
+    return match?.[1] || null;
+  }
+}
+
+function isLoopbackHost(host?: string | null) {
+  if (!host) {
+    return false;
+  }
+  const normalized = host.toLowerCase();
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '0.0.0.0';
+}
+
+function isLoopbackUrl(url: string) {
+  try {
+    return isLoopbackHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function resolveDefaultWebSocketUrl() {
+  const expoHost =
+    extractHost(Constants.expoConfig?.hostUri) ??
+    extractHost(Constants.expoGoConfig?.debuggerHost) ??
+    extractHost(Constants.linkingUri);
+  const scriptURL = NativeModules.SourceCode?.scriptURL as string | undefined;
+  const scriptHost = extractHost(scriptURL);
+  const host = expoHost ?? (!isLoopbackHost(scriptHost) ? scriptHost : null) ?? '127.0.0.1';
+  return `ws://${host}:8787`;
+}
+
+function createDemoSocketPayload() {
+  return JSON.stringify({
+    type: 'client.demo',
+    sentAt: new Date().toISOString(),
+    random: Math.round(Math.random() * 10000),
+    message: 'hello from expo-inapp-debugger example',
+  });
+}
+
 export default function App() {
   const [enabled, setEnabled] = React.useState(true);
   const [shouldCrash, setShouldCrash] = React.useState(false);
+  const [socketUrl, setSocketUrl] = React.useState(() => resolveDefaultWebSocketUrl());
+  const [socketStatus, setSocketStatus] = React.useState('idle');
+  const [socketMessage, setSocketMessage] = React.useState(() => createDemoSocketPayload());
+  const [socketEvents, setSocketEvents] = React.useState<string[]>([]);
+  const [socketHint, setSocketHint] = React.useState(() =>
+    isLoopbackUrl(resolveDefaultWebSocketUrl())
+      ? '当前是 loopback 地址。模拟器可用，真机请改成电脑局域网 IP，例如 ws://192.168.x.x:8787。'
+      : '默认地址已按 Expo/Metro 宿主机自动推断。'
+  );
   const socketRef = React.useRef<WebSocket | null>(null);
+
+  const appendSocketEvent = React.useCallback((message: string) => {
+    setSocketEvents((current) => [
+      `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${message}`,
+      ...current,
+    ].slice(0, 8));
+  }, []);
 
   const logMessage = React.useCallback((type: 'log' | 'info' | 'warn' | 'debug' | 'error') => {
     const payload = {
@@ -53,23 +127,69 @@ export default function App() {
 
   const connectSocket = React.useCallback(() => {
     socketRef.current?.close();
-    const socket = new WebSocket('wss://echo.websocket.events');
+    setSocketStatus('connecting');
+    appendSocketEvent(`connecting ${socketUrl}`);
+    if (isLoopbackUrl(socketUrl)) {
+      setSocketHint('如果你现在连的是 iPhone 真机，127.0.0.1 指向手机自己。请改成电脑局域网 IP。');
+    } else {
+      setSocketHint('正在连接本地 echo server...');
+    }
+
+    const socket = new WebSocket(socketUrl);
     socketRef.current = socket;
 
     socket.onopen = () => {
-      console.info('WebSocket 已连接');
-      socket.send(`来自示例应用的消息 ${Date.now()}`);
+      setSocketStatus('open');
+      setSocketHint('连接成功，现在可以反复发送消息并在 network 面板里看完整收发。');
+      console.info('WebSocket 已连接', socketUrl);
+      appendSocketEvent('open');
+      const initialPayload = createDemoSocketPayload();
+      setSocketMessage(initialPayload);
+      socket.send(initialPayload);
     };
     socket.onmessage = (event) => {
       console.info('WebSocket 消息', event.data);
+      appendSocketEvent(`message ${String(event.data).slice(0, 100)}`);
     };
     socket.onerror = (event) => {
       console.error('WebSocket 错误', event);
+      setSocketStatus('error');
+      if (isLoopbackUrl(socketUrl)) {
+        setSocketHint('连接失败：真机不能使用 127.0.0.1。请把地址改成你电脑的局域网 IP。');
+      } else {
+        setSocketHint('连接失败，请确认 `pnpm ws:echo` 正在运行，并且手机和电脑在同一网络。');
+      }
+      appendSocketEvent('error');
     };
     socket.onclose = (event) => {
       console.warn('WebSocket 已关闭', event.code, event.reason);
+      setSocketStatus('closed');
+      if (event.code === 1006 && isLoopbackUrl(socketUrl)) {
+        setSocketHint('1006 + Connection refused 基本就是地址不对。真机请改成电脑局域网 IP。');
+      }
+      appendSocketEvent(`closed code=${event.code} reason=${event.reason || '-'}`);
     };
-  }, []);
+  }, [appendSocketEvent, socketUrl]);
+
+  const sendSocketMessage = React.useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      Alert.alert('WebSocket 未连接', '请先启动本地 echo server，再连接 WebSocket。');
+      return;
+    }
+
+    const nextMessage = socketMessage.trim() || createDemoSocketPayload();
+    socket.send(nextMessage);
+    setSocketMessage(nextMessage);
+    appendSocketEvent(`send ${nextMessage.slice(0, 100)}`);
+  }, [appendSocketEvent, socketMessage]);
+
+  const closeSocket = React.useCallback(() => {
+    socketRef.current?.close(1000, 'manual close from demo');
+    socketRef.current = null;
+    setSocketStatus('closed');
+    appendSocketEvent('manual close');
+  }, [appendSocketEvent]);
 
   const captureManualError = React.useCallback(() => {
     inAppDebug.captureError('manual', '示例页面手动注入了一条错误');
@@ -96,6 +216,61 @@ export default function App() {
               悬浮原生调试器也可以通过控制器随时显示或隐藏。
             </Text>
 
+            <View style={styles.socketCard}>
+              <Text style={styles.cardTitle}>真实 WebSocket 回路</Text>
+              <Text style={styles.cardHint}>
+                先在 `example` 目录运行 `pnpm start:lan` 和 `pnpm ws:echo`，然后点击连接。真机如果仍然显示
+                `127.0.0.1`，请把地址改成 `ws:echo` 启动日志里打印出来的局域网 URL。
+              </Text>
+              <Text style={styles.cardSubHint}>{socketHint}</Text>
+
+              <View style={styles.socketStatusRow}>
+                <Text style={styles.socketStatusLabel}>连接状态</Text>
+                <View style={styles.socketStatusBadge}>
+                  <Text style={styles.socketStatusBadgeText}>{socketStatus.toUpperCase()}</Text>
+                </View>
+              </View>
+
+              <TextInput
+                value={socketUrl}
+                onChangeText={setSocketUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="ws://192.168.x.x:8787"
+                placeholderTextColor="#8E7F6C"
+                style={styles.input}
+              />
+
+              <TextInput
+                value={socketMessage}
+                onChangeText={setSocketMessage}
+                autoCapitalize="none"
+                autoCorrect={false}
+                multiline
+                placeholder="输入要发送的消息"
+                placeholderTextColor="#8E7F6C"
+                style={[styles.input, styles.messageInput]}
+              />
+
+              <View style={styles.socketActionGrid}>
+                <ActionButton label="连接 WebSocket" onPress={connectSocket} />
+                <ActionButton label="发送消息" onPress={sendSocketMessage} />
+                <ActionButton label="关闭连接" onPress={closeSocket} tone="secondary" />
+              </View>
+
+              <View style={styles.eventList}>
+                {socketEvents.length === 0 ? (
+                  <Text style={styles.eventPlaceholder}>连接、收发、关闭事件会显示在这里。</Text>
+                ) : (
+                  socketEvents.map((event) => (
+                    <Text key={event} style={styles.eventItem}>
+                      {event}
+                    </Text>
+                  ))
+                )}
+              </View>
+            </View>
+
             <View style={styles.switchRow}>
               <View>
                 <Text style={styles.switchLabel}>启用调试器</Text>
@@ -113,7 +288,6 @@ export default function App() {
               <ActionButton label="触发 Console Debug" onPress={() => logMessage('debug')} />
               <ActionButton label="触发 Console Error" onPress={() => logMessage('error')} />
               <ActionButton label="发起 Fetch 请求" onPress={makeRequest} />
-              <ActionButton label="连接 WebSocket" onPress={connectSocket} />
               <ActionButton label="写入手动错误" onPress={captureManualError} />
               <ActionButton label="触发渲染崩溃" onPress={() => setShouldCrash(true)} tone="danger" />
               <ActionButton label="显示调试器" onPress={() => void InAppDebugController.show()} />
@@ -220,6 +394,91 @@ const styles = StyleSheet.create({
     marginTop: 4,
     color: '#66584A',
     lineHeight: 20,
+  },
+  socketCard: {
+    borderRadius: 18,
+    padding: 16,
+    backgroundColor: '#FFFDF8',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#D8D0C3',
+    gap: 12,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#2B221B',
+  },
+  cardHint: {
+    fontSize: 14,
+    lineHeight: 21,
+    color: '#66584A',
+  },
+  cardSubHint: {
+    fontSize: 13,
+    lineHeight: 20,
+    color: '#8A5631',
+    backgroundColor: '#F8E8DA',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  socketStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  socketStatusLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#2B221B',
+  },
+  socketStatusBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#E6DED1',
+  },
+  socketStatusBadgeText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#2B221B',
+  },
+  input: {
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#D8D0C3',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: '#2B221B',
+    fontSize: 15,
+  },
+  messageInput: {
+    minHeight: 110,
+    textAlignVertical: 'top',
+    fontFamily: 'Menlo',
+  },
+  socketActionGrid: {
+    gap: 10,
+  },
+  eventList: {
+    borderRadius: 14,
+    backgroundColor: '#2B221B',
+    padding: 12,
+    gap: 8,
+  },
+  eventPlaceholder: {
+    color: '#E6DED1',
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  eventItem: {
+    color: '#F6F1E8',
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: 'Menlo',
   },
   grid: {
     gap: 12,

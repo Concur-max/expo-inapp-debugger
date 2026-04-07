@@ -4,10 +4,6 @@ public final class InAppDebuggerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("InAppDebugger")
 
-    OnCreate {
-      InAppDebuggerNativeLogCapture.shared.prepare()
-    }
-
     AsyncFunction("configure") { (rawConfig: [String: Any]) in
       let config = DebugConfig(
         enabled: rawConfig["enabled"] as? Bool ?? false,
@@ -22,6 +18,7 @@ public final class InAppDebuggerModule: Module {
         } ?? [:]
       )
       InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled)
+      InAppDebuggerNativeWebSocketCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
 
@@ -47,6 +44,7 @@ public final class InAppDebuggerModule: Module {
 
     OnDestroy {
       InAppDebuggerNativeLogCapture.shared.setEnabled(false)
+      InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
       InAppDebuggerOverlayManager.shared.hide()
     }
   }

@@ -132,6 +132,15 @@ final class InAppDebuggerStore {
     notifyChanged()
   }
 
+  func upsertNetworkEntry(_ entry: DebugNetworkEntry) {
+    lock.lock()
+    network.removeAll(where: { $0.id == entry.id })
+    network.append(entry)
+    trimNetworkLocked()
+    lock.unlock()
+    notifyChanged()
+  }
+
   func exportSnapshot() -> [String: Any] {
     lock.lock()
     defer { lock.unlock() }
