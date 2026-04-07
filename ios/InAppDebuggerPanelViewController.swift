@@ -1250,6 +1250,14 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let remainder: String
   }
 
+  private struct ParsedMessageBlock {
+    let timestamp: String?
+    let direction: String?
+    let kind: String?
+    let metadata: String?
+    let payload: String?
+  }
+
   private struct SectionBodyPresentation {
     let displayedText: String
     let copyText: String?
@@ -1301,8 +1309,17 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       ? webSocketSections()
       : httpSections()
 
+    let messagesTitle = strings["messages"] ?? "消息"
+    let noMessagesText = strings["noMessages"] ?? "暂无消息"
+
     sections.forEach { title, body, monospace in
-      stack.addArrangedSubview(makeSection(title: title, body: body, monospace: monospace))
+      if entry.kind == "websocket", title == messagesTitle {
+        stack.addArrangedSubview(
+          makeWebSocketMessagesSection(title: title, raw: entry.messages, fallback: noMessagesText)
+        )
+      } else {
+        stack.addArrangedSubview(makeSection(title: title, body: body, monospace: monospace))
+      }
     }
 
     if let error = entry.error, !error.isEmpty {
@@ -1408,6 +1425,43 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return blocks.joined(separator: "\n\n")
   }
 
+  private func parsedMessageBlocks(from raw: String?) -> [ParsedMessageBlock] {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+      return []
+    }
+
+    return messageBlocks(from: raw)
+      .compactMap(parseMessageBlock)
+  }
+
+  private func parseMessageBlock(_ lines: [String]) -> ParsedMessageBlock? {
+    guard let firstLine = lines.first else {
+      return nil
+    }
+
+    let header = parseMessageHeader(firstLine)
+    let combinedBody = ([header.remainder] + Array(lines.dropFirst()))
+      .joined(separator: "\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let (metadata, payload) = splitMessageMetadataAndPayload(combinedBody)
+
+    let normalizedMetadata = metadata?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedPayload = payload?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let hasHeader = header.timestamp != nil || header.direction != nil || header.kind != nil
+    let hasBody = normalizedMetadata?.isEmpty == false || normalizedPayload?.isEmpty == false
+    guard hasHeader || hasBody else {
+      return nil
+    }
+
+    return ParsedMessageBlock(
+      timestamp: header.timestamp,
+      direction: header.direction,
+      kind: header.kind?.uppercased(),
+      metadata: normalizedMetadata?.isEmpty == true ? nil : normalizedMetadata,
+      payload: normalizedPayload?.isEmpty == true ? nil : normalizedPayload
+    )
+  }
+
   private func messageBlocks(from raw: String) -> [[String]] {
     let lines = raw.components(separatedBy: .newlines)
     var blocks: [[String]] = []
@@ -1447,7 +1501,10 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return true
     }
     return trimmed.range(
-      of: #"^\d{2}:\d{2}:\d{2}\.\d{3}\s+(>>|<<)\b"#,
+      of: #"^\[?\d{2}:\d{2}:\d{2}\.\d{3}\]?\s+(>>|<<)\b"#,
+      options: .regularExpression
+    ) != nil || trimmed.range(
+      of: #"^\[?\d{2}:\d{2}:\d{2}\.\d{3}\]?\s*$"#,
       options: .regularExpression
     ) != nil
   }
@@ -1498,10 +1555,20 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     var direction: String?
     var kind: String?
 
-    if let match = working.range(
-      of: #"^\d{2}:\d{2}:\d{2}\.\d{3}"#,
-      options: .regularExpression
-    ) {
+    if working.hasPrefix("["),
+       let closingBracket = working.firstIndex(of: "]") {
+      let candidate = String(working[working.index(after: working.startIndex)..<closingBracket])
+      if candidate.range(of: #"^\d{2}:\d{2}:\d{2}\.\d{3}$"#, options: .regularExpression) != nil {
+        timestamp = candidate
+        working = String(working[working.index(after: closingBracket)...]).trimmingCharacters(in: .whitespaces)
+      }
+    }
+
+    if timestamp == nil,
+       let match = working.range(
+         of: #"^\d{2}:\d{2}:\d{2}\.\d{3}"#,
+         options: .regularExpression
+       ) {
       timestamp = String(working[match])
       working = String(working[match.upperBound...]).trimmingCharacters(in: .whitespaces)
     }
@@ -1528,6 +1595,108 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       kind: kind,
       remainder: working
     )
+  }
+
+  private func makeWebSocketMessagesSection(title: String, raw: String?, fallback: String) -> UIView {
+    let container = UIView()
+    container.backgroundColor = PanelColors.card
+    container.layer.cornerRadius = 8
+    container.layer.borderWidth = 1
+    container.layer.borderColor = PanelColors.border.cgColor
+
+    let titleLabel = UILabel()
+    titleLabel.font = .systemFont(ofSize: 14, weight: .bold)
+    titleLabel.textColor = PanelColors.text
+    titleLabel.text = title
+
+    let contentStack = UIStackView()
+    contentStack.axis = .vertical
+    contentStack.spacing = 10
+
+    let blocks = parsedMessageBlocks(from: raw)
+    if blocks.isEmpty {
+      contentStack.addArrangedSubview(makeSectionBodyView(body: fallback, monospace: true))
+    } else {
+      blocks.forEach { block in
+        contentStack.addArrangedSubview(makeWebSocketMessageBlockView(block))
+      }
+    }
+
+    let stack = UIStackView(arrangedSubviews: [titleLabel, contentStack])
+    stack.axis = .vertical
+    stack.spacing = 10
+    container.addSubview(stack)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+      stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+      stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+      stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+    ])
+
+    return container
+  }
+
+  private func makeWebSocketMessageBlockView(_ block: ParsedMessageBlock) -> UIView {
+    let container = UIView()
+    container.backgroundColor = UIColor(red: 0.985, green: 0.99, blue: 1.00, alpha: 1)
+    container.layer.cornerRadius = 8
+    container.layer.borderWidth = 1
+    container.layer.borderColor = UIColor(red: 0.80, green: 0.87, blue: 1.00, alpha: 1).cgColor
+
+    let stack = UIStackView()
+    stack.axis = .vertical
+    stack.spacing = 6
+
+    let headerLine = messageHeaderLine(for: block)
+    if !headerLine.isEmpty {
+      let headerLabel = UILabel()
+      headerLabel.numberOfLines = 0
+      headerLabel.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
+      headerLabel.textColor = PanelColors.text
+      headerLabel.text = headerLine
+      stack.addArrangedSubview(headerLabel)
+    }
+
+    if let metadata = block.metadata, !metadata.isEmpty {
+      let metadataLabel = UILabel()
+      metadataLabel.numberOfLines = 0
+      metadataLabel.font = .systemFont(ofSize: 11, weight: .medium)
+      metadataLabel.textColor = PanelColors.mutedText
+      metadataLabel.text = metadata
+      stack.addArrangedSubview(metadataLabel)
+    }
+
+    if let payload = block.payload, !payload.isEmpty {
+      stack.addArrangedSubview(makeSectionBodyView(body: payload, monospace: true))
+    }
+
+    container.addSubview(stack)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+      stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+      stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+      stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+    ])
+
+    return container
+  }
+
+  private func messageHeaderLine(for block: ParsedMessageBlock) -> String {
+    var parts: [String] = []
+
+    if let timestamp = block.timestamp, !timestamp.isEmpty {
+      parts.append("[\(timestamp)]")
+    }
+    if let direction = block.direction, !direction.isEmpty {
+      parts.append(direction)
+    }
+    if let kind = block.kind, !kind.isEmpty {
+      parts.append(kind)
+    }
+
+    return parts.joined(separator: " ")
   }
 
   private func splitMessageMetadataAndPayload(_ body: String) -> (String?, String?) {
@@ -1567,14 +1736,57 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   }
 
   private func prettyPrintedJSON(_ text: String) -> String? {
+    let trimmed = normalizedPlainText(text).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+
+    if let prettyObject = prettyPrintedJSONObjectOrArray(trimmed) {
+      return prettyObject
+    }
+
+    if let decodedString = decodedJSONStringValue(trimmed),
+       let prettyObject = prettyPrintedJSONObjectOrArray(decodedString.trimmingCharacters(in: .whitespacesAndNewlines)) {
+      return prettyObject
+    }
+
+    if let structuredJSON = extractedStructuredJSON(from: trimmed),
+       let prettyObject = prettyPrintedJSONObjectOrArray(structuredJSON) {
+      return prettyObject
+    }
+
+    return nil
+  }
+
+  private func prettyPrintedJSONObjectOrArray(_ text: String) -> String? {
     guard let data = text.data(using: .utf8),
-          let object = try? JSONSerialization.jsonObject(with: data),
-          JSONSerialization.isValidJSONObject(object),
+          let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+          object is [Any] || object is [String: Any],
           let prettyData = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
           let prettyText = String(data: prettyData, encoding: .utf8) else {
       return nil
     }
     return prettyText
+  }
+
+  private func decodedJSONStringValue(_ text: String) -> String? {
+    guard let data = text.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+          let stringValue = object as? String else {
+      return nil
+    }
+    return stringValue
+  }
+
+  private func extractedStructuredJSON(from text: String) -> String? {
+    guard let start = firstStructuredPayloadStart(in: text) else {
+      return nil
+    }
+    let candidate = String(text[start...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !candidate.isEmpty else {
+      return nil
+    }
+    return candidate
   }
 
   private func normalizedPlainText(_ text: String) -> String {
@@ -1623,12 +1835,17 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
     let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     let lineNumberFont = UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-    let lineNumberColor = UIColor(red: 0.16, green: 0.38, blue: 0.90, alpha: 1)
-    let baseColor = PanelColors.text
-    let keyColor = UIColor(red: 0.78, green: 0.24, blue: 0.18, alpha: 1)
-    let stringColor = UIColor(red: 0.62, green: 0.32, blue: 0.14, alpha: 1)
-    let numberColor = UIColor(red: 0.12, green: 0.41, blue: 0.86, alpha: 1)
-    let literalColor = UIColor(red: 0.08, green: 0.50, blue: 0.42, alpha: 1)
+    let lineNumberColor = UIColor(red: 0.10, green: 0.33, blue: 0.86, alpha: 1)
+    let lineNumberBackground = UIColor(red: 0.92, green: 0.96, blue: 1.00, alpha: 1)
+    let guideColor = UIColor(red: 0.76, green: 0.84, blue: 1.00, alpha: 1)
+    let baseColor = UIColor(red: 0.14, green: 0.18, blue: 0.24, alpha: 1)
+    let punctuationColor = UIColor(red: 0.24, green: 0.30, blue: 0.39, alpha: 1)
+    let keyColor = UIColor(red: 0.75, green: 0.23, blue: 0.16, alpha: 1)
+    let stringColor = UIColor(red: 0.66, green: 0.35, blue: 0.08, alpha: 1)
+    let numberColor = UIColor(red: 0.11, green: 0.43, blue: 0.87, alpha: 1)
+    let literalColor = UIColor(red: 0.01, green: 0.53, blue: 0.42, alpha: 1)
+    let paragraphStyle = NSMutableParagraphStyle()
+    paragraphStyle.lineSpacing = 3
 
     let lines = prettyJSON.components(separatedBy: .newlines)
     let digits = max(2, String(lines.count).count)
@@ -1636,16 +1853,19 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
     for (index, line) in lines.enumerated() {
       let lineNumber = String(format: "%\(digits)d", index + 1)
-      let prefix = "\(lineNumber) | "
+      let prefix = " \(lineNumber) │ "
       let prefixAttributes: [NSAttributedString.Key: Any] = [
         .font: lineNumberFont,
         .foregroundColor: lineNumberColor,
+        .backgroundColor: lineNumberBackground,
+        .paragraphStyle: paragraphStyle,
       ]
       result.append(NSAttributedString(string: prefix, attributes: prefixAttributes))
 
       let lineAttributes: [NSAttributedString.Key: Any] = [
         .font: codeFont,
         .foregroundColor: baseColor,
+        .paragraphStyle: paragraphStyle,
       ]
       let lineAttributed = NSMutableAttributedString(string: line, attributes: lineAttributes)
       highlightJSONStringTokens(
@@ -1654,6 +1874,8 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
         stringColor: stringColor,
         numberColor: numberColor,
         literalColor: literalColor,
+        punctuationColor: punctuationColor,
+        guideColor: guideColor,
         font: codeFont
       )
       result.append(lineAttributed)
@@ -1672,8 +1894,28 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     stringColor: UIColor,
     numberColor: UIColor,
     literalColor: UIColor,
+    punctuationColor: UIColor,
+    guideColor: UIColor,
     font: UIFont
   ) {
+    applyRegex(
+      #"[{}\[\],:]"#,
+      to: attributedString,
+      attributes: [
+        .foregroundColor: punctuationColor,
+        .font: font,
+      ]
+    )
+
+    applyRegex(
+      #"^(?:  )+"#,
+      to: attributedString,
+      attributes: [
+        .foregroundColor: guideColor,
+        .font: font,
+      ]
+    )
+
     applyRegex(
       #""(?:\\.|[^"\\])*""#,
       to: attributedString,
@@ -1728,18 +1970,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
   }
 
-  private func makeSection(title: String, body: String, monospace: Bool) -> UIView {
-    let container = UIView()
-    container.backgroundColor = PanelColors.card
-    container.layer.cornerRadius = 8
-    container.layer.borderWidth = 1
-    container.layer.borderColor = PanelColors.border.cgColor
-
-    let titleLabel = UILabel()
-    titleLabel.font = .systemFont(ofSize: 14, weight: .bold)
-    titleLabel.textColor = PanelColors.text
-    titleLabel.text = title
-
+  private func makeSectionBodyView(body: String, monospace: Bool) -> UIView {
     let bodyTextView = InAppDebuggerSelectableTextView()
     let presentation = sectionBodyPresentation(body: body, monospace: monospace)
     bodyTextView.font = monospace
@@ -1752,13 +1983,12 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     } else {
       bodyTextView.text = presentation.displayedText
     }
-    bodyTextView.accessibilityLabel = title
     if presentation.usesCodeBlockStyle {
-      bodyTextView.backgroundColor = UIColor(red: 0.97, green: 0.98, blue: 1.00, alpha: 1)
-      bodyTextView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+      bodyTextView.backgroundColor = UIColor(red: 0.985, green: 0.99, blue: 1.00, alpha: 1)
+      bodyTextView.textContainerInset = UIEdgeInsets(top: 12, left: 0, bottom: 12, right: 12)
       bodyTextView.layer.cornerRadius = 8
       bodyTextView.layer.borderWidth = 1
-      bodyTextView.layer.borderColor = PanelColors.border.cgColor
+      bodyTextView.layer.borderColor = UIColor(red: 0.80, green: 0.87, blue: 1.00, alpha: 1).cgColor
     } else {
       bodyTextView.backgroundColor = .clear
       bodyTextView.textContainerInset = .zero
@@ -1766,6 +1996,23 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       bodyTextView.layer.borderWidth = 0
       bodyTextView.layer.borderColor = UIColor.clear.cgColor
     }
+    return bodyTextView
+  }
+
+  private func makeSection(title: String, body: String, monospace: Bool) -> UIView {
+    let container = UIView()
+    container.backgroundColor = PanelColors.card
+    container.layer.cornerRadius = 8
+    container.layer.borderWidth = 1
+    container.layer.borderColor = PanelColors.border.cgColor
+
+    let titleLabel = UILabel()
+    titleLabel.font = .systemFont(ofSize: 14, weight: .bold)
+    titleLabel.textColor = PanelColors.text
+    titleLabel.text = title
+
+    let bodyTextView = makeSectionBodyView(body: body, monospace: monospace)
+    bodyTextView.accessibilityLabel = title
 
     let stack = UIStackView(arrangedSubviews: [titleLabel, bodyTextView])
     stack.axis = .vertical
