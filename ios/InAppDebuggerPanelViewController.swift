@@ -1243,6 +1243,20 @@ final class InAppDebuggerTextDetailViewController: UIViewController {
 }
 
 final class InAppDebuggerNetworkDetailViewController: UIViewController {
+  private struct ParsedMessageHeader {
+    let timestamp: String?
+    let direction: String?
+    let kind: String?
+    let remainder: String
+  }
+
+  private struct SectionBodyPresentation {
+    let displayedText: String
+    let copyText: String?
+    let attributedText: NSAttributedString?
+    let usesCodeBlockStyle: Bool
+  }
+
   private let entry: DebugNetworkEntry
   private let strings: [String: String]
 
@@ -1314,7 +1328,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       (title: strings["responseHeaders"] ?? "响应头", body: headerText(entry.responseHeaders), monospace: true),
       (title: strings["requestBody"] ?? "请求体", body: entry.requestBody ?? noRequestBodyText, monospace: true),
       (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText, monospace: true),
-      (title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText, monospace: true),
+      (title: strings["messages"] ?? "消息", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true),
     ]
   }
 
@@ -1355,7 +1369,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     sections.append((title: "Event timeline", body: entry.events ?? noEventsText, monospace: true))
-    sections.append((title: strings["messages"] ?? "消息", body: entry.messages ?? noMessagesText, monospace: true))
+    sections.append((title: strings["messages"] ?? "消息", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true))
     return sections
   }
 
@@ -1379,6 +1393,341 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return "code: \(code)\nclean: \(clean)\nreason: \(reason)"
   }
 
+  private func formattedMessagesText(_ raw: String?, fallback: String) -> String {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+      return fallback
+    }
+
+    let blocks = messageBlocks(from: raw)
+      .map(formatMessageBlock)
+      .filter { !$0.isEmpty }
+
+    guard !blocks.isEmpty else {
+      return raw
+    }
+    return blocks.joined(separator: "\n\n")
+  }
+
+  private func messageBlocks(from raw: String) -> [[String]] {
+    let lines = raw.components(separatedBy: .newlines)
+    var blocks: [[String]] = []
+    var current: [String] = []
+
+    for line in lines {
+      if isMessageBoundary(line) {
+        if !current.isEmpty {
+          blocks.append(current)
+        }
+        current = [line]
+        continue
+      }
+
+      if current.isEmpty {
+        if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          current = [line]
+        }
+        continue
+      }
+
+      current.append(line)
+    }
+
+    if !current.isEmpty {
+      blocks.append(current)
+    }
+    return blocks
+  }
+
+  private func isMessageBoundary(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty else {
+      return false
+    }
+    if trimmed.hasPrefix(">> ") || trimmed == ">>" || trimmed.hasPrefix("<< ") || trimmed == "<<" {
+      return true
+    }
+    return trimmed.range(
+      of: #"^\d{2}:\d{2}:\d{2}\.\d{3}\s+(>>|<<)\b"#,
+      options: .regularExpression
+    ) != nil
+  }
+
+  private func formatMessageBlock(_ lines: [String]) -> String {
+    guard let firstLine = lines.first else {
+      return ""
+    }
+
+    let header = parseMessageHeader(firstLine)
+    let combinedBody = ([header.remainder] + Array(lines.dropFirst()))
+      .joined(separator: "\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let (metadata, payload) = splitMessageMetadataAndPayload(combinedBody)
+
+    var headerParts: [String] = []
+    if let timestamp = header.timestamp {
+      headerParts.append("[\(timestamp)]")
+    }
+    if let direction = header.direction {
+      headerParts.append(direction)
+    }
+    if let kind = header.kind {
+      headerParts.append(kind.uppercased())
+    }
+    if let metadata, !metadata.isEmpty {
+      headerParts.append("(\(metadata))")
+    }
+
+    var blockLines: [String] = []
+    let headerLine = headerParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    if !headerLine.isEmpty {
+      blockLines.append(headerLine)
+    }
+
+    if let payload, !payload.isEmpty {
+      blockLines.append(payload)
+    } else if headerLine.isEmpty {
+      blockLines.append(combinedBody)
+    }
+
+    return blockLines.joined(separator: "\n")
+  }
+
+  private func parseMessageHeader(_ line: String) -> ParsedMessageHeader {
+    var working = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    var timestamp: String?
+    var direction: String?
+    var kind: String?
+
+    if let match = working.range(
+      of: #"^\d{2}:\d{2}:\d{2}\.\d{3}"#,
+      options: .regularExpression
+    ) {
+      timestamp = String(working[match])
+      working = String(working[match.upperBound...]).trimmingCharacters(in: .whitespaces)
+    }
+
+    if working.hasPrefix(">>") {
+      direction = ">>"
+      working = String(working.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+    } else if working.hasPrefix("<<") {
+      direction = "<<"
+      working = String(working.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+    }
+
+    if let firstToken = working.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first {
+      let token = String(firstToken)
+      if ["text", "binary", "unknown"].contains(token.lowercased()) {
+        kind = token
+        working = String(working.dropFirst(token.count)).trimmingCharacters(in: .whitespaces)
+      }
+    }
+
+    return ParsedMessageHeader(
+      timestamp: timestamp,
+      direction: direction,
+      kind: kind,
+      remainder: working
+    )
+  }
+
+  private func splitMessageMetadataAndPayload(_ body: String) -> (String?, String?) {
+    let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return (nil, nil)
+    }
+
+    if let prettyJSON = prettyPrintedJSON(trimmed) {
+      return (nil, prettyJSON)
+    }
+
+    if let structuredStart = firstStructuredPayloadStart(in: trimmed) {
+      let metadata = String(trimmed[..<structuredStart]).trimmingCharacters(in: .whitespacesAndNewlines)
+      let payload = String(trimmed[structuredStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+      if let prettyJSON = prettyPrintedJSON(payload) {
+        return (metadata.ifEmpty(""), prettyJSON)
+      }
+    }
+
+    return (nil, normalizedPlainText(trimmed))
+  }
+
+  private func firstStructuredPayloadStart(in text: String) -> String.Index? {
+    let objectIndex = text.firstIndex(of: "{")
+    let arrayIndex = text.firstIndex(of: "[")
+    switch (objectIndex, arrayIndex) {
+    case let (.some(object), .some(array)):
+      return min(object, array)
+    case let (.some(object), .none):
+      return object
+    case let (.none, .some(array)):
+      return array
+    case (.none, .none):
+      return nil
+    }
+  }
+
+  private func prettyPrintedJSON(_ text: String) -> String? {
+    guard let data = text.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data),
+          JSONSerialization.isValidJSONObject(object),
+          let prettyData = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+          let prettyText = String(data: prettyData, encoding: .utf8) else {
+      return nil
+    }
+    return prettyText
+  }
+
+  private func normalizedPlainText(_ text: String) -> String {
+    if text.contains("\\n") || text.contains("\\r") || text.contains("\\t") {
+      return text
+        .replacingOccurrences(of: "\\r\\n", with: "\n")
+        .replacingOccurrences(of: "\\n", with: "\n")
+        .replacingOccurrences(of: "\\r", with: "\n")
+        .replacingOccurrences(of: "\\t", with: "  ")
+    }
+    return text
+  }
+
+  private func sectionBodyPresentation(body: String, monospace: Bool) -> SectionBodyPresentation {
+    guard monospace else {
+      return SectionBodyPresentation(
+        displayedText: body,
+        copyText: nil,
+        attributedText: nil,
+        usesCodeBlockStyle: false
+      )
+    }
+
+    let normalizedBody = normalizedPlainText(body)
+    if let attributedJSON = jsonCodeAttributedText(from: normalizedBody) {
+      return SectionBodyPresentation(
+        displayedText: normalizedBody,
+        copyText: prettyPrintedJSON(normalizedBody) ?? normalizedBody,
+        attributedText: attributedJSON,
+        usesCodeBlockStyle: true
+      )
+    }
+
+    return SectionBodyPresentation(
+      displayedText: normalizedBody,
+      copyText: nil,
+      attributedText: nil,
+      usesCodeBlockStyle: false
+    )
+  }
+
+  private func jsonCodeAttributedText(from text: String) -> NSAttributedString? {
+    guard let prettyJSON = prettyPrintedJSON(text) else {
+      return nil
+    }
+
+    let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    let lineNumberFont = UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+    let lineNumberColor = UIColor(red: 0.16, green: 0.38, blue: 0.90, alpha: 1)
+    let baseColor = PanelColors.text
+    let keyColor = UIColor(red: 0.78, green: 0.24, blue: 0.18, alpha: 1)
+    let stringColor = UIColor(red: 0.62, green: 0.32, blue: 0.14, alpha: 1)
+    let numberColor = UIColor(red: 0.12, green: 0.41, blue: 0.86, alpha: 1)
+    let literalColor = UIColor(red: 0.08, green: 0.50, blue: 0.42, alpha: 1)
+
+    let lines = prettyJSON.components(separatedBy: .newlines)
+    let digits = max(2, String(lines.count).count)
+    let result = NSMutableAttributedString()
+
+    for (index, line) in lines.enumerated() {
+      let lineNumber = String(format: "%\(digits)d", index + 1)
+      let prefix = "\(lineNumber) | "
+      let prefixAttributes: [NSAttributedString.Key: Any] = [
+        .font: lineNumberFont,
+        .foregroundColor: lineNumberColor,
+      ]
+      result.append(NSAttributedString(string: prefix, attributes: prefixAttributes))
+
+      let lineAttributes: [NSAttributedString.Key: Any] = [
+        .font: codeFont,
+        .foregroundColor: baseColor,
+      ]
+      let lineAttributed = NSMutableAttributedString(string: line, attributes: lineAttributes)
+      highlightJSONStringTokens(
+        in: lineAttributed,
+        keyColor: keyColor,
+        stringColor: stringColor,
+        numberColor: numberColor,
+        literalColor: literalColor,
+        font: codeFont
+      )
+      result.append(lineAttributed)
+
+      if index < lines.count - 1 {
+        result.append(NSAttributedString(string: "\n", attributes: lineAttributes))
+      }
+    }
+
+    return result
+  }
+
+  private func highlightJSONStringTokens(
+    in attributedString: NSMutableAttributedString,
+    keyColor: UIColor,
+    stringColor: UIColor,
+    numberColor: UIColor,
+    literalColor: UIColor,
+    font: UIFont
+  ) {
+    applyRegex(
+      #""(?:\\.|[^"\\])*""#,
+      to: attributedString,
+      attributes: [
+        .foregroundColor: stringColor,
+        .font: font,
+      ]
+    )
+
+    applyRegex(
+      #""(?:\\.|[^"\\])*"(?=\s*:)"#,
+      to: attributedString,
+      attributes: [
+        .foregroundColor: keyColor,
+        .font: font,
+      ]
+    )
+
+    applyRegex(
+      #"(?<![A-Za-z0-9_])[-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"#,
+      to: attributedString,
+      attributes: [
+        .foregroundColor: numberColor,
+        .font: font,
+      ]
+    )
+
+    applyRegex(
+      #"\b(?:true|false|null)\b"#,
+      to: attributedString,
+      attributes: [
+        .foregroundColor: literalColor,
+        .font: font,
+      ]
+    )
+  }
+
+  private func applyRegex(
+    _ pattern: String,
+    to attributedString: NSMutableAttributedString,
+    attributes: [NSAttributedString.Key: Any]
+  ) {
+    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+      return
+    }
+    let range = NSRange(location: 0, length: attributedString.string.utf16.count)
+    regex.enumerateMatches(in: attributedString.string, options: [], range: range) { match, _, _ in
+      guard let match else {
+        return
+      }
+      attributedString.addAttributes(attributes, range: match.range)
+    }
+  }
+
   private func makeSection(title: String, body: String, monospace: Bool) -> UIView {
     let container = UIView()
     container.backgroundColor = PanelColors.card
@@ -1392,12 +1741,31 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     titleLabel.text = title
 
     let bodyTextView = InAppDebuggerSelectableTextView()
+    let presentation = sectionBodyPresentation(body: body, monospace: monospace)
     bodyTextView.font = monospace
       ? .monospacedSystemFont(ofSize: 12, weight: .regular)
       : .systemFont(ofSize: 13, weight: .regular)
     bodyTextView.textColor = PanelColors.text
-    bodyTextView.text = body
+    bodyTextView.overrideCopyText = presentation.copyText
+    if let attributedText = presentation.attributedText {
+      bodyTextView.attributedText = attributedText
+    } else {
+      bodyTextView.text = presentation.displayedText
+    }
     bodyTextView.accessibilityLabel = title
+    if presentation.usesCodeBlockStyle {
+      bodyTextView.backgroundColor = UIColor(red: 0.97, green: 0.98, blue: 1.00, alpha: 1)
+      bodyTextView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+      bodyTextView.layer.cornerRadius = 8
+      bodyTextView.layer.borderWidth = 1
+      bodyTextView.layer.borderColor = PanelColors.border.cgColor
+    } else {
+      bodyTextView.backgroundColor = .clear
+      bodyTextView.textContainerInset = .zero
+      bodyTextView.layer.cornerRadius = 0
+      bodyTextView.layer.borderWidth = 0
+      bodyTextView.layer.borderColor = UIColor.clear.cgColor
+    }
 
     let stack = UIStackView(arrangedSubviews: [titleLabel, bodyTextView])
     stack.axis = .vertical
@@ -1423,6 +1791,7 @@ private extension String {
 private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate {
   private var lastMeasuredWidth: CGFloat = 0
   private var hasScheduledSelectionMenu = false
+  var overrideCopyText: String?
 
   override var text: String! {
     didSet {
@@ -1462,12 +1831,12 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
   }
 
   override func copy(_ sender: Any?) {
-    let fullText = text ?? ""
+    let displayedText = text ?? attributedText?.string ?? ""
     if selectedRange.length > 0,
-       let range = Range(selectedRange, in: fullText) {
-      UIPasteboard.general.string = String(fullText[range])
+       let range = Range(selectedRange, in: displayedText) {
+      UIPasteboard.general.string = String(displayedText[range])
     } else {
-      UIPasteboard.general.string = fullText
+      UIPasteboard.general.string = overrideCopyText ?? displayedText
     }
   }
 
