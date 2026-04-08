@@ -170,6 +170,7 @@ final class InAppDebuggerOverlayManager {
     debugWindow?.frame = scene.coordinateSpace.bounds
     rootViewController.view.frame = debugWindow?.bounds ?? scene.coordinateSpace.bounds
     debugWindow?.isHidden = !visible
+    updateFloatingButtonFrameIfNeeded()
   }
 
   private func ensureFloatingButton() {
@@ -177,16 +178,41 @@ final class InAppDebuggerOverlayManager {
       return
     }
     if let floatingButton, floatingButton.superview === container {
+      updateFloatingButtonFrameIfNeeded()
       return
     }
     floatingButton?.removeFromSuperview()
     let bounds = container.bounds.isEmpty ? UIScreen.main.bounds : container.bounds
-    let button = InAppDebuggerFloatingButtonView(frame: CGRect(x: max(20, bounds.width - 80), y: 120, width: 60, height: 60))
+    let button = InAppDebuggerFloatingButtonView(frame: clampedFloatingButtonFrame(in: bounds))
     button.onTap = { [weak self] in
       self?.presentPanel()
     }
     container.addSubview(button)
     floatingButton = button
+  }
+
+  private func updateFloatingButtonFrameIfNeeded() {
+    guard let container = rootViewController.view, let floatingButton else {
+      return
+    }
+    let bounds = container.bounds.isEmpty ? UIScreen.main.bounds : container.bounds
+    floatingButton.frame = clampedFloatingButtonFrame(in: bounds, currentFrame: floatingButton.frame)
+  }
+
+  private func clampedFloatingButtonFrame(in bounds: CGRect, currentFrame: CGRect? = nil) -> CGRect {
+    let size = CGSize(width: 60, height: 60)
+    let minimumX: CGFloat = 20
+    let maximumX = max(minimumX, bounds.width - size.width - 20)
+    let minimumY = max(bounds.minY + 80, 80)
+    let maximumY = max(minimumY, bounds.height - size.height - 32)
+
+    let proposedOrigin = currentFrame?.origin ?? CGPoint(x: maximumX, y: 120)
+    return CGRect(
+      x: min(max(proposedOrigin.x, minimumX), maximumX),
+      y: min(max(proposedOrigin.y, minimumY), maximumY),
+      width: size.width,
+      height: size.height
+    )
   }
 
   private func activeWindowScene() -> UIWindowScene? {

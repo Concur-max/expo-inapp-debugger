@@ -1176,6 +1176,7 @@ private final class TrackedWebSocketState {
   var bytesOut = 0
   var eventsList: [String] = []
   var messagesList: [String] = []
+  var lastStoreEmissionAt = 0
 
   init(
     socketId: Int,
@@ -1238,6 +1239,7 @@ final class InAppDebuggerNativeWebSocketCapture {
   private var panelActive = false
   private var trackedSockets: [Int: TrackedWebSocketState] = [:]
   private var pendingSockets: [String: PendingWebSocketMetadata] = [:]
+  private let liveUpdateThrottleMs = 120
 
   private init() {}
 
@@ -1258,17 +1260,23 @@ final class InAppDebuggerNativeWebSocketCapture {
 
   func setPanelActive(_ active: Bool) {
     var snapshots: [DebugNetworkEntry] = []
+    let timestamp = currentTimestamp()
+    var shouldRefresh = false
 
     lock.lock()
     panelActive = enabled && active
+    shouldRefresh = panelActive
     if panelActive {
       snapshots = trackedSockets.values
         .sorted { $0.startedAt > $1.startedAt }
-        .map { $0.asEntry() }
+        .map { tracked in
+          tracked.lastStoreEmissionAt = timestamp
+          return tracked.asEntry()
+        }
     }
     lock.unlock()
 
-    guard active else {
+    guard shouldRefresh else {
       return
     }
 
@@ -1279,12 +1287,16 @@ final class InAppDebuggerNativeWebSocketCapture {
 
   func refreshVisibleEntries() {
     var snapshots: [DebugNetworkEntry] = []
+    let timestamp = currentTimestamp()
 
     lock.lock()
-    if panelActive {
+    if enabled {
       snapshots = trackedSockets.values
         .sorted { $0.startedAt > $1.startedAt }
-        .map { $0.asEntry() }
+        .map { tracked in
+          tracked.lastStoreEmissionAt = timestamp
+          return tracked.asEntry()
+        }
     }
     lock.unlock()
 
@@ -1309,7 +1321,7 @@ final class InAppDebuggerNativeWebSocketCapture {
   }
 
   fileprivate func recordOpenRequested(_ socket: AnyObject) {
-    mutateSocket(socket, defaultState: "connecting") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "connecting") { tracked, timestamp, _ in
       tracked.state = "connecting"
       tracked.updatedAt = timestamp
       tracked.endedAt = nil
@@ -1321,12 +1333,12 @@ final class InAppDebuggerNativeWebSocketCapture {
       tracked.requestedCloseCode = nil
       tracked.requestedCloseReason = nil
       appendEvent("connect", to: tracked, at: timestamp)
-      return isPanelActive ? .emitNow : .none
+      return .emitVisibleImmediate
     }
   }
 
   fileprivate func recordOpened(_ socket: AnyObject) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
       tracked.state = "open"
       tracked.updatedAt = timestamp
       tracked.protocol = socketStringValue(socket, selectorName: "protocol") ?? tracked.protocol
@@ -1335,12 +1347,12 @@ final class InAppDebuggerNativeWebSocketCapture {
         to: tracked,
         at: timestamp
       )
-      return isPanelActive ? .emitNow : .none
+      return .emitVisibleImmediate
     }
   }
 
   fileprivate func recordSendString(_ socket: AnyObject, text: String) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
       let byteCount = text.lengthOfBytes(using: .utf8)
       tracked.state = tracked.state == "connecting" ? "open" : tracked.state
       tracked.updatedAt = timestamp
@@ -1354,12 +1366,12 @@ final class InAppDebuggerNativeWebSocketCapture {
         to: tracked,
         at: timestamp
       )
-      return isPanelActive ? .emitNow : .none
+      return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordSendData(_ socket: AnyObject, data: Data?) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
       let payload = data ?? Data()
       tracked.state = tracked.state == "connecting" ? "open" : tracked.state
       tracked.updatedAt = timestamp
@@ -1373,23 +1385,20 @@ final class InAppDebuggerNativeWebSocketCapture {
         to: tracked,
         at: timestamp
       )
-      return isPanelActive ? .emitNow : .none
+      return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordPing(_ socket: AnyObject, data: Data?) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
       tracked.updatedAt = timestamp
-      if isPanelActive {
-        appendEvent("ping \(formatByteCount(data?.count ?? 0))", to: tracked, at: timestamp)
-        return .emitNow
-      }
-      return .none
+      appendEvent("ping \(formatByteCount(data?.count ?? 0))", to: tracked, at: timestamp)
+      return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordReceivedMessage(_ socket: AnyObject, message: Any?) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
       tracked.state = tracked.state == "connecting" ? "open" : tracked.state
       tracked.updatedAt = timestamp
 
@@ -1405,12 +1414,12 @@ final class InAppDebuggerNativeWebSocketCapture {
         to: tracked,
         at: timestamp
       )
-      return isPanelActive ? .emitNow : .none
+      return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordCloseRequested(_ socket: AnyObject, code: Int, reason: String?) {
-    mutateSocket(socket, defaultState: "closing") { tracked, timestamp, isPanelActive in
+    mutateSocket(socket, defaultState: "closing") { tracked, timestamp, _ in
       tracked.state = "closing"
       tracked.updatedAt = timestamp
       tracked.requestedCloseCode = code
@@ -1420,7 +1429,7 @@ final class InAppDebuggerNativeWebSocketCapture {
         to: tracked,
         at: timestamp
       )
-      return isPanelActive ? .emitNow : .none
+      return .emitVisibleImmediate
     }
   }
 
@@ -1432,7 +1441,7 @@ final class InAppDebuggerNativeWebSocketCapture {
       tracked.durationMs = max(0, timestamp - tracked.startedAt)
       tracked.error = error.localizedDescription.nilIfEmpty ?? "WebSocket error"
       appendEvent("error \(tracked.error ?? "WebSocket error")", to: tracked, at: timestamp)
-      return .emitNow
+      return .emitAlways
     }
   }
 
@@ -1450,13 +1459,15 @@ final class InAppDebuggerNativeWebSocketCapture {
         to: tracked,
         at: timestamp
       )
-      return .emitNow
+      return .emitAlways
     }
   }
 
   private enum SocketMutationResult {
     case none
-    case emitNow
+    case emitVisibleImmediate
+    case emitVisibleThrottled
+    case emitAlways
   }
 
   private func mutateSocket(
@@ -1474,9 +1485,7 @@ final class InAppDebuggerNativeWebSocketCapture {
 
     let timestamp = currentTimestamp()
     let shouldEmit = mutation(tracked, timestamp, panelActive)
-    if shouldEmit == .emitNow {
-      emittedEntry = tracked.asEntry()
-    }
+    emittedEntry = preparedSocketEntry(tracked, timestamp: timestamp, emission: shouldEmit)
     lock.unlock()
 
     if let emittedEntry {
@@ -1498,9 +1507,7 @@ final class InAppDebuggerNativeWebSocketCapture {
 
     let timestamp = currentTimestamp()
     let shouldEmit = mutation(tracked, timestamp, panelActive)
-    if shouldEmit == .emitNow {
-      emittedEntry = tracked.asEntry()
-    }
+    emittedEntry = preparedSocketEntry(tracked, timestamp: timestamp, emission: shouldEmit)
     trackedSockets.removeValue(forKey: tracked.socketId)
     pendingSockets.removeValue(forKey: objectKey(for: socket))
     lock.unlock()
@@ -1545,6 +1552,30 @@ final class InAppDebuggerNativeWebSocketCapture {
 }
 
 private extension InAppDebuggerNativeWebSocketCapture {
+  private func preparedSocketEntry(
+    _ tracked: TrackedWebSocketState,
+    timestamp: Int,
+    emission: SocketMutationResult
+  ) -> DebugNetworkEntry? {
+    switch emission {
+    case .none:
+      return nil
+    case .emitVisibleImmediate:
+      guard panelActive else {
+        return nil
+      }
+    case .emitVisibleThrottled:
+      guard panelActive, timestamp - tracked.lastStoreEmissionAt >= liveUpdateThrottleMs else {
+        return nil
+      }
+    case .emitAlways:
+      break
+    }
+
+    tracked.lastStoreEmissionAt = timestamp
+    return tracked.asEntry()
+  }
+
   func currentTimestamp() -> Int {
     Int(Date().timeIntervalSince1970 * 1000)
   }

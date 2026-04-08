@@ -18,6 +18,7 @@ public final class InAppDebuggerModule: Module {
         } ?? [:]
       )
       InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled)
+      InAppDebuggerNativeNetworkCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
       InAppDebuggerNativeWebSocketCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
@@ -44,6 +45,7 @@ public final class InAppDebuggerModule: Module {
 
     OnDestroy {
       InAppDebuggerNativeLogCapture.shared.setEnabled(false)
+      InAppDebuggerNativeNetworkCapture.shared.setEnabled(false)
       InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
       InAppDebuggerOverlayManager.shared.hide()
     }

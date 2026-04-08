@@ -13,6 +13,12 @@ private let nativeLogISOFormatter: ISO8601DateFormatter = {
   return formatter
 }()
 
+private let exportSnapshotISOFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter
+}()
+
 extension Notification.Name {
   static let inAppDebuggerStoreDidChange = Notification.Name("InAppDebuggerStoreDidChange")
 }
@@ -26,7 +32,9 @@ final class InAppDebuggerStore {
   private var pendingNativeLogs: [DebugLogEntry] = []
   private var errors: [DebugErrorEntry] = []
   private var network: [DebugNetworkEntry] = []
+  private var networkIndexByID: [String: Int] = [:]
   private var liveUpdatesEnabled = false
+  private var notificationScheduled = false
 
   private init() {}
 
@@ -77,9 +85,7 @@ final class InAppDebuggerStore {
         }
       case "network":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugNetworkEntry(map: entryMap) {
-          network.removeAll(where: { $0.id == entry.id })
-          network.append(entry)
-          trimNetworkLocked()
+          upsertNetworkLocked(entry)
         }
       default:
         break
@@ -123,10 +129,13 @@ final class InAppDebuggerStore {
       errors.removeAll()
     case "network":
       network.removeAll()
+      networkIndexByID.removeAll(keepingCapacity: false)
     default:
       logs.removeAll()
+      pendingNativeLogs.removeAll()
       errors.removeAll()
       network.removeAll()
+      networkIndexByID.removeAll(keepingCapacity: false)
     }
     lock.unlock()
     notifyChanged()
@@ -134,11 +143,19 @@ final class InAppDebuggerStore {
 
   func upsertNetworkEntry(_ entry: DebugNetworkEntry) {
     lock.lock()
-    network.removeAll(where: { $0.id == entry.id })
-    network.append(entry)
-    trimNetworkLocked()
+    upsertNetworkLocked(entry)
     lock.unlock()
     notifyChanged()
+  }
+
+  func networkEntry(withID id: String) -> DebugNetworkEntry? {
+    lock.lock()
+    defer { lock.unlock() }
+
+    if let index = networkIndexByID[id], network.indices.contains(index) {
+      return network[index]
+    }
+    return network.first(where: { $0.id == id })
   }
 
   func exportSnapshot() -> [String: Any] {
@@ -148,7 +165,7 @@ final class InAppDebuggerStore {
       "logs": logs.map { $0.asDictionary() },
       "errors": errors.map { $0.asDictionary() },
       "network": network.map { $0.asDictionary() },
-      "exportTime": ISO8601DateFormatter().string(from: Date()),
+      "exportTime": exportSnapshotISOFormatter.string(from: Date()),
     ]
   }
 
@@ -178,20 +195,52 @@ final class InAppDebuggerStore {
   }
 
   private func trimNetworkLocked() {
-    if network.count > config.maxRequests {
-      network = Array(network.suffix(config.maxRequests))
+    let overflow = network.count - config.maxRequests
+    if overflow > 0 {
+      network.removeFirst(overflow)
+      rebuildNetworkIndexLocked()
     }
   }
 
   private func notifyChanged() {
     lock.lock()
-    let shouldNotify = liveUpdatesEnabled
-    lock.unlock()
-    guard shouldNotify else {
+    guard liveUpdatesEnabled, !notificationScheduled else {
+      lock.unlock()
       return
     }
-    DispatchQueue.main.async {
+    notificationScheduled = true
+    lock.unlock()
+
+    DispatchQueue.main.async { [weak self] in
+      guard let self else {
+        return
+      }
+      self.lock.lock()
+      self.notificationScheduled = false
+      let shouldNotify = self.liveUpdatesEnabled
+      self.lock.unlock()
+      guard shouldNotify else {
+        return
+      }
       NotificationCenter.default.post(name: .inAppDebuggerStoreDidChange, object: nil)
+    }
+  }
+
+  private func upsertNetworkLocked(_ entry: DebugNetworkEntry) {
+    if let existingIndex = networkIndexByID[entry.id], network.indices.contains(existingIndex) {
+      network[existingIndex] = entry
+    } else {
+      network.append(entry)
+      networkIndexByID[entry.id] = network.endIndex - 1
+    }
+    trimNetworkLocked()
+  }
+
+  private func rebuildNetworkIndexLocked() {
+    networkIndexByID.removeAll(keepingCapacity: true)
+    networkIndexByID.reserveCapacity(network.count)
+    for (index, entry) in network.enumerated() {
+      networkIndexByID[entry.id] = index
     }
   }
 }

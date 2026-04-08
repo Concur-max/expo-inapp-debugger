@@ -15,13 +15,13 @@ private enum ToolbarButtonStyle {
 }
 
 private enum PanelColors {
-  static let background = UIColor(red: 0.95, green: 0.96, blue: 0.98, alpha: 1)
-  static let card = UIColor.white
-  static let controlBackground = UIColor(red: 0.91, green: 0.94, blue: 0.96, alpha: 1)
-  static let border = UIColor(red: 0.86, green: 0.88, blue: 0.91, alpha: 1)
-  static let primary = UIColor(red: 0.05, green: 0.47, blue: 0.42, alpha: 1)
-  static let text = UIColor(red: 0.07, green: 0.09, blue: 0.13, alpha: 1)
-  static let mutedText = UIColor(red: 0.40, green: 0.45, blue: 0.52, alpha: 1)
+  static let background = UIColor.systemGroupedBackground
+  static let card = UIColor.secondarySystemGroupedBackground
+  static let controlBackground = UIColor.tertiarySystemFill
+  static let border = UIColor.separator
+  static let primary = UIColor.systemBlue
+  static let text = UIColor.label
+  static let mutedText = UIColor.secondaryLabel
 }
 
 private struct PanelTone {
@@ -189,6 +189,7 @@ private enum PanelFilterPreferences {
   static let allOrigins: Set<String> = ["js", "native"]
   static let allNetworkKinds: Set<String> = Set(NetworkKindFilter.allCases.map(\.rawValue))
   static let defaultOrigins: Set<String> = ["js"]
+  static let defaultNetworkOrigins: Set<String> = defaultOrigins
   static let defaultNetworkKinds = allNetworkKinds
 
   static func loadLogLevels() -> Set<String> {
@@ -200,7 +201,7 @@ private enum PanelFilterPreferences {
   }
 
   static func loadNetworkOrigins() -> Set<String> {
-    loadSet(forKey: selectedNetworkOriginsKey, allowedValues: allOrigins, defaultValues: defaultOrigins)
+    loadSet(forKey: selectedNetworkOriginsKey, allowedValues: allOrigins, defaultValues: defaultNetworkOrigins)
   }
 
   static func loadNetworkKinds() -> Set<String> {
@@ -262,20 +263,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var notificationObserver: NSObjectProtocol?
   private var currentConfig = DebugConfig()
   private var scheduledReloadWorkItem: DispatchWorkItem?
+  private var scheduledSearchWorkItem: DispatchWorkItem?
   private var isSuspendingLiveUpdatesForScroll = false
 
   private lazy var closeButton: UIButton = {
-    var config = UIButton.Configuration.tinted()
-    config.image = UIImage(systemName: "xmark")
-    config.baseForegroundColor = PanelColors.text
-    config.baseBackgroundColor = PanelColors.controlBackground
-    config.cornerStyle = .small
-    let button = UIButton(configuration: config)
+    let button = UIButton(type: .close)
     button.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
     button.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      button.widthAnchor.constraint(equalToConstant: 36),
-      button.heightAnchor.constraint(equalToConstant: 36),
+      button.widthAnchor.constraint(equalToConstant: 30),
+      button.heightAnchor.constraint(equalToConstant: 30),
     ])
     return button
   }()
@@ -299,54 +296,41 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private lazy var searchField: UISearchTextField = {
     let field = UISearchTextField()
-    field.font = .systemFont(ofSize: 15, weight: .regular)
-    field.textColor = PanelColors.text
-    field.tintColor = PanelColors.primary
-    field.backgroundColor = PanelColors.controlBackground
-    field.borderStyle = .none
-    field.layer.cornerRadius = 10
-    field.layer.masksToBounds = true
     field.clearButtonMode = .whileEditing
+    field.autocapitalizationType = .none
+    field.autocorrectionType = .no
+    field.smartDashesType = .no
+    field.smartQuotesType = .no
+    field.smartInsertDeleteType = .no
+    field.returnKeyType = .done
     field.addTarget(self, action: #selector(searchTextChanged(_:)), for: .editingChanged)
     return field
   }()
 
   private lazy var clearButton: UIButton = {
-    var config = UIButton.Configuration.tinted()
-    config.image = UIImage(systemName: "trash")
-    config.baseForegroundColor = PanelColors.text
-    config.baseBackgroundColor = PanelColors.controlBackground
-    config.cornerStyle = .medium
-    let button = UIButton(configuration: config)
+    let button = makeToolbarButton(
+      systemName: "trash",
+      foregroundColor: .systemRed
+    )
     button.addTarget(self, action: #selector(clearTapped), for: .touchUpInside)
-    button.setContentHuggingPriority(.required, for: .horizontal)
-    button.setContentCompressionResistancePriority(.required, for: .horizontal)
     return button
   }()
 
   private lazy var filterButton: UIButton = {
-    var config = UIButton.Configuration.tinted()
-    config.image = UIImage(systemName: "line.3.horizontal.decrease")
-    config.baseForegroundColor = PanelColors.primary
-    config.baseBackgroundColor = PanelColors.controlBackground
-    config.cornerStyle = .medium
-    let button = UIButton(configuration: config)
+    let button = makeToolbarButton(
+      systemName: "line.3.horizontal.decrease",
+      foregroundColor: PanelColors.primary
+    )
     button.showsMenuAsPrimaryAction = true
-    button.setContentHuggingPriority(.required, for: .horizontal)
-    button.setContentCompressionResistancePriority(.required, for: .horizontal)
     return button
   }()
 
   private lazy var sortToggleButton: UIButton = {
-    var config = UIButton.Configuration.tinted()
-    config.image = UIImage(systemName: "arrow.down")
-    config.baseForegroundColor = PanelColors.text
-    config.baseBackgroundColor = PanelColors.controlBackground
-    config.cornerStyle = .medium
-    let button = UIButton(configuration: config)
+    let button = makeToolbarButton(
+      systemName: "arrow.down",
+      foregroundColor: PanelColors.text
+    )
     button.addTarget(self, action: #selector(sortToggleTapped), for: .touchUpInside)
-    button.setContentHuggingPriority(.required, for: .horizontal)
-    button.setContentCompressionResistancePriority(.required, for: .horizontal)
     return button
   }()
 
@@ -439,16 +423,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
     scheduledReloadWorkItem?.cancel()
     scheduledReloadWorkItem = nil
+    scheduledSearchWorkItem?.cancel()
+    scheduledSearchWorkItem = nil
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
     InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
+    InAppDebuggerNativeNetworkCapture.shared.setPanelActive(false)
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
     isSuspendingLiveUpdatesForScroll = false
   }
 
   deinit {
     scheduledReloadWorkItem?.cancel()
+    scheduledSearchWorkItem?.cancel()
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
     InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
+    InAppDebuggerNativeNetworkCapture.shared.setPanelActive(false)
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
     if let notificationObserver {
       NotificationCenter.default.removeObserver(notificationObserver)
@@ -465,7 +454,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
     navigationController?.navigationBar.prefersLargeTitles = false
     let appearance = UINavigationBarAppearance()
-    appearance.configureWithOpaqueBackground()
+    appearance.configureWithDefaultBackground()
     appearance.backgroundColor = PanelColors.background
     appearance.shadowColor = .clear
     appearance.titleTextAttributes = [
@@ -513,6 +502,42 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       clearButton.widthAnchor.constraint(equalToConstant: 36),
       clearButton.heightAnchor.constraint(equalToConstant: 36),
     ])
+  }
+
+  private func makeToolbarButton(systemName: String, foregroundColor: UIColor) -> UIButton {
+    let button = UIButton(type: .system)
+    button.configuration = toolbarButtonConfiguration(
+      systemName: systemName,
+      foregroundColor: foregroundColor,
+      style: .neutral
+    )
+    button.setContentHuggingPriority(.required, for: .horizontal)
+    button.setContentCompressionResistancePriority(.required, for: .horizontal)
+    return button
+  }
+
+  private func toolbarButtonConfiguration(
+    systemName: String,
+    foregroundColor: UIColor,
+    style: ToolbarButtonStyle
+  ) -> UIButton.Configuration {
+    var config: UIButton.Configuration
+    switch style {
+    case .primary:
+      config = .tinted()
+      config.baseBackgroundColor = PanelColors.primary
+      config.baseForegroundColor = .white
+    case .neutral:
+      config = .gray()
+      config.baseForegroundColor = foregroundColor
+    }
+    config.image = UIImage(systemName: systemName)
+    config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+      pointSize: 15,
+      weight: .semibold
+    )
+    config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+    return config
   }
 
   private func updateFilterMenu() {
@@ -574,10 +599,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         selectedNetworkOrigins.count < PanelFilterPreferences.allOrigins.count ||
         selectedNetworkKinds.count < PanelFilterPreferences.allNetworkKinds.count
     }
-    var config = filterButton.configuration
-    config?.baseForegroundColor = hasFilters ? .white : PanelColors.primary
-    config?.baseBackgroundColor = hasFilters ? PanelColors.primary : PanelColors.controlBackground
-    filterButton.configuration = config
+    filterButton.configuration = toolbarButtonConfiguration(
+      systemName: "line.3.horizontal.decrease",
+      foregroundColor: PanelColors.primary,
+      style: hasFilters ? .primary : .neutral
+    )
   }
 
   private func toggleOrigin(_ origin: String) {
@@ -629,6 +655,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let shouldActivateNativeLogs = activeTab == .logs && selectedLogOrigins.contains("native")
     InAppDebuggerNativeLogCapture.shared.setPanelActive(shouldActivateNativeLogs)
 
+    let shouldActivateNativeNetwork =
+      currentConfig.enableNetworkTab &&
+      activeTab == .network &&
+      selectedNetworkOrigins.contains("native") &&
+      (
+        selectedNetworkKinds.contains(NetworkKindFilter.http.rawValue) ||
+        selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue)
+      )
+    InAppDebuggerNativeNetworkCapture.shared.setPanelActive(shouldActivateNativeNetwork)
+
     // The current native WebSocket hook captures RN-managed sockets, which are still JS-origin requests.
     let shouldActivateNativeWebSocket =
       currentConfig.enableNetworkTab &&
@@ -638,7 +674,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(shouldActivateNativeWebSocket)
   }
 
-  private func applySnapshot() {
+  private func applySnapshot(reconfiguring identifiers: [String] = []) {
     var snapshot = NSDiffableDataSourceSnapshot<PanelSection, String>()
     snapshot.appendSections([.main])
     if activeTab == .logs {
@@ -649,15 +685,23 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
     updateEmptyState()
     if #available(iOS 15.0, *) {
-      dataSource.applySnapshotUsingReloadData(snapshot)
-    } else {
+      if !identifiers.isEmpty {
+        snapshot.reconfigureItems(identifiers)
+      }
       dataSource.apply(snapshot, animatingDifferences: false)
+      return
     }
+
+    if !identifiers.isEmpty {
+      snapshot.reloadItems(identifiers)
+    }
+    dataSource.apply(snapshot, animatingDifferences: false)
   }
 
   private func reloadFromStore(reason: ReloadReason = .full) {
     let state = InAppDebuggerStore.shared.snapshotState()
-    if reason == .full {
+    let shouldRefreshChrome = reason == .full || state.0 != currentConfig
+    if shouldRefreshChrome {
       currentConfig = state.0
 
       if !currentConfig.enableNetworkTab && activeTab == .network {
@@ -682,11 +726,36 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
     }
 
-    displayedLogs = filteredLogs(from: state.1)
-    displayedNetwork = filteredNetwork(from: state.3)
-    displayedLogLookup = Dictionary(uniqueKeysWithValues: displayedLogs.map { ($0.id, $0) })
-    displayedNetworkLookup = Dictionary(uniqueKeysWithValues: displayedNetwork.map { ($0.id, $0) })
-    applySnapshot()
+    if activeTab == .logs {
+      let previousLogLookup = displayedLogLookup
+      let nextLogs = filteredLogs(from: state.1)
+      let nextLogLookup = Dictionary(uniqueKeysWithValues: nextLogs.map { ($0.id, $0) })
+
+      displayedLogs = nextLogs
+      displayedLogLookup = nextLogLookup
+
+      let changedIdentifiers = changedIdentifiers(
+        orderedIDs: nextLogs.map(\.id),
+        previousLookup: previousLogLookup,
+        nextLookup: nextLogLookup
+      )
+      applySnapshot(reconfiguring: changedIdentifiers)
+      return
+    }
+
+    let previousNetworkLookup = displayedNetworkLookup
+    let nextNetwork = filteredNetwork(from: state.3)
+    let nextNetworkLookup = Dictionary(uniqueKeysWithValues: nextNetwork.map { ($0.id, $0) })
+
+    displayedNetwork = nextNetwork
+    displayedNetworkLookup = nextNetworkLookup
+
+    let changedIdentifiers = changedIdentifiers(
+      orderedIDs: nextNetwork.map(\.id),
+      previousLookup: previousNetworkLookup,
+      nextLookup: nextNetworkLookup
+    )
+    applySnapshot(reconfiguring: changedIdentifiers)
   }
 
   private func filteredLogs(from source: [DebugLogEntry]) -> [DebugLogEntry] {
@@ -710,9 +779,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       result.append(entry)
     }
-    if !sortAscending {
-      result.reverse()
-    }
+    result.sort(by: logSortComparator)
     return result
   }
 
@@ -746,9 +813,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       result.append(entry)
     }
-    if !sortAscending {
-      result.reverse()
-    }
+    result.sort(by: networkSortComparator)
     return result
   }
 
@@ -761,13 +826,27 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       guard let self else {
         return
       }
+      self.scheduledReloadWorkItem = nil
       if self.tableView.isDragging || self.tableView.isDecelerating {
         return
       }
       self.reloadFromStore(reason: .dataOnly)
     }
     scheduledReloadWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
+  }
+
+  private func scheduleSearchReload() {
+    scheduledSearchWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else {
+        return
+      }
+      self.scheduledSearchWorkItem = nil
+      self.reloadFromStore(reason: .dataOnly)
+    }
+    scheduledSearchWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
   }
 
   private func suspendLiveUpdatesForScrollIfNeeded() {
@@ -795,11 +874,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateSortButton() {
-    guard var config = sortToggleButton.configuration else {
-      return
-    }
-    config.image = UIImage(systemName: sortAscending ? "arrow.up" : "arrow.down")
-    sortToggleButton.configuration = config
+    sortToggleButton.configuration = toolbarButtonConfiguration(
+      systemName: sortAscending ? "arrow.up" : "arrow.down",
+      foregroundColor: PanelColors.text,
+      style: .neutral
+    )
     sortToggleButton.accessibilityLabel = localizedSortTitle(ascending: sortAscending)
   }
 
@@ -957,6 +1036,41 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return "未找到匹配的网络请求"
   }
 
+  private func changedIdentifiers<Entry: Equatable>(
+    orderedIDs: [String],
+    previousLookup: [String: Entry],
+    nextLookup: [String: Entry]
+  ) -> [String] {
+    orderedIDs.compactMap { identifier in
+      guard let nextEntry = nextLookup[identifier] else {
+        return nil
+      }
+      guard let previousEntry = previousLookup[identifier] else {
+        return identifier
+      }
+      return previousEntry == nextEntry ? nil : identifier
+    }
+  }
+
+  private func logSortComparator(_ lhs: DebugLogEntry, _ rhs: DebugLogEntry) -> Bool {
+    let lhsKey = lhs.fullTimestamp.isEmpty ? lhs.timestamp : lhs.fullTimestamp
+    let rhsKey = rhs.fullTimestamp.isEmpty ? rhs.timestamp : rhs.fullTimestamp
+    if lhsKey == rhsKey {
+      return sortAscending ? lhs.id < rhs.id : lhs.id > rhs.id
+    }
+    return sortAscending ? lhsKey < rhsKey : lhsKey > rhsKey
+  }
+
+  private func networkSortComparator(_ lhs: DebugNetworkEntry, _ rhs: DebugNetworkEntry) -> Bool {
+    if lhs.updatedAt != rhs.updatedAt {
+      return sortAscending ? lhs.updatedAt < rhs.updatedAt : lhs.updatedAt > rhs.updatedAt
+    }
+    if lhs.startedAt != rhs.startedAt {
+      return sortAscending ? lhs.startedAt < rhs.startedAt : lhs.startedAt > rhs.startedAt
+    }
+    return sortAscending ? lhs.id < rhs.id : lhs.id > rhs.id
+  }
+
   private func logDetailBody(for entry: DebugLogEntry) -> String {
     var metadataLines = ["timestamp: \(entry.fullTimestamp)"]
     if let context = entry.context, !context.isEmpty {
@@ -982,16 +1096,22 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   @objc private func searchTextChanged(_ sender: UITextField) {
-    searchText = sender.text ?? ""
-    reloadFromStore()
+    let nextSearchText = sender.text ?? ""
+    guard nextSearchText != searchText else {
+      return
+    }
+    searchText = nextSearchText
+    scheduleSearchReload()
   }
 
   @objc private func clearTapped() {
     InAppDebuggerStore.shared.clear(kind: activeTab == .logs ? "logs" : "network")
-    if activeTab == .network &&
-      selectedNetworkOrigins.contains("js") &&
-      selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue) {
-      InAppDebuggerNativeWebSocketCapture.shared.refreshVisibleEntries()
+    if activeTab == .network {
+      InAppDebuggerNativeNetworkCapture.shared.refreshVisibleEntries()
+      if selectedNetworkOrigins.contains("js") &&
+        selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue) {
+        InAppDebuggerNativeWebSocketCapture.shared.refreshVisibleEntries()
+      }
     }
   }
 
@@ -1448,6 +1568,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private let scrollView = UIScrollView()
   private let stack = UIStackView()
   private var notificationObserver: NSObjectProtocol?
+  private var scheduledReloadWorkItem: DispatchWorkItem?
 
   init(entry: DebugNetworkEntry, strings: [String: String], locale: String) {
     self.entryId = entry.id
@@ -1486,7 +1607,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -28),
     ])
 
-    if let latestEntry = InAppDebuggerStore.shared.snapshotState().3.first(where: { $0.id == entryId }) {
+    if let latestEntry = InAppDebuggerStore.shared.networkEntry(withID: entryId) {
       entry = latestEntry
     }
     renderSections()
@@ -1496,19 +1617,32 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      self?.reloadEntryFromStore()
+      self?.scheduleReloadEntryFromStore()
     }
   }
 
   deinit {
+    scheduledReloadWorkItem?.cancel()
     if let notificationObserver {
       NotificationCenter.default.removeObserver(notificationObserver)
     }
   }
 
+  private func scheduleReloadEntryFromStore() {
+    scheduledReloadWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else {
+        return
+      }
+      self.scheduledReloadWorkItem = nil
+      self.reloadEntryFromStore()
+    }
+    scheduledReloadWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
+  }
+
   private func reloadEntryFromStore() {
-    let state = InAppDebuggerStore.shared.snapshotState()
-    guard let latestEntry = state.3.first(where: { $0.id == entryId }),
+    guard let latestEntry = InAppDebuggerStore.shared.networkEntry(withID: entryId),
           latestEntry != entry else {
       return
     }

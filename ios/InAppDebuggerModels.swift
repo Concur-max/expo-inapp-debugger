@@ -1,6 +1,6 @@
 import Foundation
 
-struct DebugConfig {
+struct DebugConfig: Equatable {
   var enabled: Bool = false
   var initialVisible: Bool = true
   var enableNetworkTab: Bool = true
@@ -11,7 +11,7 @@ struct DebugConfig {
   var strings: [String: String] = [:]
 }
 
-struct DebugLogEntry {
+struct DebugLogEntry: Equatable {
   let id: String
   let type: String
   let origin: String
@@ -69,7 +69,7 @@ struct DebugLogEntry {
   }
 }
 
-struct DebugErrorEntry {
+struct DebugErrorEntry: Equatable {
   let id: String
   let source: String
   let message: String

@@ -105,6 +105,7 @@ function shouldUseNativeWebSocketCapture() {
 export class NetworkCollector {
   private readonly requests = new Map<string, MutableNetworkEntry>();
   private readonly xhrIdMap = new Map<number, string>();
+  private readonly requestToXHRId = new Map<string, number>();
   private nextId = 1;
   private enabled = false;
   private xhrInterceptor: XHRInterceptorModule | null = null;
@@ -143,6 +144,11 @@ export class NetworkCollector {
     this.webSocketInterceptor?.setOnMessageCallback?.(undefined);
     this.webSocketInterceptor?.setOnErrorCallback?.(undefined);
     this.webSocketInterceptor?.setOnCloseCallback?.(undefined);
+    this.xhrInterceptor?.disableInterception?.();
+    this.webSocketInterceptor?.disableInterception?.();
+    this.requests.clear();
+    this.xhrIdMap.clear();
+    this.requestToXHRId.clear();
   }
 
   private attachXHR() {
@@ -153,10 +159,12 @@ export class NetworkCollector {
     }
 
     this.xhrInterceptor.setOpenCallback?.((method: string, url: string, xhr: XHRShell) => {
-      const interceptorId = this.nextId++
+      const interceptorId = this.nextId++;
+      const timestamp = now();
       const requestId = `http_${interceptorId}`;
       xhr._index = interceptorId;
       this.xhrIdMap.set(interceptorId, requestId);
+      this.requestToXHRId.set(requestId, interceptorId);
       const entry: MutableNetworkEntry = {
         id: requestId,
         kind: 'http',
@@ -164,8 +172,8 @@ export class NetworkCollector {
         url,
         origin: 'js',
         state: 'pending',
-        startedAt: now(),
-        updatedAt: now(),
+        startedAt: timestamp,
+        updatedAt: timestamp,
         requestHeaders: {},
         responseHeaders: {},
       };
@@ -176,20 +184,22 @@ export class NetworkCollector {
     this.xhrInterceptor.setRequestHeaderCallback?.((header: string, value: string, xhr: XHRShell) => {
       const entry = this.getXHRRequest(xhr);
       if (!entry) return;
+      const timestamp = now();
       entry.requestHeaders = {
         ...(entry.requestHeaders ?? {}),
         [header]: value,
       };
-      entry.updatedAt = now();
+      entry.updatedAt = timestamp;
       this.emit(entry);
     });
 
     this.xhrInterceptor.setSendCallback?.((data: unknown, xhr: XHRShell) => {
       const entry = this.getXHRRequest(xhr);
       if (!entry) return;
+      const timestamp = now();
       entry.requestBody = safeStringify(data);
-      entry.startedAt = now();
-      entry.updatedAt = now();
+      entry.startedAt = timestamp;
+      entry.updatedAt = timestamp;
       this.emit(entry);
     });
 
@@ -202,10 +212,11 @@ export class NetworkCollector {
       ) => {
         const entry = this.getXHRRequest(xhr);
         if (!entry) return;
+        const timestamp = now();
         entry.responseContentType = responseContentType;
         entry.responseSize = responseSize;
         entry.responseHeaders = responseHeaders;
-        entry.updatedAt = now();
+        entry.updatedAt = timestamp;
         this.emit(entry);
       }
     );
@@ -234,6 +245,7 @@ export class NetworkCollector {
           entry.error = `timeout=${timeout}`;
         }
         this.emit(entry);
+        this.releaseXHRRequest(entry.id);
       }
     );
 
@@ -253,6 +265,7 @@ export class NetworkCollector {
 
     this.webSocketInterceptor.setConnectCallback?.(
       (url: string, protocols: string[] | null, _options: unknown, socketId: number) => {
+        const timestamp = now();
         const entry: MutableNetworkEntry = {
           id: `ws_${socketId}`,
           kind: 'websocket',
@@ -261,8 +274,8 @@ export class NetworkCollector {
           origin: 'js',
           protocol: protocols?.join(', ') || '',
           state: 'pending',
-          startedAt: now(),
-          updatedAt: now(),
+          startedAt: timestamp,
+          updatedAt: timestamp,
           messages: '',
           messagesList: [],
         };
@@ -274,8 +287,9 @@ export class NetworkCollector {
     this.webSocketInterceptor.setOnOpenCallback?.((socketId: number) => {
       const entry = this.requests.get(`ws_${socketId}`);
       if (!entry) return;
+      const timestamp = now();
       entry.state = 'success';
-      entry.updatedAt = now();
+      entry.updatedAt = timestamp;
       this.emit(entry);
     });
 
@@ -290,9 +304,10 @@ export class NetworkCollector {
     this.webSocketInterceptor.setOnErrorCallback?.((payload: { message?: string }, socketId: number) => {
       const entry = this.requests.get(`ws_${socketId}`);
       if (!entry) return;
+      const timestamp = now();
       entry.state = 'error';
       entry.error = payload?.message || 'WebSocket error';
-      entry.updatedAt = now();
+      entry.updatedAt = timestamp;
       this.emit(entry);
     });
 
@@ -314,7 +329,12 @@ export class NetworkCollector {
   private appendMessage(socketId: number, message: string) {
     const entry = this.requests.get(`ws_${socketId}`);
     if (!entry) return;
-    entry.messagesList = [...(entry.messagesList ?? []), message].slice(-100);
+    const messagesList = entry.messagesList ?? [];
+    messagesList.push(message);
+    if (messagesList.length > 100) {
+      messagesList.splice(0, messagesList.length - 100);
+    }
+    entry.messagesList = messagesList;
     entry.messages = entry.messagesList.join('\n');
     entry.updatedAt = now();
     this.emit(entry);
@@ -347,6 +367,16 @@ export class NetworkCollector {
         return;
       }
       this.requests.delete(firstKey);
+      this.releaseXHRRequest(firstKey);
     }
+  }
+
+  private releaseXHRRequest(requestId: string) {
+    const xhrId = this.requestToXHRId.get(requestId);
+    if (xhrId == null) {
+      return;
+    }
+    this.requestToXHRId.delete(requestId);
+    this.xhrIdMap.delete(xhrId);
   }
 }
