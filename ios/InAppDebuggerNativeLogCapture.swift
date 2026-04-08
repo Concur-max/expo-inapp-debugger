@@ -1225,7 +1225,7 @@ private final class TrackedWebSocketState {
       bytesIn: bytesIn,
       bytesOut: bytesOut,
       events: eventsList.joined(separator: "\n"),
-      messages: messagesList.joined(separator: "\n")
+      messages: messagesList.joined(separator: "\n\n")
     )
   }
 }
@@ -1346,18 +1346,15 @@ final class InAppDebuggerNativeWebSocketCapture {
       tracked.updatedAt = timestamp
       tracked.messageCountOut += 1
       tracked.bytesOut += byteCount
-      if isPanelActive {
-        appendMessage(
-          direction: ">>",
-          kind: "text",
-          preview: sanitizeTextPreview(text),
-          byteCount: byteCount,
-          to: tracked,
-          at: timestamp
-        )
-        return .emitNow
-      }
-      return .none
+      appendMessage(
+        direction: ">>",
+        kind: "text",
+        payload: storedMessageText(text),
+        byteCount: byteCount,
+        to: tracked,
+        at: timestamp
+      )
+      return isPanelActive ? .emitNow : .none
     }
   }
 
@@ -1368,18 +1365,15 @@ final class InAppDebuggerNativeWebSocketCapture {
       tracked.updatedAt = timestamp
       tracked.messageCountOut += 1
       tracked.bytesOut += payload.count
-      if isPanelActive {
-        appendMessage(
-          direction: ">>",
-          kind: "binary",
-          preview: hexPreview(for: payload),
-          byteCount: payload.count,
-          to: tracked,
-          at: timestamp
-        )
-        return .emitNow
-      }
-      return .none
+      appendMessage(
+        direction: ">>",
+        kind: "binary",
+        payload: hexPreview(for: payload),
+        byteCount: payload.count,
+        to: tracked,
+        at: timestamp
+      )
+      return isPanelActive ? .emitNow : .none
     }
   }
 
@@ -1403,18 +1397,15 @@ final class InAppDebuggerNativeWebSocketCapture {
       tracked.messageCountIn += 1
       tracked.bytesIn += payload.byteCount
 
-      if isPanelActive {
-        appendMessage(
-          direction: "<<",
-          kind: payload.kind,
-          preview: payload.preview,
-          byteCount: payload.byteCount,
-          to: tracked,
-          at: timestamp
-        )
-        return .emitNow
-      }
-      return .none
+      appendMessage(
+        direction: "<<",
+        kind: payload.kind,
+        payload: payload.body,
+        byteCount: payload.byteCount,
+        to: tracked,
+        at: timestamp
+      )
+      return isPanelActive ? .emitNow : .none
     }
   }
 
@@ -1568,15 +1559,16 @@ private extension InAppDebuggerNativeWebSocketCapture {
   func appendMessage(
     direction: String,
     kind: String,
-    preview: String,
+    payload: String?,
     byteCount: Int,
     to tracked: TrackedWebSocketState,
     at timestamp: Int
   ) {
-    let previewSuffix = preview.isEmpty ? "" : " \(preview)"
-    tracked.messagesList.append(
-      "\(formatClock(timestamp)) \(direction) \(kind) \(formatByteCount(byteCount))\(previewSuffix)"
-    )
+    var lines = ["[\(formatClock(timestamp))] \(direction) \(kind.uppercased())", formatByteCount(byteCount)]
+    if let payload = payload?.nilIfEmpty {
+      lines.append(payload)
+    }
+    tracked.messagesList.append(lines.joined(separator: "\n"))
     if tracked.messagesList.count > 100 {
       tracked.messagesList.removeFirst(tracked.messagesList.count - 100)
     }
@@ -1625,13 +1617,13 @@ private extension InAppDebuggerNativeWebSocketCapture {
     return (value as String).nilIfEmpty
   }
 
-  func describeMessagePayload(_ message: Any?) -> (kind: String, preview: String, byteCount: Int) {
+  func describeMessagePayload(_ message: Any?) -> (kind: String, body: String?, byteCount: Int) {
     if let text = message as? String {
-      return ("text", sanitizeTextPreview(text), text.lengthOfBytes(using: .utf8))
+      return ("text", storedMessageText(text), text.lengthOfBytes(using: .utf8))
     }
     if let string = message as? NSString {
       let value = string as String
-      return ("text", sanitizeTextPreview(value), value.lengthOfBytes(using: .utf8))
+      return ("text", storedMessageText(value), value.lengthOfBytes(using: .utf8))
     }
     if let data = message as? Data {
       return ("binary", hexPreview(for: data), data.count)
@@ -1641,7 +1633,22 @@ private extension InAppDebuggerNativeWebSocketCapture {
       return ("binary", hexPreview(for: value), value.count)
     }
     let fallback = message.map { String(describing: $0) } ?? ""
-    return ("unknown", sanitizeTextPreview(fallback), fallback.lengthOfBytes(using: .utf8))
+    return ("unknown", storedMessageText(fallback), fallback.lengthOfBytes(using: .utf8))
+  }
+
+  func storedMessageText(_ text: String, limit: Int = 32_000) -> String? {
+    let normalized = text
+      .replacingOccurrences(of: "\r\n", with: "\n")
+      .replacingOccurrences(of: "\r", with: "\n")
+    guard !normalized.isEmpty else {
+      return nil
+    }
+    guard normalized.count > limit else {
+      return normalized
+    }
+
+    let endIndex = normalized.index(normalized.startIndex, offsetBy: limit)
+    return String(normalized[..<endIndex]) + "\n...[truncated]"
   }
 
   func sanitizeTextPreview(_ text: String) -> String {

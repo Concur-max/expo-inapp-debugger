@@ -98,7 +98,7 @@ struct DebugErrorEntry {
   }
 }
 
-struct DebugNetworkEntry {
+struct DebugNetworkEntry: Equatable {
   let id: String
   let kind: String
   let method: String

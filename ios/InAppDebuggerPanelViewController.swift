@@ -344,6 +344,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
+    guard isBeingDismissed || navigationController?.isBeingDismissed == true || isMovingFromParent else {
+      return
+    }
     scheduledReloadWorkItem?.cancel()
     scheduledReloadWorkItem = nil
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
@@ -1265,10 +1268,15 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let usesCodeBlockStyle: Bool
   }
 
-  private let entry: DebugNetworkEntry
+  private let entryId: String
+  private var entry: DebugNetworkEntry
   private let strings: [String: String]
+  private let scrollView = UIScrollView()
+  private let stack = UIStackView()
+  private var notificationObserver: NSObjectProtocol?
 
   init(entry: DebugNetworkEntry, strings: [String: String]) {
+    self.entryId = entry.id
     self.entry = entry
     self.strings = strings
     super.init(nibName: nil, bundle: nil)
@@ -1283,8 +1291,6 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     super.viewDidLoad()
     view.backgroundColor = PanelColors.background
 
-    let scrollView = UIScrollView()
-    let stack = UIStackView()
     stack.axis = .vertical
     stack.spacing = 10
     view.addSubview(scrollView)
@@ -1304,6 +1310,42 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -12),
       stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -28),
     ])
+
+    if let latestEntry = InAppDebuggerStore.shared.snapshotState().3.first(where: { $0.id == entryId }) {
+      entry = latestEntry
+    }
+    renderSections()
+
+    notificationObserver = NotificationCenter.default.addObserver(
+      forName: .inAppDebuggerStoreDidChange,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.reloadEntryFromStore()
+    }
+  }
+
+  deinit {
+    if let notificationObserver {
+      NotificationCenter.default.removeObserver(notificationObserver)
+    }
+  }
+
+  private func reloadEntryFromStore() {
+    let state = InAppDebuggerStore.shared.snapshotState()
+    guard let latestEntry = state.3.first(where: { $0.id == entryId }),
+          latestEntry != entry else {
+      return
+    }
+    entry = latestEntry
+    renderSections()
+  }
+
+  private func renderSections() {
+    for arrangedSubview in stack.arrangedSubviews {
+      stack.removeArrangedSubview(arrangedSubview)
+      arrangedSubview.removeFromSuperview()
+    }
 
     let sections = entry.kind == "websocket"
       ? webSocketSections()
@@ -1415,12 +1457,13 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return fallback
     }
 
-    let blocks = messageBlocks(from: raw)
+    let normalizedRaw = normalizedPlainText(raw)
+    let blocks = messageBlocks(from: normalizedRaw)
       .map(formatMessageBlock)
       .filter { !$0.isEmpty }
 
     guard !blocks.isEmpty else {
-      return raw
+      return normalizedRaw
     }
     return blocks.joined(separator: "\n\n")
   }
@@ -1430,7 +1473,8 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return []
     }
 
-    return messageBlocks(from: raw)
+    let normalizedRaw = normalizedPlainText(raw)
+    return messageBlocks(from: normalizedRaw)
       .compactMap(parseMessageBlock)
   }
 
@@ -1501,7 +1545,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return true
     }
     return trimmed.range(
-      of: #"^\[?\d{2}:\d{2}:\d{2}\.\d{3}\]?\s+(>>|<<)\b"#,
+      of: #"^\[?\d{2}:\d{2}:\d{2}\.\d{3}\]?\s+(>>|<<)(?:\s|$)"#,
       options: .regularExpression
     ) != nil || trimmed.range(
       of: #"^\[?\d{2}:\d{2}:\d{2}\.\d{3}\]?\s*$"#,
@@ -1598,6 +1642,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   }
 
   private func makeWebSocketMessagesSection(title: String, raw: String?, fallback: String) -> UIView {
+    let maxMessagesHeight: CGFloat = 360
     let container = UIView()
     container.backgroundColor = PanelColors.card
     container.layer.cornerRadius = 8
@@ -1622,7 +1667,32 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       }
     }
 
-    let stack = UIStackView(arrangedSubviews: [titleLabel, contentStack])
+    let scrollContentView = UIView()
+    let scrollView = UIScrollView()
+    scrollView.alwaysBounceVertical = true
+    scrollView.showsVerticalScrollIndicator = true
+    scrollView.delaysContentTouches = false
+    scrollView.clipsToBounds = true
+    scrollView.addSubview(scrollContentView)
+    scrollContentView.addSubview(contentStack)
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollContentView.translatesAutoresizingMaskIntoConstraints = false
+    contentStack.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      scrollView.heightAnchor.constraint(equalToConstant: maxMessagesHeight),
+      scrollContentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+      scrollContentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+      scrollContentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+      scrollContentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+      scrollContentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+      contentStack.topAnchor.constraint(equalTo: scrollContentView.topAnchor),
+      contentStack.leadingAnchor.constraint(equalTo: scrollContentView.leadingAnchor),
+      contentStack.trailingAnchor.constraint(equalTo: scrollContentView.trailingAnchor),
+      contentStack.bottomAnchor.constraint(equalTo: scrollContentView.bottomAnchor),
+    ])
+
+    let stack = UIStackView(arrangedSubviews: [titleLabel, scrollView])
     stack.axis = .vertical
     stack.spacing = 10
     container.addSubview(stack)
@@ -1736,21 +1806,40 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   }
 
   private func prettyPrintedJSON(_ text: String) -> String? {
-    let trimmed = normalizedPlainText(text).trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
+    let rawTrimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rawTrimmed.isEmpty else {
       return nil
     }
 
-    if let prettyObject = prettyPrintedJSONObjectOrArray(trimmed) {
+    if let prettyObject = prettyPrintedJSONObjectOrArray(rawTrimmed) {
       return prettyObject
     }
 
-    if let decodedString = decodedJSONStringValue(trimmed),
+    if let decodedString = decodedJSONStringValue(rawTrimmed),
        let prettyObject = prettyPrintedJSONObjectOrArray(decodedString.trimmingCharacters(in: .whitespacesAndNewlines)) {
       return prettyObject
     }
 
-    if let structuredJSON = extractedStructuredJSON(from: trimmed),
+    if let structuredJSON = extractedStructuredJSON(from: rawTrimmed),
+       let prettyObject = prettyPrintedJSONObjectOrArray(structuredJSON) {
+      return prettyObject
+    }
+
+    let normalizedTrimmed = normalizedPlainText(text).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard normalizedTrimmed != rawTrimmed else {
+      return nil
+    }
+
+    if let prettyObject = prettyPrintedJSONObjectOrArray(normalizedTrimmed) {
+      return prettyObject
+    }
+
+    if let decodedString = decodedJSONStringValue(normalizedTrimmed),
+       let prettyObject = prettyPrintedJSONObjectOrArray(decodedString.trimmingCharacters(in: .whitespacesAndNewlines)) {
+      return prettyObject
+    }
+
+    if let structuredJSON = extractedStructuredJSON(from: normalizedTrimmed),
        let prettyObject = prettyPrintedJSONObjectOrArray(structuredJSON) {
       return prettyObject
     }
@@ -1811,10 +1900,11 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     let normalizedBody = normalizedPlainText(body)
-    if let attributedJSON = jsonCodeAttributedText(from: normalizedBody) {
+    let attributedJSON = jsonCodeAttributedText(from: body) ?? jsonCodeAttributedText(from: normalizedBody)
+    if let attributedJSON {
       return SectionBodyPresentation(
         displayedText: normalizedBody,
-        copyText: prettyPrintedJSON(normalizedBody) ?? normalizedBody,
+        copyText: prettyPrintedJSON(body) ?? prettyPrintedJSON(normalizedBody) ?? normalizedBody,
         attributedText: attributedJSON,
         usesCodeBlockStyle: true
       )
@@ -1846,6 +1936,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let literalColor = UIColor(red: 0.01, green: 0.53, blue: 0.42, alpha: 1)
     let paragraphStyle = NSMutableParagraphStyle()
     paragraphStyle.lineSpacing = 3
+    paragraphStyle.lineBreakMode = .byCharWrapping
 
     let lines = prettyJSON.components(separatedBy: .newlines)
     let digits = max(2, String(lines.count).count)
@@ -1978,6 +2069,9 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       : .systemFont(ofSize: 13, weight: .regular)
     bodyTextView.textColor = PanelColors.text
     bodyTextView.overrideCopyText = presentation.copyText
+    bodyTextView.textContainer.lineBreakMode = presentation.usesCodeBlockStyle
+      ? .byCharWrapping
+      : .byWordWrapping
     if let attributedText = presentation.attributedText {
       bodyTextView.attributedText = attributedText
     } else {
