@@ -29,6 +29,84 @@ private struct PanelTone {
   let background: UIColor
 }
 
+private enum NetworkKindFilter: String, CaseIterable {
+  case http
+  case websocket
+  case other
+}
+
+private func normalizedNetworkKind(_ kind: String) -> NetworkKindFilter {
+  switch kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+  case "", "http", "https", "xhr", "xmlhttprequest", "fetch":
+    return .http
+  case "websocket", "ws", "wss", "socket":
+    return .websocket
+  default:
+    return .other
+  }
+}
+
+private func isWebSocketKind(_ kind: String) -> Bool {
+  normalizedNetworkKind(kind) == .websocket
+}
+
+private func localizedNetworkTypeTitle(locale: String) -> String {
+  if locale.hasPrefix("en") {
+    return "Request type"
+  }
+  if locale.hasPrefix("ja") {
+    return "通信種別"
+  }
+  if locale == "zh-TW" {
+    return "請求類型"
+  }
+  return "请求类型"
+}
+
+private func localizedNetworkKindFilterTitle(_ kind: NetworkKindFilter, locale: String) -> String {
+  switch kind {
+  case .http:
+    return "XHR/Fetch"
+  case .websocket:
+    return "WebSocket"
+  case .other:
+    if locale.hasPrefix("en") {
+      return "Other"
+    }
+    if locale.hasPrefix("ja") {
+      return "その他"
+    }
+    return "其他"
+  }
+}
+
+private func localizedNetworkKindTitle(_ rawKind: String, locale: String) -> String {
+  let trimmedKind = rawKind.trimmingCharacters(in: .whitespacesAndNewlines)
+  switch normalizedNetworkKind(trimmedKind) {
+  case .http:
+    return localizedNetworkKindFilterTitle(.http, locale: locale)
+  case .websocket:
+    return localizedNetworkKindFilterTitle(.websocket, locale: locale)
+  case .other:
+    if !trimmedKind.isEmpty, trimmedKind.lowercased() != NetworkKindFilter.other.rawValue {
+      return trimmedKind.uppercased()
+    }
+    return localizedNetworkKindFilterTitle(.other, locale: locale)
+  }
+}
+
+private func networkKindBadgeTitle(_ rawKind: String) -> String {
+  switch normalizedNetworkKind(rawKind) {
+  case .http:
+    return "XHR/FETCH"
+  case .websocket:
+    return "WS"
+  case .other:
+    let trimmedKind = rawKind.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmedKind.isEmpty ? "OTHER" : trimmedKind.uppercased()
+  }
+}
+
 private func toneForLogLevel(_ level: String) -> PanelTone {
   switch level.lowercased() {
   case "error":
@@ -106,9 +184,12 @@ private enum PanelFilterPreferences {
   static let selectedLogLevelsKey = "expo.inappdebugger.panel.selectedLevels"
   static let selectedLogOriginsKey = "expo.inappdebugger.panel.selectedOrigins"
   static let selectedNetworkOriginsKey = "expo.inappdebugger.panel.selectedNetworkOrigins"
+  static let selectedNetworkKindsKey = "expo.inappdebugger.panel.selectedNetworkKinds"
   static let allLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
   static let allOrigins: Set<String> = ["js", "native"]
+  static let allNetworkKinds: Set<String> = Set(NetworkKindFilter.allCases.map(\.rawValue))
   static let defaultOrigins: Set<String> = ["js"]
+  static let defaultNetworkKinds = allNetworkKinds
 
   static func loadLogLevels() -> Set<String> {
     loadSet(forKey: selectedLogLevelsKey, allowedValues: allLevels, defaultValues: allLevels)
@@ -122,6 +203,10 @@ private enum PanelFilterPreferences {
     loadSet(forKey: selectedNetworkOriginsKey, allowedValues: allOrigins, defaultValues: defaultOrigins)
   }
 
+  static func loadNetworkKinds() -> Set<String> {
+    loadSet(forKey: selectedNetworkKindsKey, allowedValues: allNetworkKinds, defaultValues: defaultNetworkKinds)
+  }
+
   static func saveLogLevels(_ levels: Set<String>) {
     saveSet(levels, forKey: selectedLogLevelsKey)
   }
@@ -132,6 +217,10 @@ private enum PanelFilterPreferences {
 
   static func saveNetworkOrigins(_ origins: Set<String>) {
     saveSet(origins, forKey: selectedNetworkOriginsKey)
+  }
+
+  static func saveNetworkKinds(_ kinds: Set<String>) {
+    saveSet(kinds, forKey: selectedNetworkKindsKey)
   }
 
   private static func loadSet(
@@ -164,6 +253,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var selectedLogLevels: Set<String> = PanelFilterPreferences.loadLogLevels()
   private var selectedLogOrigins: Set<String> = PanelFilterPreferences.loadLogOrigins()
   private var selectedNetworkOrigins: Set<String> = PanelFilterPreferences.loadNetworkOrigins()
+  private var selectedNetworkKinds: Set<String> = PanelFilterPreferences.loadNetworkKinds()
   private var sortAscending = false
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
@@ -450,6 +540,26 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       let levelMenu = UIMenu(title: strings["level"] ?? "级别", options: .displayInline, children: levelOptions)
       menuChildren.append(levelMenu)
+    } else {
+      let kindOptions = NetworkKindFilter.allCases.map { kindFilter -> UIAction in
+        let kind = kindFilter.rawValue
+        let isSelected = selectedNetworkKinds.contains(kind)
+        var attributes: UIMenuElement.Attributes = []
+        if #available(iOS 16.0, *) { attributes.insert(.keepsMenuPresented) }
+        return UIAction(
+          title: localizedNetworkKindFilterTitle(kindFilter, locale: currentConfig.locale),
+          attributes: attributes,
+          state: isSelected ? .on : .off
+        ) { [weak self] _ in
+          self?.toggleNetworkKind(kind)
+        }
+      }
+      let kindMenu = UIMenu(
+        title: localizedNetworkTypeTitle(locale: currentConfig.locale),
+        options: .displayInline,
+        children: kindOptions
+      )
+      menuChildren.append(kindMenu)
     }
 
     filterButton.menu = UIMenu(title: strings["filter"] ?? "筛选", children: menuChildren)
@@ -460,7 +570,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         selectedLogOrigins.count < PanelFilterPreferences.allOrigins.count ||
         selectedLogLevels.count < PanelFilterPreferences.allLevels.count
     } else {
-      hasFilters = selectedNetworkOrigins.count < PanelFilterPreferences.allOrigins.count
+      hasFilters =
+        selectedNetworkOrigins.count < PanelFilterPreferences.allOrigins.count ||
+        selectedNetworkKinds.count < PanelFilterPreferences.allNetworkKinds.count
     }
     var config = filterButton.configuration
     config?.baseForegroundColor = hasFilters ? .white : PanelColors.primary
@@ -501,6 +613,18 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore()
   }
 
+  private func toggleNetworkKind(_ kind: String) {
+    if selectedNetworkKinds.contains(kind) {
+      selectedNetworkKinds.remove(kind)
+    } else {
+      selectedNetworkKinds.insert(kind)
+    }
+    PanelFilterPreferences.saveNetworkKinds(selectedNetworkKinds)
+    updateFilterMenu()
+    syncNativeCaptureStates()
+    reloadFromStore()
+  }
+
   private func syncNativeCaptureStates() {
     let shouldActivateNativeLogs = activeTab == .logs && selectedLogOrigins.contains("native")
     InAppDebuggerNativeLogCapture.shared.setPanelActive(shouldActivateNativeLogs)
@@ -509,7 +633,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let shouldActivateNativeWebSocket =
       currentConfig.enableNetworkTab &&
       activeTab == .network &&
-      selectedNetworkOrigins.contains("js")
+      selectedNetworkOrigins.contains("js") &&
+      selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue)
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(shouldActivateNativeWebSocket)
   }
 
@@ -596,13 +721,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     var result: [DebugNetworkEntry] = []
     result.reserveCapacity(source.count)
     for entry in source {
-      guard selectedNetworkOrigins.contains(entry.origin) else {
+      let normalizedKind = normalizedNetworkKind(entry.kind).rawValue
+      guard selectedNetworkOrigins.contains(entry.origin), selectedNetworkKinds.contains(normalizedKind) else {
         continue
       }
       if !query.isEmpty {
+        let kindTitle = localizedNetworkKindTitle(entry.kind, locale: currentConfig.locale)
         let matchesQuery =
           entry.url.localizedCaseInsensitiveContains(query) ||
           entry.origin.localizedCaseInsensitiveContains(query) ||
+          entry.kind.localizedCaseInsensitiveContains(query) ||
+          kindTitle.localizedCaseInsensitiveContains(query) ||
           entry.method.localizedCaseInsensitiveContains(query) ||
           entry.state.localizedCaseInsensitiveContains(query) ||
           (entry.protocol ?? "").localizedCaseInsensitiveContains(query) ||
@@ -692,10 +821,20 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         ? localizedNoLogOriginHint()
         : (selectedLogLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint())
     } else {
-      title = hasSearch || selectedNetworkOrigins.isEmpty
+      let isOriginEmpty = selectedNetworkOrigins.isEmpty
+      let isKindEmpty = selectedNetworkKinds.isEmpty
+      title = hasSearch || isOriginEmpty || isKindEmpty
         ? localizedNoNetworkResultTitle()
         : strings["noNetworkRequests"] ?? "暂无网络请求"
-      detail = selectedNetworkOrigins.isEmpty ? localizedNoNetworkOriginHint() : localizedEmptyHint()
+      if isOriginEmpty && isKindEmpty {
+        detail = localizedNoNetworkFilterHint()
+      } else if isOriginEmpty {
+        detail = localizedNoNetworkOriginHint()
+      } else if isKindEmpty {
+        detail = localizedNoNetworkKindHint()
+      } else {
+        detail = localizedEmptyHint()
+      }
     }
     emptyStateView.configure(title: title, detail: detail)
     tableView.backgroundView = emptyStateView
@@ -779,6 +918,32 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return "请选择 JS 或 native 网络请求。"
   }
 
+  private func localizedNoNetworkKindHint() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Select at least one request type to show network entries."
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "少なくとも 1 つの通信種別を選択してください。"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "至少選擇一種請求類型。"
+    }
+    return "至少选择一种请求类型。"
+  }
+
+  private func localizedNoNetworkFilterHint() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Select at least one source and request type to show network entries."
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "少なくとも 1 つの送信元と通信種別を選択してください。"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "至少選擇一種來源與請求類型。"
+    }
+    return "至少选择一种来源和请求类型。"
+  }
+
   private func localizedNoNetworkResultTitle() -> String {
     if currentConfig.locale.hasPrefix("en") {
       return "No matching network requests found"
@@ -823,7 +988,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   @objc private func clearTapped() {
     InAppDebuggerStore.shared.clear(kind: activeTab == .logs ? "logs" : "network")
-    if activeTab == .network && selectedNetworkOrigins.contains("js") {
+    if activeTab == .network &&
+      selectedNetworkOrigins.contains("js") &&
+      selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue) {
       InAppDebuggerNativeWebSocketCapture.shared.refreshVisibleEntries()
     }
   }
@@ -851,7 +1018,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         return
       }
       let entry = displayedNetwork[indexPath.row]
-      let detail = InAppDebuggerNetworkDetailViewController(entry: entry, strings: strings)
+      let detail = InAppDebuggerNetworkDetailViewController(
+        entry: entry,
+        strings: strings,
+        locale: currentConfig.locale
+      )
       navigationController?.pushViewController(detail, animated: true)
     }
   }
@@ -1043,12 +1214,12 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     methodLabel.text = entry.method.uppercased()
     methodLabel.textColor = PanelColors.primary
     methodLabel.backgroundColor = UIColor(red: 0.89, green: 0.96, blue: 0.94, alpha: 1)
-    statusLabel.text = entry.status.map(String.init) ?? (entry.kind == "websocket" ? "WS" : entry.kind.uppercased())
+    statusLabel.text = entry.status.map(String.init) ?? networkKindBadgeTitle(entry.kind)
     statusLabel.textColor = tone.foreground
     statusLabel.backgroundColor = tone.background
     stateLabel.text = entry.state.uppercased()
     urlLabel.text = entry.url
-    if entry.kind == "websocket" {
+    if isWebSocketKind(entry.kind) {
       let incoming = entry.messageCountIn ?? 0
       let outgoing = entry.messageCountOut ?? 0
       durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-") · IN \(incoming) / OUT \(outgoing)"
@@ -1246,6 +1417,8 @@ final class InAppDebuggerTextDetailViewController: UIViewController {
 }
 
 final class InAppDebuggerNetworkDetailViewController: UIViewController {
+  private static let maxScrollableSectionHeight: CGFloat = 280
+
   private struct ParsedMessageHeader {
     let timestamp: String?
     let direction: String?
@@ -1271,14 +1444,16 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private let entryId: String
   private var entry: DebugNetworkEntry
   private let strings: [String: String]
+  private let locale: String
   private let scrollView = UIScrollView()
   private let stack = UIStackView()
   private var notificationObserver: NSObjectProtocol?
 
-  init(entry: DebugNetworkEntry, strings: [String: String]) {
+  init(entry: DebugNetworkEntry, strings: [String: String], locale: String) {
     self.entryId = entry.id
     self.entry = entry
     self.strings = strings
+    self.locale = locale
     super.init(nibName: nil, bundle: nil)
     title = strings["requestDetails"] ?? "请求详情"
   }
@@ -1347,7 +1522,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       arrangedSubview.removeFromSuperview()
     }
 
-    let sections = entry.kind == "websocket"
+    let sections = isWebSocketKind(entry.kind)
       ? webSocketSections()
       : httpSections()
 
@@ -1355,12 +1530,19 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let noMessagesText = strings["noMessages"] ?? "暂无消息"
 
     sections.forEach { title, body, monospace in
-      if entry.kind == "websocket", title == messagesTitle {
+      if isWebSocketKind(entry.kind), title == messagesTitle {
         stack.addArrangedSubview(
           makeWebSocketMessagesSection(title: title, raw: entry.messages, fallback: noMessagesText)
         )
       } else {
-        stack.addArrangedSubview(makeSection(title: title, body: body, monospace: monospace))
+        stack.addArrangedSubview(
+          makeSection(
+            title: title,
+            body: body,
+            monospace: monospace,
+            bodyMaxHeight: maxBodyHeight(forSectionTitle: title)
+          )
+        )
       }
     }
 
@@ -1377,6 +1559,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
     return [
       (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
+      (title: localizedNetworkTypeTitle(locale: locale), body: localizedNetworkKindTitle(entry.kind, locale: locale), monospace: false),
       (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
       (title: strings["status"] ?? "状态码", body: entry.status.map(String.init) ?? "-", monospace: false),
       (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
@@ -1400,6 +1583,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
     var sections: [(title: String, body: String, monospace: Bool)] = [
       (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
+      (title: localizedNetworkTypeTitle(locale: locale), body: localizedNetworkKindTitle(entry.kind, locale: locale), monospace: false),
       (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
       (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
       (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
@@ -1450,6 +1634,16 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let reason = entry.closeReason?.ifEmpty("-") ?? "-"
     let clean = entry.cleanClose.map { $0 ? "true" : "false" } ?? "-"
     return "code: \(code)\nclean: \(clean)\nreason: \(reason)"
+  }
+
+  private func maxBodyHeight(forSectionTitle title: String) -> CGFloat? {
+    let requestBodyTitle = strings["requestBody"] ?? "请求体"
+    let responseBodyTitle = strings["responseBody"] ?? "响应体"
+    let messagesTitle = strings["messages"] ?? "消息"
+    if title == requestBodyTitle || title == responseBodyTitle || title == messagesTitle {
+      return Self.maxScrollableSectionHeight
+    }
+    return nil
   }
 
   private func formattedMessagesText(_ raw: String?, fallback: String) -> String {
@@ -1642,7 +1836,6 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   }
 
   private func makeWebSocketMessagesSection(title: String, raw: String?, fallback: String) -> UIView {
-    let maxMessagesHeight: CGFloat = 360
     let container = UIView()
     container.backgroundColor = PanelColors.card
     container.layer.cornerRadius = 8
@@ -1668,7 +1861,8 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     let scrollContentView = UIView()
-    let scrollView = UIScrollView()
+    let scrollView = InAppDebuggerIntrinsicScrollView()
+    scrollView.maxHeight = Self.maxScrollableSectionHeight
     scrollView.alwaysBounceVertical = true
     scrollView.showsVerticalScrollIndicator = true
     scrollView.delaysContentTouches = false
@@ -1680,7 +1874,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     contentStack.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
-      scrollView.heightAnchor.constraint(equalToConstant: maxMessagesHeight),
+      scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: Self.maxScrollableSectionHeight),
       scrollContentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
       scrollContentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
       scrollContentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
@@ -2061,7 +2255,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
   }
 
-  private func makeSectionBodyView(body: String, monospace: Bool) -> UIView {
+  private func makeSectionBodyView(body: String, monospace: Bool, scrollable: Bool = false) -> UIView {
     let bodyTextView = InAppDebuggerSelectableTextView()
     let presentation = sectionBodyPresentation(body: body, monospace: monospace)
     bodyTextView.font = monospace
@@ -2069,6 +2263,10 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       : .systemFont(ofSize: 13, weight: .regular)
     bodyTextView.textColor = PanelColors.text
     bodyTextView.overrideCopyText = presentation.copyText
+    bodyTextView.isScrollEnabled = scrollable
+    bodyTextView.alwaysBounceVertical = scrollable
+    bodyTextView.showsVerticalScrollIndicator = scrollable
+    bodyTextView.showsHorizontalScrollIndicator = false
     bodyTextView.textContainer.lineBreakMode = presentation.usesCodeBlockStyle
       ? .byCharWrapping
       : .byWordWrapping
@@ -2093,7 +2291,12 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return bodyTextView
   }
 
-  private func makeSection(title: String, body: String, monospace: Bool) -> UIView {
+  private func makeSection(
+    title: String,
+    body: String,
+    monospace: Bool,
+    bodyMaxHeight: CGFloat? = nil
+  ) -> UIView {
     let container = UIView()
     container.backgroundColor = PanelColors.card
     container.layer.cornerRadius = 8
@@ -2105,8 +2308,16 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     titleLabel.textColor = PanelColors.text
     titleLabel.text = title
 
-    let bodyTextView = makeSectionBodyView(body: body, monospace: monospace)
+    let bodyTextView = makeSectionBodyView(
+      body: body,
+      monospace: monospace,
+      scrollable: bodyMaxHeight != nil
+    )
     bodyTextView.accessibilityLabel = title
+    if let bodyMaxHeight {
+      bodyTextView.translatesAutoresizingMaskIntoConstraints = false
+      bodyTextView.heightAnchor.constraint(lessThanOrEqualToConstant: bodyMaxHeight).isActive = true
+    }
 
     let stack = UIStackView(arrangedSubviews: [titleLabel, bodyTextView])
     stack.axis = .vertical
@@ -2236,6 +2447,41 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     }
 
     UIMenuController.shared.showMenu(from: self, rect: targetRect)
+  }
+}
+
+private final class InAppDebuggerIntrinsicScrollView: UIScrollView {
+  var maxHeight: CGFloat = .greatestFiniteMagnitude {
+    didSet {
+      invalidateIntrinsicContentSize()
+    }
+  }
+
+  private var lastMeasuredContentHeight: CGFloat = 0
+
+  override var contentSize: CGSize {
+    didSet {
+      if abs(contentSize.height - lastMeasuredContentHeight) > 0.5 {
+        lastMeasuredContentHeight = contentSize.height
+        invalidateIntrinsicContentSize()
+      }
+    }
+  }
+
+  override var intrinsicContentSize: CGSize {
+    let cappedHeight = min(contentSize.height, maxHeight)
+    return CGSize(
+      width: UIView.noIntrinsicMetric,
+      height: ceil(max(cappedHeight, 0))
+    )
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    if abs(contentSize.height - lastMeasuredContentHeight) > 0.5 {
+      lastMeasuredContentHeight = contentSize.height
+      invalidateIntrinsicContentSize()
+    }
   }
 }
 

@@ -11,6 +11,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "prebuild": "expo prebuild",
+    "http:mock": "node ./scripts/http-mock-server.mjs",
     "ws:echo": "node ./scripts/ws-echo-server.mjs"
   },
   "dependencies": {

@@ -72,6 +72,17 @@ function resolveDefaultWebSocketUrl() {
   return `ws://${host}:8787`;
 }
 
+function resolveDefaultHttpBaseUrl() {
+  const expoHost =
+    extractHost(Constants.expoConfig?.hostUri) ??
+    extractHost(Constants.expoGoConfig?.debuggerHost) ??
+    extractHost(Constants.linkingUri);
+  const scriptURL = NativeModules.SourceCode?.scriptURL as string | undefined;
+  const scriptHost = extractHost(scriptURL);
+  const host = expoHost ?? (!isLoopbackHost(scriptHost) ? scriptHost : null) ?? '127.0.0.1';
+  return `http://${host}:8788`;
+}
+
 function createDemoSocketPayload() {
   return JSON.stringify({
     type: 'client.demo',
@@ -81,9 +92,55 @@ function createDemoSocketPayload() {
   });
 }
 
+function createDemoPostPayload() {
+  return JSON.stringify(
+    {
+      orderId: `demo_${Date.now()}`,
+      user: 'expo-debugger',
+      items: [
+        { sku: 'coffee-beans', quantity: 1 },
+        { sku: 'dripper', quantity: 2 },
+      ],
+      note: 'POST request body from local demo screen',
+      sentAt: new Date().toISOString(),
+    },
+    null,
+    2
+  );
+}
+
+function normalizeBaseUrl(candidate: string) {
+  const trimmed = candidate.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const withProtocol = /^[a-z]+:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return withProtocol.replace(/\/+$/, '');
+}
+
+function formatJSONText(text: string) {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 export default function App() {
   const [enabled, setEnabled] = React.useState(true);
   const [shouldCrash, setShouldCrash] = React.useState(false);
+  const [httpBaseUrl, setHttpBaseUrl] = React.useState(() => resolveDefaultHttpBaseUrl());
+  const [httpStatus, setHttpStatus] = React.useState('idle');
+  const [httpBody, setHttpBody] = React.useState(() => createDemoPostPayload());
+  const [httpResponsePreview, setHttpResponsePreview] = React.useState(
+    '点击下面的本地 GET / POST 按钮后，这里会显示最近一次响应体。'
+  );
+  const [httpEvents, setHttpEvents] = React.useState<string[]>([]);
+  const [httpHint, setHttpHint] = React.useState(() =>
+    isLoopbackUrl(resolveDefaultHttpBaseUrl())
+      ? '当前是 loopback 地址。模拟器可用，真机请改成电脑局域网 IP，例如 http://192.168.x.x:8788。'
+      : '默认地址已按 Expo/Metro 宿主机自动推断。'
+  );
   const [socketUrl, setSocketUrl] = React.useState(() => resolveDefaultWebSocketUrl());
   const [socketStatus, setSocketStatus] = React.useState('idle');
   const [socketMessage, setSocketMessage] = React.useState(() => createDemoSocketPayload());
@@ -102,6 +159,13 @@ export default function App() {
     ].slice(0, 8));
   }, []);
 
+  const appendHttpEvent = React.useCallback((message: string) => {
+    setHttpEvents((current) => [
+      `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${message}`,
+      ...current,
+    ].slice(0, 8));
+  }, []);
+
   const logMessage = React.useCallback((type: 'log' | 'info' | 'warn' | 'debug' | 'error') => {
     const payload = {
       now: new Date().toISOString(),
@@ -115,15 +179,120 @@ export default function App() {
     if (type === 'error') console.error('示例 Console Error', payload);
   }, []);
 
-  const makeRequest = React.useCallback(async () => {
-    try {
-      const response = await fetch('https://jsonplaceholder.typicode.com/todos/1');
-      const json = await response.json();
-      console.info('Fetch 请求成功', json);
-    } catch (error) {
-      console.error('HTTP 请求失败', error);
+  const runLocalFetchGet = React.useCallback(async () => {
+    const baseUrl = normalizeBaseUrl(httpBaseUrl);
+    if (!baseUrl) {
+      Alert.alert('HTTP 地址不能为空', '请先输入本地 mock server 地址。');
+      return;
     }
-  }, []);
+
+    const requestUrl = `${baseUrl}/debug-http/get?channel=fetch&demo=get&at=${Date.now()}`;
+    setHttpStatus('fetching');
+    appendHttpEvent(`GET ${requestUrl}`);
+    if (isLoopbackUrl(requestUrl)) {
+      setHttpHint('如果你现在连的是 iPhone 真机，127.0.0.1 指向手机自己。请改成电脑局域网 IP。');
+    } else {
+      setHttpHint('正在请求本地 GET 接口...');
+    }
+
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'X-Debug-Demo': 'fetch-get',
+        },
+      });
+      const text = await response.text();
+      const formatted = formatJSONText(text);
+      setHttpStatus(`GET ${response.status}`);
+      setHttpResponsePreview(formatted);
+      setHttpHint('本地 GET 已完成。现在去 network 面板里看这条 fetch 记录的响应体。');
+      appendHttpEvent(`GET ${response.status}`);
+      console.info('本地 GET 响应', {
+        status: response.status,
+        url: requestUrl,
+        body: formatted,
+      });
+    } catch (error) {
+      setHttpStatus('get error');
+      setHttpResponsePreview(String(error));
+      if (isLoopbackUrl(requestUrl)) {
+        setHttpHint('GET 失败：真机不能用 127.0.0.1，请改成电脑局域网 IP，并先启动 `pnpm http:mock`。');
+      } else {
+        setHttpHint('GET 失败，请确认 `pnpm http:mock` 正在运行，并且手机和电脑在同一网络。');
+      }
+      appendHttpEvent('GET error');
+      console.error('本地 GET 失败', error);
+    }
+  }, [appendHttpEvent, httpBaseUrl]);
+
+  const runLocalXhrPost = React.useCallback(async () => {
+    const baseUrl = normalizeBaseUrl(httpBaseUrl);
+    if (!baseUrl) {
+      Alert.alert('HTTP 地址不能为空', '请先输入本地 mock server 地址。');
+      return;
+    }
+
+    const requestUrl = `${baseUrl}/debug-http/post?channel=xhr&demo=post&at=${Date.now()}`;
+    const requestBody = httpBody.trim() || createDemoPostPayload();
+    setHttpStatus('posting');
+    appendHttpEvent(`POST ${requestUrl}`);
+    if (isLoopbackUrl(requestUrl)) {
+      setHttpHint('如果你现在连的是 iPhone 真机，127.0.0.1 指向手机自己。请改成电脑局域网 IP。');
+    } else {
+      setHttpHint('正在请求本地 POST 接口...');
+    }
+
+    try {
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', requestUrl, true);
+        xhr.setRequestHeader('Content-Type', 'application/json; charset=utf-8');
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.setRequestHeader('X-Debug-Demo', 'xhr-post');
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== XMLHttpRequest.DONE) {
+            return;
+          }
+          resolve({
+            status: xhr.status,
+            body: xhr.responseText,
+          });
+        };
+        xhr.onerror = () => {
+          reject(new Error('XMLHttpRequest network error'));
+        };
+        xhr.ontimeout = () => {
+          reject(new Error('XMLHttpRequest timeout'));
+        };
+        xhr.send(requestBody);
+      });
+
+      const formatted = formatJSONText(result.body);
+      setHttpStatus(`POST ${result.status}`);
+      setHttpResponsePreview(formatted);
+      setHttpBody(requestBody);
+      setHttpHint('本地 POST 已完成。现在去 network 面板里看这条 XHR 的请求体和响应体。');
+      appendHttpEvent(`POST ${result.status}`);
+      console.info('本地 POST 响应', {
+        status: result.status,
+        url: requestUrl,
+        requestBody,
+        responseBody: formatted,
+      });
+    } catch (error) {
+      setHttpStatus('post error');
+      setHttpResponsePreview(String(error));
+      if (isLoopbackUrl(requestUrl)) {
+        setHttpHint('POST 失败：真机不能用 127.0.0.1，请改成电脑局域网 IP，并先启动 `pnpm http:mock`。');
+      } else {
+        setHttpHint('POST 失败，请确认 `pnpm http:mock` 正在运行，并且手机和电脑在同一网络。');
+      }
+      appendHttpEvent('POST error');
+      console.error('本地 POST 失败', error);
+    }
+  }, [appendHttpEvent, httpBaseUrl, httpBody]);
 
   const connectSocket = React.useCallback(() => {
     socketRef.current?.close();
@@ -271,6 +440,71 @@ export default function App() {
               </View>
             </View>
 
+            <View style={styles.socketCard}>
+              <Text style={styles.cardTitle}>本地 HTTP 回路</Text>
+              <Text style={styles.cardHint}>
+                先在 `example` 目录运行 `pnpm http:mock`，然后分别点击本地 GET 和本地 POST。GET 会走
+                `fetch` 并返回本地响应体，POST 会走 `XMLHttpRequest` 并带上 JSON 请求体，再回显完整响应体。
+              </Text>
+              <Text style={styles.cardSubHint}>{httpHint}</Text>
+
+              <View style={styles.socketStatusRow}>
+                <Text style={styles.socketStatusLabel}>最近状态</Text>
+                <View style={styles.socketStatusBadge}>
+                  <Text style={styles.socketStatusBadgeText}>{httpStatus.toUpperCase()}</Text>
+                </View>
+              </View>
+
+              <TextInput
+                value={httpBaseUrl}
+                onChangeText={setHttpBaseUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="http://192.168.x.x:8788"
+                placeholderTextColor="#8E7F6C"
+                style={styles.input}
+              />
+
+              <TextInput
+                value={httpBody}
+                onChangeText={setHttpBody}
+                autoCapitalize="none"
+                autoCorrect={false}
+                multiline
+                placeholder="输入 POST 请求体"
+                placeholderTextColor="#8E7F6C"
+                style={[styles.input, styles.messageInput]}
+              />
+
+              <View style={styles.socketActionGrid}>
+                <ActionButton label="本地 GET(fetch)" onPress={runLocalFetchGet} />
+                <ActionButton label="本地 POST(XHR)" onPress={runLocalXhrPost} />
+                <ActionButton
+                  label="重置 POST 请求体"
+                  onPress={() => setHttpBody(createDemoPostPayload())}
+                  tone="secondary"
+                />
+              </View>
+
+              <View style={styles.eventList}>
+                <Text style={styles.eventTitle}>最近响应体</Text>
+                <Text style={styles.eventResponse}>{httpResponsePreview}</Text>
+              </View>
+
+              <View style={styles.eventList}>
+                <Text style={styles.eventTitle}>最近 HTTP 事件</Text>
+                {httpEvents.length === 0 ? (
+                  <Text style={styles.eventPlaceholder}>GET / POST 触发记录会显示在这里。</Text>
+                ) : (
+                  httpEvents.map((event) => (
+                    <Text key={event} style={styles.eventItem}>
+                      {event}
+                    </Text>
+                  ))
+                )}
+              </View>
+            </View>
+
             <View style={styles.switchRow}>
               <View>
                 <Text style={styles.switchLabel}>启用调试器</Text>
@@ -287,7 +521,6 @@ export default function App() {
               <ActionButton label="触发 Console Warn" onPress={() => logMessage('warn')} />
               <ActionButton label="触发 Console Debug" onPress={() => logMessage('debug')} />
               <ActionButton label="触发 Console Error" onPress={() => logMessage('error')} />
-              <ActionButton label="发起 Fetch 请求" onPress={makeRequest} />
               <ActionButton label="写入手动错误" onPress={captureManualError} />
               <ActionButton label="触发渲染崩溃" onPress={() => setShouldCrash(true)} tone="danger" />
               <ActionButton label="显示调试器" onPress={() => void InAppDebugController.show()} />
@@ -473,6 +706,17 @@ const styles = StyleSheet.create({
     color: '#E6DED1',
     fontSize: 13,
     lineHeight: 19,
+  },
+  eventTitle: {
+    color: '#F2E7D7',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  eventResponse: {
+    color: '#F6F1E8',
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: 'Menlo',
   },
   eventItem: {
     color: '#F6F1E8',
