@@ -25,6 +25,10 @@ class InAppDebuggerFloatingButtonView(
   context: Context,
   private val onTap: () -> Unit
 ) : FrameLayout(context) {
+  companion object {
+    private const val BUTTON_SIZE_DP = 60
+  }
+
   private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
   private var downRawX = 0f
   private var downRawY = 0f
@@ -36,16 +40,22 @@ class InAppDebuggerFloatingButtonView(
     clipChildren = false
     clipToPadding = false
     elevation = dp(20f)
+    isClickable = true
+    isFocusable = true
 
     addView(
       ComposeView(context).apply {
+        isClickable = false
+        isFocusable = false
         setContent {
           FloatingButtonContent()
         }
       },
-      LayoutParams(dp(60), dp(60))
+      LayoutParams(dp(BUTTON_SIZE_DP), dp(BUTTON_SIZE_DP))
     )
   }
+
+  override fun onInterceptTouchEvent(event: MotionEvent): Boolean = true
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
@@ -65,6 +75,7 @@ class InAppDebuggerFloatingButtonView(
     val parentView = parent as? ViewGroup ?: return super.onTouchEvent(event)
     when (event.actionMasked) {
       MotionEvent.ACTION_DOWN -> {
+        parentView.requestDisallowInterceptTouchEvent(true)
         downRawX = event.rawX
         downRawY = event.rawY
         startX = translationX
@@ -85,17 +96,26 @@ class InAppDebuggerFloatingButtonView(
       }
 
       MotionEvent.ACTION_UP -> {
+        parentView.requestDisallowInterceptTouchEvent(false)
         if (!moved) {
           onTap()
         }
         performClick()
         return true
       }
+
+      MotionEvent.ACTION_CANCEL -> {
+        parentView.requestDisallowInterceptTouchEvent(false)
+        return true
+      }
     }
     return super.onTouchEvent(event)
   }
 
-  override fun performClick(): Boolean = super.performClick()
+  override fun performClick(): Boolean {
+    super.performClick()
+    return true
+  }
 
   private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 

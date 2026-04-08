@@ -8,6 +8,7 @@ object InAppDebuggerStore {
   private val logs = mutableListOf<DebugLogEntry>()
   private val errors = mutableListOf<DebugErrorEntry>()
   private val network = mutableListOf<DebugNetworkEntry>()
+  private val networkIndexById = mutableMapOf<String, Int>()
 
   private val _state = MutableStateFlow(DebugPanelState())
   val state = _state.asStateFlow()
@@ -38,11 +39,15 @@ object InAppDebuggerStore {
     when (kind) {
       "logs" -> logs.clear()
       "errors" -> errors.clear()
-      "network" -> network.clear()
+      "network" -> {
+        network.clear()
+        networkIndexById.clear()
+      }
       else -> {
         logs.clear()
         errors.clear()
         network.clear()
+        networkIndexById.clear()
       }
     }
     emit()
@@ -59,40 +64,55 @@ object InAppDebuggerStore {
   @Synchronized
   fun currentConfig(): DebugConfig = config
 
+  @Synchronized
+  fun networkEntry(id: String): DebugNetworkEntry? {
+    val existingIndex = networkIndexById[id]
+    if (existingIndex != null && existingIndex in network.indices) {
+      return network[existingIndex]
+    }
+    return network.firstOrNull { it.id == id }
+  }
+
   private fun appendLog(entry: DebugLogEntry) {
-    logs.add(0, entry)
+    logs.add(entry)
     trimLogs()
   }
 
   private fun appendError(entry: DebugErrorEntry) {
-    errors.add(0, entry)
+    errors.add(entry)
     trimErrors()
   }
 
   private fun upsertNetwork(entry: DebugNetworkEntry) {
-    val existingIndex = network.indexOfFirst { it.id == entry.id }
-    if (existingIndex >= 0) {
-      network.removeAt(existingIndex)
+    val existingIndex = networkIndexById[entry.id]
+    if (existingIndex != null && existingIndex in network.indices) {
+      network[existingIndex] = entry
+    } else {
+      network.add(entry)
+      networkIndexById[entry.id] = network.lastIndex
     }
-    network.add(0, entry)
     trimNetwork()
   }
 
   private fun trimLogs() {
     while (logs.size > config.maxLogs) {
-      logs.removeLast()
+      logs.removeAt(0)
     }
   }
 
   private fun trimErrors() {
     while (errors.size > config.maxErrors) {
-      errors.removeLast()
+      errors.removeAt(0)
     }
   }
 
   private fun trimNetwork() {
-    while (network.size > config.maxRequests) {
-      network.removeLast()
+    val overflow = network.size - config.maxRequests
+    if (overflow > 0) {
+      repeat(overflow) {
+        network.removeAt(0)
+      }
+      rebuildNetworkIndex()
     }
   }
 
@@ -110,6 +130,9 @@ object InAppDebuggerStore {
     return DebugLogEntry(
       id = map.string("id") ?: return null,
       type = map.string("type") ?: "log",
+      origin = map.string("origin") ?: "js",
+      context = map.string("context"),
+      details = map.string("details"),
       message = map.string("message") ?: "",
       timestamp = map.string("timestamp") ?: "",
       fullTimestamp = map.string("fullTimestamp") ?: ""
@@ -134,6 +157,7 @@ object InAppDebuggerStore {
       kind = map.string("kind") ?: "http",
       method = map.string("method") ?: "GET",
       url = map.string("url") ?: "",
+      origin = map.string("origin") ?: "js",
       state = map.string("state") ?: "pending",
       startedAt = map.long("startedAt") ?: 0L,
       updatedAt = map.long("updatedAt") ?: map.long("startedAt") ?: 0L,
@@ -149,9 +173,26 @@ object InAppDebuggerStore {
       responseSize = map.int("responseSize"),
       error = map.string("error"),
       protocol = map.string("protocol"),
+      requestedProtocols = map.string("requestedProtocols"),
       closeReason = map.string("closeReason"),
+      closeCode = map.int("closeCode"),
+      requestedCloseCode = map.int("requestedCloseCode"),
+      requestedCloseReason = map.string("requestedCloseReason"),
+      cleanClose = map.bool("cleanClose"),
+      messageCountIn = map.int("messageCountIn"),
+      messageCountOut = map.int("messageCountOut"),
+      bytesIn = map.int("bytesIn"),
+      bytesOut = map.int("bytesOut"),
+      events = map.string("events"),
       messages = map.string("messages")
     )
+  }
+
+  private fun rebuildNetworkIndex() {
+    networkIndexById.clear()
+    network.forEachIndexed { index, entry ->
+      networkIndexById[entry.id] = index
+    }
   }
 }
 
@@ -160,6 +201,8 @@ private fun Map<String, Any?>.string(key: String): String? = this[key] as? Strin
 private fun Map<String, Any?>.int(key: String): Int? = (this[key] as? Number)?.toInt()
 
 private fun Map<String, Any?>.long(key: String): Long? = (this[key] as? Number)?.toLong()
+
+private fun Map<String, Any?>.bool(key: String): Boolean? = this[key] as? Boolean
 
 private fun Map<String, Any?>.stringMap(key: String): Map<String, String> {
   val raw = this[key] as? Map<*, *> ?: return emptyMap()

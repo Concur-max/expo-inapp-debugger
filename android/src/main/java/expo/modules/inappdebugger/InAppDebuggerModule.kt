@@ -1,5 +1,6 @@
 package expo.modules.inappdebugger
 
+import android.util.Log
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -21,6 +22,11 @@ class InAppDebuggerModule : Module() {
           key to (entry.value?.toString() ?: "")
         }?.toMap() ?: emptyMap()
       )
+      Log.d(
+        "InAppDebuggerModule",
+        "configure enabled=${config.enabled} initialVisible=${config.initialVisible} " +
+          "currentActivity=${appContext.currentActivity?.javaClass?.name}"
+      )
       InAppDebuggerOverlayManager.applyConfig(appContext, config)
     }
 
@@ -33,10 +39,18 @@ class InAppDebuggerModule : Module() {
     }
 
     AsyncFunction("show") {
+      Log.d(
+        "InAppDebuggerModule",
+        "show currentActivity=${appContext.currentActivity?.javaClass?.name}"
+      )
       InAppDebuggerOverlayManager.show(appContext)
     }
 
     AsyncFunction("hide") {
+      Log.d(
+        "InAppDebuggerModule",
+        "hide currentActivity=${appContext.currentActivity?.javaClass?.name}"
+      )
       InAppDebuggerOverlayManager.hide(appContext)
     }
 

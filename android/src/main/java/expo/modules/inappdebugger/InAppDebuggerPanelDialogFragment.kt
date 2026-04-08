@@ -3,14 +3,20 @@ package expo.modules.inappdebugger
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
+import android.text.format.Formatter
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,30 +27,44 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material3.AssistChip
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -52,22 +72,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogProperties
-import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import java.util.Locale
 
-class InAppDebuggerPanelDialogFragment : DialogFragment() {
+class InAppDebuggerPanelDialogFragment : BottomSheetDialogFragment() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    setStyle(STYLE_NORMAL, android.R.style.Theme_DeviceDefault_Light_NoActionBar_Fullscreen)
+    setStyle(STYLE_NORMAL, com.google.android.material.R.style.Theme_Design_Light_BottomSheetDialog)
   }
 
   override fun onCreateView(
@@ -76,16 +98,17 @@ class InAppDebuggerPanelDialogFragment : DialogFragment() {
     savedInstanceState: Bundle?
   ): View {
     return ComposeView(requireContext()).apply {
+      setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
       setContent {
         MaterialTheme(
           colorScheme = lightColorScheme(
-            primary = Color(0xFF1E6F5C),
-            secondary = Color(0xFFDDEFE9),
-            surface = Color(0xFFFBFAF7),
-            background = Color(0xFFF4F1EA)
+            primary = PanelColors.Primary,
+            secondary = PanelColors.SurfaceAlt,
+            surface = PanelColors.Surface,
+            background = PanelColors.Background
           )
         ) {
-          Surface(modifier = Modifier.fillMaxSize()) {
+          Surface(modifier = Modifier.fillMaxSize(), color = PanelColors.Background) {
             DebugPanel(onDismiss = { dismissAllowingStateLoss() })
           }
         }
@@ -93,9 +116,67 @@ class InAppDebuggerPanelDialogFragment : DialogFragment() {
     }
   }
 
+  override fun onCreateDialog(savedInstanceState: Bundle?): android.app.Dialog {
+    return BottomSheetDialog(requireContext(), theme).apply {
+      dismissWithAnimation = false
+      behavior.skipCollapsed = true
+      behavior.state = BottomSheetBehavior.STATE_EXPANDED
+      setOnShowListener {
+        configureBottomSheet(this)
+      }
+    }
+  }
+
   override fun onStart() {
     super.onStart()
-    dialog?.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+    (dialog as? BottomSheetDialog)?.let(::configureBottomSheet)
+  }
+
+  private fun configureBottomSheet(dialog: BottomSheetDialog) {
+    val background = PanelColors.Background.toArgb()
+    dialog.window?.let { window ->
+      window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+      WindowCompat.setDecorFitsSystemWindows(window, false)
+      window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+      window.decorView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+      val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+      insetsController.isAppearanceLightStatusBars = true
+      insetsController.isAppearanceLightNavigationBars = true
+      @Suppress("DEPRECATION")
+      run {
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        window.isNavigationBarContrastEnforced = false
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val attributes = window.attributes
+        attributes.layoutInDisplayCutoutMode =
+          android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        window.attributes = attributes
+      }
+      window.decorView.setPadding(0, 0, 0, 0)
+    }
+
+    val bottomSheet =
+      dialog.findViewById<FrameLayout>(com.google.android.material.R.id.design_bottom_sheet) ?: return
+
+    bottomSheet.layoutParams = bottomSheet.layoutParams.apply {
+      height = ViewGroup.LayoutParams.MATCH_PARENT
+    }
+    bottomSheet.fitsSystemWindows = false
+    bottomSheet.minimumHeight = resources.displayMetrics.heightPixels
+    bottomSheet.setBackgroundColor(background)
+    bottomSheet.setPadding(0, 0, 0, 0)
+
+    dialog.behavior.apply {
+      isFitToContents = false
+      expandedOffset = 0
+      skipCollapsed = true
+      state = BottomSheetBehavior.STATE_EXPANDED
+      peekHeight = resources.displayMetrics.heightPixels
+    }
   }
 }
 
@@ -109,220 +190,311 @@ private enum class SortOrder {
   Desc
 }
 
+private enum class NetworkKindFilter(val rawValue: String) {
+  Http("http"),
+  WebSocket("websocket"),
+  Other("other")
+}
+
+private object PanelColors {
+  val Background = Color(0xFFF3F4F6)
+  val Surface = Color(0xFFFFFFFF)
+  val SurfaceAlt = Color(0xFFEAF2FF)
+  val Border = Color(0xFFE5E7EB)
+  val Primary = Color(0xFF2563EB)
+  val Text = Color(0xFF111827)
+  val MutedText = Color(0xFF6B7280)
+  val Control = Color(0xFFEFF1F5)
+}
+
+private data class PanelTone(
+  val foreground: Color,
+  val background: Color
+)
+
+private data class DetailItem(
+  val title: String,
+  val content: String,
+  val monospace: Boolean = false
+)
+
+private data class FilterMenuItem(
+  val label: String,
+  val selected: Boolean,
+  val onToggle: () -> Unit
+)
+
+private data class FilterMenuSection(
+  val title: String,
+  val items: List<FilterMenuItem>
+)
+
+private object PanelPreferences {
+  private const val PREFS_NAME = "expo.modules.inappdebugger.panel"
+  private const val SELECTED_LOG_LEVELS_KEY = "selected_levels"
+  private const val SELECTED_LOG_ORIGINS_KEY = "selected_log_origins"
+  private const val SELECTED_NETWORK_ORIGINS_KEY = "selected_network_origins"
+  private const val SELECTED_NETWORK_KINDS_KEY = "selected_network_kinds"
+
+  private val allLevels = setOf("log", "info", "warn", "error", "debug")
+  private val allOrigins = setOf("js", "native")
+  private val allNetworkKinds = NetworkKindFilter.entries.mapTo(linkedSetOf()) { it.rawValue }
+  private val defaultOrigins = setOf("js")
+
+  fun loadLogLevels(context: Context): Set<String> {
+    return loadSet(context, SELECTED_LOG_LEVELS_KEY, allLevels, allLevels)
+  }
+
+  fun loadLogOrigins(context: Context): Set<String> {
+    return loadSet(context, SELECTED_LOG_ORIGINS_KEY, allOrigins, defaultOrigins)
+  }
+
+  fun loadNetworkOrigins(context: Context): Set<String> {
+    return loadSet(context, SELECTED_NETWORK_ORIGINS_KEY, allOrigins, defaultOrigins)
+  }
+
+  fun loadNetworkKinds(context: Context): Set<String> {
+    return loadSet(context, SELECTED_NETWORK_KINDS_KEY, allNetworkKinds, allNetworkKinds)
+  }
+
+  fun saveLogLevels(context: Context, values: Set<String>) {
+    saveSet(context, SELECTED_LOG_LEVELS_KEY, values)
+  }
+
+  fun saveLogOrigins(context: Context, values: Set<String>) {
+    saveSet(context, SELECTED_LOG_ORIGINS_KEY, values)
+  }
+
+  fun saveNetworkOrigins(context: Context, values: Set<String>) {
+    saveSet(context, SELECTED_NETWORK_ORIGINS_KEY, values)
+  }
+
+  fun saveNetworkKinds(context: Context, values: Set<String>) {
+    saveSet(context, SELECTED_NETWORK_KINDS_KEY, values)
+  }
+
+  fun hasActiveLogFilters(levels: Set<String>, origins: Set<String>): Boolean {
+    return origins.size < allOrigins.size || levels.size < allLevels.size
+  }
+
+  fun hasActiveNetworkFilters(origins: Set<String>, kinds: Set<String>): Boolean {
+    return origins.size < allOrigins.size || kinds.size < allNetworkKinds.size
+  }
+
+  private fun loadSet(
+    context: Context,
+    key: String,
+    allowedValues: Set<String>,
+    defaultValues: Set<String>
+  ): Set<String> {
+    val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val stored = prefs.getStringSet(key, null) ?: return defaultValues
+    return stored.filterTo(linkedSetOf()) { it in allowedValues }
+  }
+
+  private fun saveSet(context: Context, key: String, values: Set<String>) {
+    val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    prefs.edit().putStringSet(key, values.toSortedSet()).apply()
+  }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DebugPanel(onDismiss: () -> Unit) {
   val state by InAppDebuggerStore.state.collectAsStateWithLifecycle()
+  val locale = state.config.locale
+  val strings = state.config.strings
   var activeTab by rememberSaveable { mutableStateOf(DebugTab.Logs) }
   var selectedNetworkId by rememberSaveable { mutableStateOf<String?>(null) }
-  val strings = state.config.strings
 
-  Column(
-    modifier = Modifier
-      .fillMaxSize()
-      .background(Color(0xFFF4F1EA))
-  ) {
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(horizontal = 12.dp, vertical = 10.dp),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      Text(
-        text = strings["title"] ?: "调试面板",
-        style = MaterialTheme.typography.titleLarge,
-        color = Color(0xFF2D2A26)
-      )
-      Spacer(modifier = Modifier.weight(1f))
-      IconButton(onClick = onDismiss) {
-        Icon(Icons.Outlined.Close, contentDescription = strings["close"] ?: "关闭")
-      }
+  LaunchedEffect(state.config.enableNetworkTab) {
+    if (!state.config.enableNetworkTab && activeTab == DebugTab.Network) {
+      activeTab = DebugTab.Logs
     }
+  }
 
-    Row(modifier = Modifier.fillMaxWidth()) {
-      PanelTab(
-        title = strings["logsTab"] ?: "日志",
-        selected = activeTab == DebugTab.Logs,
-        onClick = {
-          selectedNetworkId = null
-          activeTab = DebugTab.Logs
+  val selectedEntry = state.network.firstOrNull { it.id == selectedNetworkId }
+  LaunchedEffect(selectedNetworkId, state.network) {
+    if (selectedNetworkId != null && selectedEntry == null) {
+      selectedNetworkId = null
+    }
+  }
+
+  if (selectedEntry != null) {
+    NetworkDetailScreen(
+      entry = selectedEntry,
+      strings = strings,
+      locale = locale,
+      onBack = { selectedNetworkId = null },
+      onClose = onDismiss
+    )
+    return
+  }
+
+  Scaffold(
+    topBar = {
+      TopAppBar(
+        title = { Text(strings["title"] ?: "调试面板") },
+        colors = TopAppBarDefaults.topAppBarColors(
+          containerColor = PanelColors.Background,
+          titleContentColor = PanelColors.Text,
+          actionIconContentColor = PanelColors.Primary
+        ),
+        actions = {
+          IconButton(onClick = onDismiss) {
+            Icon(Icons.Outlined.Close, contentDescription = strings["close"] ?: "关闭")
+          }
         }
       )
-      if (state.config.enableNetworkTab) {
-        PanelTab(
-          title = strings["networkTab"] ?: "网络",
-          selected = activeTab == DebugTab.Network,
+    },
+    containerColor = PanelColors.Background
+  ) { innerPadding ->
+    Column(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(innerPadding)
+        .background(PanelColors.Background)
+    ) {
+      TabRow(
+        selectedTabIndex = activeTab.ordinal,
+        containerColor = PanelColors.Background,
+        contentColor = PanelColors.Primary,
+        divider = {
+          HorizontalDivider(color = PanelColors.Border)
+        }
+      ) {
+        Tab(
+          selected = activeTab == DebugTab.Logs,
           onClick = {
-            activeTab = DebugTab.Network
-          }
+            selectedNetworkId = null
+            activeTab = DebugTab.Logs
+          },
+          text = { Text(strings["logsTab"] ?: "日志") }
+        )
+        Tab(
+          selected = activeTab == DebugTab.Network,
+          onClick = { activeTab = DebugTab.Network },
+          enabled = state.config.enableNetworkTab,
+          text = { Text(strings["networkTab"] ?: "网络") }
+        )
+      }
+
+      when (activeTab) {
+        DebugTab.Logs -> LogsTab(state = state, locale = locale)
+        DebugTab.Network -> NetworkTab(
+          state = state,
+          locale = locale,
+          onSelectNetwork = { selectedNetworkId = it }
         )
       }
     }
-
-    when (activeTab) {
-      DebugTab.Logs -> LogsTab(state = state)
-      DebugTab.Network -> NetworkTab(
-        state = state,
-        selectedNetworkId = selectedNetworkId,
-        onSelectNetwork = { selectedNetworkId = it },
-        onBack = { selectedNetworkId = null }
-      )
-    }
   }
 }
 
 @Composable
-private fun PanelTab(title: String, selected: Boolean, onClick: () -> Unit) {
-  Box(
-    modifier = Modifier
-      .weight(1f)
-      .clickable(onClick = onClick)
-      .background(if (selected) Color(0xFFE7F3EF) else Color(0xFFF4F1EA))
-      .padding(vertical = 12.dp),
-    contentAlignment = Alignment.Center
-  ) {
-    Text(
-      text = title,
-      color = if (selected) Color(0xFF1E6F5C) else Color(0xFF7A7266),
-      style = MaterialTheme.typography.titleMedium
-    )
-  }
-}
-
-@Composable
-private fun LogsTab(state: DebugPanelState) {
-  val strings = state.config.strings
+private fun LogsTab(
+  state: DebugPanelState,
+  locale: String
+) {
   val context = LocalContext.current
+  val strings = state.config.strings
   var searchQuery by rememberSaveable { mutableStateOf("") }
   var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Desc) }
-  val selectedLevels = remember {
-    mutableStateMapOf(
-      "log" to true,
-      "info" to true,
-      "warn" to true,
-      "error" to true,
-      "debug" to true
-    )
+  var selectedLevels by remember { mutableStateOf(PanelPreferences.loadLogLevels(context)) }
+  var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadLogOrigins(context)) }
+  val hasActiveFilters = remember(selectedLevels, selectedOrigins) {
+    PanelPreferences.hasActiveLogFilters(selectedLevels, selectedOrigins)
   }
-  val visibleLogs = remember(state.logs, searchQuery, sortOrder, selectedLevels.toMap()) {
-    val query = searchQuery.trim().lowercase(Locale.getDefault())
-    val base = state.logs.filter { entry ->
-      val levelSelected = selectedLevels[entry.type] ?: false
-      val queryMatches = query.isEmpty() || entry.message.lowercase(Locale.getDefault()).contains(query) || entry.type.lowercase(Locale.getDefault()).contains(query)
-      levelSelected && queryMatches
-    }
-    if (sortOrder == SortOrder.Asc) {
-      base.sortedBy { it.fullTimestamp }
-    } else {
-      base.sortedByDescending { it.fullTimestamp }
-    }
+
+  val visibleLogs = remember(state.logs, searchQuery, sortOrder, selectedLevels, selectedOrigins) {
+    filterLogs(
+      source = state.logs,
+      query = searchQuery,
+      sortOrder = sortOrder,
+      selectedLevels = selectedLevels,
+      selectedOrigins = selectedOrigins
+    )
   }
 
   Column(modifier = Modifier.fillMaxSize()) {
     SearchAndActionRow(
       query = searchQuery,
       placeholder = strings["searchPlaceholder"] ?: "搜索日志...",
-      onQueryChange = { searchQuery = it },
-      onCopyVisible = {
-        copyToClipboard(
-          visibleLogs.joinToString("\n") { "[${it.type.uppercase(Locale.getDefault())}] ${it.timestamp} ${it.message}" },
-          strings["copyVisibleSuccess"] ?: "已复制当前显示的日志",
-          context
+      filterTitle = strings["filter"] ?: "筛选",
+      clearLabel = strings["clear"] ?: "清空",
+      sortLabel = localizedSortTitle(locale, sortOrder == SortOrder.Asc),
+      sortOrder = sortOrder,
+      hasActiveFilters = hasActiveFilters,
+      filterSections = listOf(
+        FilterMenuSection(
+          title = localizedOriginTitleLabel(locale),
+          items = listOf(
+            FilterMenuItem(
+              label = strings["jsLogOrigin"] ?: "JS",
+              selected = "js" in selectedOrigins,
+              onToggle = {
+                selectedOrigins = selectedOrigins.toggle("js")
+                PanelPreferences.saveLogOrigins(context, selectedOrigins)
+              }
+            ),
+            FilterMenuItem(
+              label = strings["nativeLogOrigin"] ?: "native",
+              selected = "native" in selectedOrigins,
+              onToggle = {
+                selectedOrigins = selectedOrigins.toggle("native")
+                PanelPreferences.saveLogOrigins(context, selectedOrigins)
+              }
+            )
+          )
+        ),
+        FilterMenuSection(
+          title = localizedLevelTitle(locale),
+          items = listOf("log", "info", "warn", "error", "debug").map { level ->
+            FilterMenuItem(
+              label = level.uppercase(Locale.ROOT),
+              selected = level in selectedLevels,
+              onToggle = {
+                selectedLevels = selectedLevels.toggle(level)
+                PanelPreferences.saveLogLevels(context, selectedLevels)
+              }
+            )
+          }
         )
+      ),
+      onQueryChange = { searchQuery = it },
+      onToggleSort = {
+        sortOrder = if (sortOrder == SortOrder.Asc) SortOrder.Desc else SortOrder.Asc
       },
-      onClear = { InAppDebuggerStore.clear("logs") },
-      clearLabel = strings["clear"] ?: "清空"
+      onClear = { InAppDebuggerStore.clear("logs") }
     )
 
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(horizontal = 12.dp, vertical = 6.dp),
-      horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-      listOf("log", "info", "warn", "error", "debug").forEach { level ->
-        FilterChip(
-          selected = selectedLevels[level] == true,
-          onClick = { selectedLevels[level] = !(selectedLevels[level] ?: true) },
-          label = { Text(level.uppercase(Locale.getDefault())) }
-        )
-      }
-    }
-
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(horizontal = 12.dp, vertical = 6.dp),
-      horizontalArrangement = Arrangement.End
-    ) {
-      AssistChip(
-        onClick = { sortOrder = SortOrder.Asc },
-        label = { Text(strings["sortAsc"] ?: "时间升序") }
-      )
-      Spacer(modifier = Modifier.width(8.dp))
-      AssistChip(
-        onClick = { sortOrder = SortOrder.Desc },
-        label = { Text(strings["sortDesc"] ?: "时间倒序") }
-      )
-    }
-
     if (visibleLogs.isEmpty()) {
-      EmptyState(
-        text = if (searchQuery.isBlank()) strings["noLogs"] ?: "暂无日志" else strings["noSearchResult"] ?: "未找到匹配的日志"
-      )
+      val title = if (searchQuery.isNotBlank() || selectedLevels.isEmpty()) {
+        strings["noSearchResult"] ?: "未找到匹配的日志"
+      } else {
+        strings["noLogs"] ?: "暂无日志"
+      }
+      val detail = when {
+        selectedOrigins.isEmpty() -> localizedNoLogOriginHint(locale)
+        selectedLevels.isEmpty() -> localizedNoLevelHint(locale)
+        else -> localizedEmptyHint(locale)
+      }
+      EmptyState(title = title, detail = detail)
     } else {
       LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
       ) {
-        items(visibleLogs, key = { it.id }) { log ->
-          LogCard(log = log, strings = strings)
+        items(
+          items = visibleLogs,
+          key = { it.id },
+          contentType = { "log" }
+        ) { log ->
+          LogCard(log = log, strings = strings, locale = locale)
         }
-      }
-    }
-  }
-}
-
-@Composable
-private fun LogCard(log: DebugLogEntry, strings: Map<String, String>) {
-  var expanded by remember(log.id) { mutableStateOf(false) }
-  val context = LocalContext.current
-  val tone = when (log.type) {
-    "warn" -> Pair(Color(0xFFFFF4DE), Color(0xFFD97706))
-    "error" -> Pair(Color(0xFFFEEAEA), Color(0xFFB42318))
-    "info" -> Pair(Color(0xFFEFF6FF), Color(0xFF2563EB))
-    "debug" -> Pair(Color(0xFFF4EBFF), Color(0xFF7C3AED))
-    else -> Pair(Color(0xFFE8F5E9), Color(0xFF1E6F5C))
-  }
-
-  Card(
-    colors = CardDefaults.cardColors(containerColor = tone.first),
-    modifier = Modifier.fillMaxWidth()
-  ) {
-    Column(modifier = Modifier.padding(14.dp)) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        AssistChip(
-          onClick = {},
-          label = { Text(log.type.uppercase(Locale.getDefault())) }
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        Text(text = log.timestamp, color = Color(0xFF6D655A))
-        IconButton(onClick = {
-          copyToClipboard(log.message, strings["copySingleSuccess"] ?: "已复制到剪贴板", context)
-        }) {
-          Icon(Icons.Outlined.ContentCopy, contentDescription = strings["copySingleA11y"] ?: "复制该条日志", tint = tone.second)
-        }
-      }
-      Text(
-        text = log.message,
-        color = Color(0xFF2D2A26),
-        fontFamily = FontFamily.Monospace,
-        maxLines = if (expanded) Int.MAX_VALUE else 6,
-        overflow = TextOverflow.Ellipsis
-      )
-      if (log.message.length > 240 || log.message.count { it == '\n' } > 5) {
-        TextButton(onClick = { expanded = !expanded }) {
-          Text(if (expanded) "收起" else "展开")
+        item("logs_footer") {
+          Spacer(modifier = Modifier.height(12.dp))
         }
       }
     }
@@ -332,150 +504,179 @@ private fun LogCard(log: DebugLogEntry, strings: Map<String, String>) {
 @Composable
 private fun NetworkTab(
   state: DebugPanelState,
-  selectedNetworkId: String?,
-  onSelectNetwork: (String) -> Unit,
-  onBack: () -> Unit
+  locale: String,
+  onSelectNetwork: (String) -> Unit
 ) {
-  val strings = state.config.strings
   val context = LocalContext.current
-  val selected = state.network.firstOrNull { it.id == selectedNetworkId }
-  if (selected != null) {
-    NetworkDetail(entry = selected, strings = strings, onBack = onBack)
-    return
+  val strings = state.config.strings
+  var searchQuery by rememberSaveable { mutableStateOf("") }
+  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Desc) }
+  var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
+  var selectedKinds by remember { mutableStateOf(PanelPreferences.loadNetworkKinds(context)) }
+  val hasActiveFilters = remember(selectedOrigins, selectedKinds) {
+    PanelPreferences.hasActiveNetworkFilters(selectedOrigins, selectedKinds)
   }
 
-  var searchQuery by rememberSaveable { mutableStateOf("") }
-  val requests = remember(state.network, searchQuery) {
-    val query = searchQuery.trim().lowercase(Locale.getDefault())
-    state.network.filter { entry ->
-      query.isEmpty() ||
-        entry.url.lowercase(Locale.getDefault()).contains(query) ||
-        entry.method.lowercase(Locale.getDefault()).contains(query) ||
-        entry.state.lowercase(Locale.getDefault()).contains(query)
-    }
+  val visibleEntries = remember(state.network, searchQuery, sortOrder, selectedOrigins, selectedKinds, locale) {
+    filterNetwork(
+      source = state.network,
+      query = searchQuery,
+      sortOrder = sortOrder,
+      selectedOrigins = selectedOrigins,
+      selectedKinds = selectedKinds,
+      locale = locale
+    )
   }
 
   Column(modifier = Modifier.fillMaxSize()) {
     SearchAndActionRow(
       query = searchQuery,
-      placeholder = strings["searchPlaceholder"] ?: "搜索日志...",
-      onQueryChange = { searchQuery = it },
-      onCopyVisible = {
-        copyToClipboard(
-          requests.joinToString("\n") { "${it.method} ${it.url} ${it.status ?: "-"} ${it.state}" },
-          strings["copyVisibleSuccess"] ?: "已复制当前显示的日志",
-          context
+      placeholder = localizedNetworkSearchPlaceholder(locale),
+      filterTitle = strings["filter"] ?: "筛选",
+      clearLabel = strings["clear"] ?: "清空",
+      sortLabel = localizedSortTitle(locale, sortOrder == SortOrder.Asc),
+      sortOrder = sortOrder,
+      hasActiveFilters = hasActiveFilters,
+      filterSections = listOf(
+        FilterMenuSection(
+          title = localizedOriginTitleLabel(locale),
+          items = listOf(
+            FilterMenuItem(
+              label = strings["jsLogOrigin"] ?: "JS",
+              selected = "js" in selectedOrigins,
+              onToggle = {
+                selectedOrigins = selectedOrigins.toggle("js")
+                PanelPreferences.saveNetworkOrigins(context, selectedOrigins)
+              }
+            ),
+            FilterMenuItem(
+              label = strings["nativeLogOrigin"] ?: "native",
+              selected = "native" in selectedOrigins,
+              onToggle = {
+                selectedOrigins = selectedOrigins.toggle("native")
+                PanelPreferences.saveNetworkOrigins(context, selectedOrigins)
+              }
+            )
+          )
+        ),
+        FilterMenuSection(
+          title = localizedNetworkTypeTitle(locale),
+          items = NetworkKindFilter.entries.map { kind ->
+            FilterMenuItem(
+              label = localizedNetworkKindFilterTitle(kind, locale),
+              selected = kind.rawValue in selectedKinds,
+              onToggle = {
+                selectedKinds = selectedKinds.toggle(kind.rawValue)
+                PanelPreferences.saveNetworkKinds(context, selectedKinds)
+              }
+            )
+          }
         )
+      ),
+      onQueryChange = { searchQuery = it },
+      onToggleSort = {
+        sortOrder = if (sortOrder == SortOrder.Asc) SortOrder.Desc else SortOrder.Asc
       },
-      onClear = { InAppDebuggerStore.clear("network") },
-      clearLabel = strings["clear"] ?: "清空"
+      onClear = { InAppDebuggerStore.clear("network") }
     )
 
-    if (requests.isEmpty()) {
-      EmptyState(text = strings["noNetworkRequests"] ?: "暂无网络请求")
+    if (visibleEntries.isEmpty()) {
+      val title = if (
+        searchQuery.isNotBlank() ||
+          selectedOrigins.isEmpty() ||
+          selectedKinds.isEmpty()
+      ) {
+        localizedNoNetworkResultTitle(locale)
+      } else {
+        strings["noNetworkRequests"] ?: "暂无网络请求"
+      }
+      val detail = when {
+        selectedOrigins.isEmpty() && selectedKinds.isEmpty() -> localizedNoNetworkFilterHint(locale)
+        selectedOrigins.isEmpty() -> localizedNoNetworkOriginHint(locale)
+        selectedKinds.isEmpty() -> localizedNoNetworkKindHint(locale)
+        else -> localizedEmptyHint(locale)
+      }
+      EmptyState(title = title, detail = detail)
     } else {
       LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
       ) {
-        items(requests, key = { it.id }) { entry ->
-          Card(
-            modifier = Modifier
-              .fillMaxWidth()
-              .clickable { onSelectNetwork(entry.id) }
-          ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                AssistChip(onClick = {}, label = { Text(entry.method) })
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(text = entry.state.uppercase(Locale.getDefault()), color = Color(0xFF6D655A))
-                Spacer(modifier = Modifier.weight(1f))
-                Text(text = entry.status?.toString() ?: "-", color = Color(0xFF2D2A26))
-              }
-              Spacer(modifier = Modifier.height(6.dp))
-              Text(text = entry.url, maxLines = 2, overflow = TextOverflow.Ellipsis)
-              Spacer(modifier = Modifier.height(4.dp))
-              Text(
-                text = "${strings["duration"] ?: "耗时"}: ${entry.durationMs ?: 0}ms",
-                color = Color(0xFF6D655A)
-              )
-            }
-          }
+        items(
+          items = visibleEntries,
+          key = { it.id },
+          contentType = { "network" }
+        ) { entry ->
+          NetworkCard(
+            entry = entry,
+            strings = strings,
+            onClick = { onSelectNetwork(entry.id) }
+          )
+        }
+        item("network_footer") {
+          Spacer(modifier = Modifier.height(12.dp))
         }
       }
     }
   }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NetworkDetail(entry: DebugNetworkEntry, strings: Map<String, String>, onBack: () -> Unit) {
-  val scrollState = rememberScrollState()
-  Column(modifier = Modifier.fillMaxSize()) {
-    Row(
-      modifier = Modifier
-        .fillMaxWidth()
-        .padding(horizontal = 12.dp, vertical = 10.dp),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      IconButton(onClick = onBack) {
-        Icon(Icons.Outlined.ArrowBack, contentDescription = "返回")
-      }
-      Text(
-        text = strings["requestDetails"] ?: "请求详情",
-        style = MaterialTheme.typography.titleMedium
-      )
-    }
-    Column(
-      modifier = Modifier
-        .fillMaxSize()
-        .verticalScroll(scrollState)
-        .padding(horizontal = 12.dp, vertical = 8.dp),
-      verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-      DetailSection(title = strings["method"] ?: "方法", content = entry.method)
-      DetailSection(title = strings["status"] ?: "状态码", content = entry.status?.toString() ?: "-")
-      DetailSection(title = strings["state"] ?: "状态", content = entry.state)
-      DetailSection(title = strings["protocol"] ?: "协议", content = entry.protocol ?: "-")
-      DetailSection(title = strings["duration"] ?: "耗时", content = "${entry.durationMs ?: 0}ms")
-      DetailSection(title = "URL", content = entry.url)
-      DetailSection(
-        title = strings["requestHeaders"] ?: "请求头",
-        content = entry.requestHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }.ifBlank { "-" }
-      )
-      DetailSection(
-        title = strings["responseHeaders"] ?: "响应头",
-        content = entry.responseHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }.ifBlank { "-" }
-      )
-      DetailSection(
-        title = strings["requestBody"] ?: "请求体",
-        content = entry.requestBody ?: strings["noRequestBody"] ?: "无请求体",
-        monospace = true
-      )
-      DetailSection(
-        title = strings["responseBody"] ?: "响应体",
-        content = entry.responseBody ?: strings["noResponseBody"] ?: "无响应体",
-        monospace = true
-      )
-      DetailSection(
-        title = strings["messages"] ?: "消息",
-        content = entry.messages ?: strings["noMessages"] ?: "暂无消息",
-        monospace = true
-      )
-      if (!entry.error.isNullOrBlank()) {
-        DetailSection(title = "错误", content = entry.error, monospace = true)
-      }
+private fun NetworkDetailScreen(
+  entry: DebugNetworkEntry,
+  strings: Map<String, String>,
+  locale: String,
+  onBack: () -> Unit,
+  onClose: () -> Unit
+) {
+  val context = LocalContext.current
+  val sections = remember(entry, strings, locale) {
+    if (isWebSocketKind(entry.kind)) {
+      buildWebSocketSections(entry, strings, locale, context)
+    } else {
+      buildHttpSections(entry, strings, locale, context)
     }
   }
-}
 
-@Composable
-private fun DetailSection(title: String, content: String, monospace: Boolean = false) {
-  Card {
-    Column(modifier = Modifier.padding(14.dp)) {
-      Text(text = title, style = MaterialTheme.typography.titleSmall)
-      Spacer(modifier = Modifier.height(6.dp))
-      Text(text = content, fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default)
+  Scaffold(
+    topBar = {
+      TopAppBar(
+        title = { Text(strings["requestDetails"] ?: "请求详情") },
+        colors = TopAppBarDefaults.topAppBarColors(
+          containerColor = PanelColors.Background,
+          titleContentColor = PanelColors.Text,
+          navigationIconContentColor = PanelColors.Primary,
+          actionIconContentColor = PanelColors.Primary
+        ),
+        navigationIcon = {
+          IconButton(onClick = onBack) {
+            Icon(Icons.Outlined.ArrowBack, contentDescription = "Back")
+          }
+        },
+        actions = {
+          IconButton(onClick = onClose) {
+            Icon(Icons.Outlined.Close, contentDescription = strings["close"] ?: "关闭")
+          }
+        }
+      )
+    },
+    containerColor = PanelColors.Background
+  ) { innerPadding ->
+    LazyColumn(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(innerPadding),
+      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+      items(sections, key = { it.title }) { item ->
+        DetailSection(title = item.title, content = item.content, monospace = item.monospace)
+      }
+      item("network_detail_footer") {
+        Spacer(modifier = Modifier.height(12.dp))
+      }
     }
   }
 }
@@ -484,15 +685,21 @@ private fun DetailSection(title: String, content: String, monospace: Boolean = f
 private fun SearchAndActionRow(
   query: String,
   placeholder: String,
+  filterTitle: String,
+  clearLabel: String,
+  sortLabel: String,
+  sortOrder: SortOrder,
+  hasActiveFilters: Boolean,
+  filterSections: List<FilterMenuSection>,
   onQueryChange: (String) -> Unit,
-  onCopyVisible: () -> Unit,
-  onClear: () -> Unit,
-  clearLabel: String
+  onToggleSort: () -> Unit,
+  onClear: () -> Unit
 ) {
+  var filterMenuExpanded by rememberSaveable { mutableStateOf(false) }
   Row(
     modifier = Modifier
       .fillMaxWidth()
-      .padding(horizontal = 12.dp, vertical = 8.dp),
+      .padding(horizontal = 12.dp, vertical = 6.dp),
     verticalAlignment = Alignment.CenterVertically
   ) {
     OutlinedTextField(
@@ -500,29 +707,922 @@ private fun SearchAndActionRow(
       onValueChange = onQueryChange,
       modifier = Modifier.weight(1f),
       placeholder = { Text(placeholder) },
+      leadingIcon = {
+        Icon(
+          imageVector = Icons.Outlined.Search,
+          contentDescription = null,
+          tint = PanelColors.MutedText
+        )
+      },
       singleLine = true,
-      keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None)
+      keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+      shape = RoundedCornerShape(12.dp),
+      colors = OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = PanelColors.Surface,
+        unfocusedContainerColor = PanelColors.Surface,
+        focusedBorderColor = PanelColors.Primary.copy(alpha = 0.45f),
+        unfocusedBorderColor = PanelColors.Border,
+        focusedTextColor = PanelColors.Text,
+        unfocusedTextColor = PanelColors.Text,
+        focusedPlaceholderColor = PanelColors.MutedText,
+        unfocusedPlaceholderColor = PanelColors.MutedText,
+        focusedLeadingIconColor = PanelColors.MutedText,
+        unfocusedLeadingIconColor = PanelColors.MutedText,
+        cursorColor = PanelColors.Primary
+      )
     )
-    Spacer(modifier = Modifier.width(8.dp))
-    IconButton(onClick = onCopyVisible) {
-      Icon(Icons.Outlined.ContentCopy, contentDescription = "复制当前列表")
+    Spacer(modifier = Modifier.width(6.dp))
+    Box {
+      PanelActionButton(
+        imageVector = Icons.Outlined.FilterList,
+        contentDescription = filterTitle,
+        onClick = { filterMenuExpanded = true },
+        active = hasActiveFilters,
+        tint = if (hasActiveFilters) Color.White else PanelColors.Primary
+      )
+      FilterDropdownMenu(
+        expanded = filterMenuExpanded,
+        onDismissRequest = { filterMenuExpanded = false },
+        sections = filterSections
+      )
     }
-    TextButton(onClick = onClear) {
-      Text(clearLabel)
+    Spacer(modifier = Modifier.width(6.dp))
+    PanelActionButton(
+      imageVector = if (sortOrder == SortOrder.Asc) Icons.Outlined.ArrowUpward else Icons.Outlined.ArrowDownward,
+      contentDescription = sortLabel,
+      onClick = onToggleSort
+    )
+    Spacer(modifier = Modifier.width(6.dp))
+    PanelActionButton(
+      imageVector = Icons.Outlined.DeleteOutline,
+      contentDescription = clearLabel,
+      onClick = onClear,
+      tint = Color(0xFFB42318)
+    )
+  }
+}
+
+@Composable
+private fun PanelActionButton(
+  imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+  contentDescription: String,
+  onClick: () -> Unit,
+  tint: Color = PanelColors.Text,
+  active: Boolean = false
+) {
+  FilledTonalIconButton(
+    modifier = Modifier.size(36.dp),
+    onClick = onClick,
+    colors = IconButtonDefaults.filledTonalIconButtonColors(
+      containerColor = if (active) PanelColors.Primary else PanelColors.Control,
+      contentColor = if (active) Color.White else tint
+    )
+  ) {
+    Icon(
+      imageVector = imageVector,
+      contentDescription = contentDescription,
+      modifier = Modifier.size(18.dp),
+      tint = if (active) Color.White else tint
+    )
+  }
+}
+
+@Composable
+private fun FilterDropdownMenu(
+  expanded: Boolean,
+  onDismissRequest: () -> Unit,
+  sections: List<FilterMenuSection>
+) {
+  DropdownMenu(
+    expanded = expanded,
+    onDismissRequest = onDismissRequest,
+    modifier = Modifier.background(PanelColors.Surface)
+  ) {
+    sections.forEachIndexed { sectionIndex, section ->
+      if (sectionIndex > 0) {
+        HorizontalDivider(color = PanelColors.Border)
+      }
+      Text(
+        text = section.title,
+        style = MaterialTheme.typography.labelSmall,
+        color = PanelColors.MutedText,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp)
+      )
+      section.items.forEach { item ->
+        DropdownMenuItem(
+          text = {
+            Text(
+              text = item.label,
+              color = PanelColors.Text
+            )
+          },
+          leadingIcon = {
+            if (item.selected) {
+              Icon(
+                imageVector = Icons.Filled.Check,
+                contentDescription = null,
+                tint = PanelColors.Primary
+              )
+            } else {
+              Spacer(modifier = Modifier.size(24.dp))
+            }
+          },
+          onClick = item.onToggle
+        )
+      }
     }
   }
 }
 
 @Composable
-private fun EmptyState(text: String) {
-  Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-    Text(text = text, color = Color(0xFF7A7266))
+private fun LogCard(
+  log: DebugLogEntry,
+  strings: Map<String, String>,
+  locale: String
+) {
+  var expanded by remember(log.id) { mutableStateOf(false) }
+  val context = LocalContext.current
+  val tone = toneForLogLevel(log.type)
+  val details = listOfNotNull(
+    log.context?.takeIf { it.isNotBlank() },
+    log.details?.takeIf { it.isNotBlank() }
+  ).joinToString("\n")
+
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, PanelColors.Border),
+    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+  ) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+      Box(
+        modifier = Modifier
+          .width(4.dp)
+          .fillMaxSize()
+          .background(tone.foreground)
+      )
+
+      Column(modifier = Modifier.padding(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          PanelChip(
+            text = localizedOriginTitle(log.origin, strings),
+            background = if (isNativeOrigin(log.origin)) PanelColors.Primary else PanelColors.Control,
+            foreground = if (isNativeOrigin(log.origin)) Color.White else PanelColors.MutedText
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+          PanelChip(
+            text = log.type.uppercase(Locale.ROOT),
+            background = tone.background,
+            foreground = tone.foreground
+          )
+          Spacer(modifier = Modifier.weight(1f))
+          Text(
+            text = log.timestamp,
+            style = MaterialTheme.typography.labelMedium,
+            color = PanelColors.MutedText
+          )
+          IconButton(onClick = {
+            copyToClipboard(
+              text = formatLogCopyText(log),
+              successMessage = strings["copySingleSuccess"] ?: "已复制到剪贴板",
+              context = context
+            )
+          }) {
+            Icon(
+              imageVector = Icons.Outlined.ContentCopy,
+              contentDescription = strings["copySingleA11y"] ?: "复制该条日志",
+              tint = tone.foreground
+            )
+          }
+        }
+
+        if (details.isNotBlank()) {
+          Text(
+            text = details,
+            style = MaterialTheme.typography.labelMedium,
+            color = PanelColors.MutedText,
+            maxLines = if (expanded) Int.MAX_VALUE else 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp)
+          )
+        }
+
+        Text(
+          text = log.message,
+          color = PanelColors.Text,
+          fontFamily = FontFamily.Monospace,
+          maxLines = if (expanded) Int.MAX_VALUE else 6,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.padding(top = 8.dp)
+        )
+
+        if (shouldShowExpand(log.message, details)) {
+          TextButton(onClick = { expanded = !expanded }) {
+            Text(if (expanded) localizedCollapseLabel(locale) else localizedExpandLabel(locale))
+          }
+        }
+      }
+    }
   }
 }
 
-private fun copyToClipboard(text: String, successMessage: String, context: Context? = null) {
-  val ctx = context ?: return
-  val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NetworkCard(
+  entry: DebugNetworkEntry,
+  strings: Map<String, String>,
+  onClick: () -> Unit
+) {
+  val tone = toneForNetwork(entry)
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, PanelColors.Border),
+    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    onClick = onClick
+  ) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+      Box(
+        modifier = Modifier
+          .width(4.dp)
+          .fillMaxSize()
+          .background(tone.foreground)
+      )
+
+      Column(modifier = Modifier.padding(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          PanelChip(
+            text = localizedOriginTitle(entry.origin, strings),
+            background = if (isNativeOrigin(entry.origin)) PanelColors.Primary else PanelColors.Control,
+            foreground = if (isNativeOrigin(entry.origin)) Color.White else PanelColors.MutedText
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+          PanelChip(
+            text = entry.method.uppercase(Locale.ROOT),
+            background = PanelColors.SurfaceAlt,
+            foreground = PanelColors.Primary
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+          PanelChip(
+            text = entry.status?.toString() ?: networkKindBadgeTitle(entry.kind),
+            background = tone.background,
+            foreground = tone.foreground
+          )
+          Spacer(modifier = Modifier.weight(1f))
+          Text(
+            text = entry.state.uppercase(Locale.ROOT),
+            style = MaterialTheme.typography.labelMedium,
+            color = PanelColors.MutedText
+          )
+        }
+
+        Text(
+          text = entry.url,
+          style = MaterialTheme.typography.bodyMedium,
+          color = PanelColors.Text,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.padding(top = 8.dp)
+        )
+
+        Text(
+          text = buildNetworkDurationSummary(entry, strings),
+          style = MaterialTheme.typography.labelMedium,
+          color = PanelColors.MutedText,
+          modifier = Modifier.padding(top = 6.dp)
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun DetailSection(
+  title: String,
+  content: String,
+  monospace: Boolean = false
+) {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, PanelColors.Border),
+    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+  ) {
+    Column(modifier = Modifier.padding(12.dp)) {
+      Text(
+        text = title,
+        style = MaterialTheme.typography.titleSmall,
+        color = PanelColors.Text
+      )
+      Spacer(modifier = Modifier.height(6.dp))
+      Text(
+        text = content,
+        color = PanelColors.Text,
+        fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default
+      )
+    }
+  }
+}
+
+@Composable
+private fun EmptyState(
+  title: String,
+  detail: String
+) {
+  Box(
+    modifier = Modifier.fillMaxSize(),
+    contentAlignment = Alignment.Center
+  ) {
+    Column(
+      horizontalAlignment = Alignment.CenterHorizontally,
+      modifier = Modifier.padding(horizontal = 24.dp)
+    ) {
+      Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium,
+        color = PanelColors.Text
+      )
+      Spacer(modifier = Modifier.height(8.dp))
+      Text(
+        text = detail,
+        style = MaterialTheme.typography.bodyMedium,
+        color = PanelColors.MutedText
+      )
+    }
+  }
+}
+
+@Composable
+private fun PanelChip(
+  text: String,
+  background: Color,
+  foreground: Color
+) {
+  Surface(
+    color = background,
+    shape = RoundedCornerShape(8.dp)
+  ) {
+    Text(
+      text = text,
+      color = foreground,
+      style = MaterialTheme.typography.labelMedium,
+      modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+    )
+  }
+}
+
+private fun filterLogs(
+  source: List<DebugLogEntry>,
+  query: String,
+  sortOrder: SortOrder,
+  selectedLevels: Set<String>,
+  selectedOrigins: Set<String>
+): List<DebugLogEntry> {
+  val trimmedQuery = query.trim()
+  return source
+    .asSequence()
+    .filter { entry -> entry.type in selectedLevels && entry.origin in selectedOrigins }
+    .filter { entry ->
+      trimmedQuery.isEmpty() ||
+        entry.message.contains(trimmedQuery, ignoreCase = true) ||
+        entry.type.contains(trimmedQuery, ignoreCase = true) ||
+        entry.origin.contains(trimmedQuery, ignoreCase = true) ||
+        (entry.context?.contains(trimmedQuery, ignoreCase = true) == true) ||
+        (entry.details?.contains(trimmedQuery, ignoreCase = true) == true)
+    }
+    .sortedWith { lhs, rhs ->
+      compareLogs(lhs, rhs, sortOrder)
+    }
+    .toList()
+}
+
+private fun filterNetwork(
+  source: List<DebugNetworkEntry>,
+  query: String,
+  sortOrder: SortOrder,
+  selectedOrigins: Set<String>,
+  selectedKinds: Set<String>,
+  locale: String
+): List<DebugNetworkEntry> {
+  val trimmedQuery = query.trim()
+  return source
+    .asSequence()
+    .filter { entry ->
+      entry.origin in selectedOrigins && normalizedNetworkKind(entry.kind).rawValue in selectedKinds
+    }
+    .filter { entry ->
+      val kindTitle = localizedNetworkKindTitle(entry.kind, locale)
+      trimmedQuery.isEmpty() ||
+        entry.url.contains(trimmedQuery, ignoreCase = true) ||
+        entry.origin.contains(trimmedQuery, ignoreCase = true) ||
+        entry.kind.contains(trimmedQuery, ignoreCase = true) ||
+        kindTitle.contains(trimmedQuery, ignoreCase = true) ||
+        entry.method.contains(trimmedQuery, ignoreCase = true) ||
+        entry.state.contains(trimmedQuery, ignoreCase = true) ||
+        (entry.protocol?.contains(trimmedQuery, ignoreCase = true) == true) ||
+        (entry.requestedProtocols?.contains(trimmedQuery, ignoreCase = true) == true) ||
+        (entry.closeReason?.contains(trimmedQuery, ignoreCase = true) == true) ||
+        (entry.error?.contains(trimmedQuery, ignoreCase = true) == true) ||
+        (entry.events?.contains(trimmedQuery, ignoreCase = true) == true) ||
+        (entry.messages?.contains(trimmedQuery, ignoreCase = true) == true)
+    }
+    .sortedWith { lhs, rhs ->
+      compareNetwork(lhs, rhs, sortOrder)
+    }
+    .toList()
+}
+
+private fun compareLogs(lhs: DebugLogEntry, rhs: DebugLogEntry, sortOrder: SortOrder): Int {
+  val lhsKey = lhs.fullTimestamp.ifBlank { lhs.timestamp }
+  val rhsKey = rhs.fullTimestamp.ifBlank { rhs.timestamp }
+  if (lhsKey != rhsKey) {
+    return if (sortOrder == SortOrder.Asc) lhsKey.compareTo(rhsKey) else rhsKey.compareTo(lhsKey)
+  }
+  return if (sortOrder == SortOrder.Asc) lhs.id.compareTo(rhs.id) else rhs.id.compareTo(lhs.id)
+}
+
+private fun compareNetwork(lhs: DebugNetworkEntry, rhs: DebugNetworkEntry, sortOrder: SortOrder): Int {
+  if (lhs.updatedAt != rhs.updatedAt) {
+    return if (sortOrder == SortOrder.Asc) {
+      lhs.updatedAt.compareTo(rhs.updatedAt)
+    } else {
+      rhs.updatedAt.compareTo(lhs.updatedAt)
+    }
+  }
+  if (lhs.startedAt != rhs.startedAt) {
+    return if (sortOrder == SortOrder.Asc) {
+      lhs.startedAt.compareTo(rhs.startedAt)
+    } else {
+      rhs.startedAt.compareTo(lhs.startedAt)
+    }
+  }
+  return if (sortOrder == SortOrder.Asc) lhs.id.compareTo(rhs.id) else rhs.id.compareTo(lhs.id)
+}
+
+private fun buildHttpSections(
+  entry: DebugNetworkEntry,
+  strings: Map<String, String>,
+  locale: String,
+  context: Context
+): List<DetailItem> {
+  val items = mutableListOf(
+    DetailItem(localizedOriginTitleLabel(locale), localizedOriginTitle(entry.origin, strings)),
+    DetailItem(localizedNetworkTypeTitle(locale), localizedNetworkKindTitle(entry.kind, locale)),
+    DetailItem(strings["method"] ?: "方法", entry.method),
+    DetailItem(strings["status"] ?: "状态码", entry.status?.toString() ?: "-"),
+    DetailItem(strings["state"] ?: "状态", entry.state),
+    DetailItem(strings["protocol"] ?: "协议", entry.protocol ?: "-"),
+    DetailItem("URL", entry.url, monospace = true),
+    DetailItem(strings["duration"] ?: "耗时", entry.durationMs?.let { "${it}ms" } ?: "-"),
+    DetailItem(strings["requestHeaders"] ?: "请求头", headerText(entry.requestHeaders), monospace = true),
+    DetailItem(strings["responseHeaders"] ?: "响应头", headerText(entry.responseHeaders), monospace = true),
+    DetailItem(
+      strings["requestBody"] ?: "请求体",
+      entry.requestBody ?: (strings["noRequestBody"] ?: "无请求体"),
+      monospace = true
+    ),
+    DetailItem(
+      strings["responseBody"] ?: "响应体",
+      entry.responseBody ?: (strings["noResponseBody"] ?: "无响应体"),
+      monospace = true
+    ),
+    DetailItem(
+      strings["messages"] ?: "消息",
+      formattedMessagesText(entry.messages, strings["noMessages"] ?: "暂无消息"),
+      monospace = true
+    )
+  )
+
+  if (!entry.error.isNullOrBlank()) {
+    items += DetailItem(strings["errorTitle"] ?: "错误", entry.error.orEmpty(), monospace = true)
+  }
+
+  if (entry.responseSize != null || !entry.responseContentType.isNullOrBlank()) {
+    items += DetailItem(
+      title = localizedResponseMetaTitle(locale),
+      content = buildString {
+        appendLine("${localizedResponseTypeTitle(locale)}: ${entry.responseType ?: "-"}")
+        appendLine("${localizedContentTypeTitle(locale)}: ${entry.responseContentType ?: "-"}")
+        append("Size: ${formatByteCount(context, entry.responseSize)}")
+      },
+      monospace = true
+    )
+  }
+
+  return items
+}
+
+private fun buildWebSocketSections(
+  entry: DebugNetworkEntry,
+  strings: Map<String, String>,
+  locale: String,
+  context: Context
+): List<DetailItem> {
+  val inferredIncoming = entry.messageCountIn ?: countMessages(entry.messages, "<<")
+  val inferredOutgoing = entry.messageCountOut ?: countMessages(entry.messages, ">>")
+  val items = mutableListOf(
+    DetailItem(localizedOriginTitleLabel(locale), localizedOriginTitle(entry.origin, strings)),
+    DetailItem(localizedNetworkTypeTitle(locale), localizedNetworkKindTitle(entry.kind, locale)),
+    DetailItem(strings["method"] ?: "方法", entry.method),
+    DetailItem(strings["state"] ?: "状态", entry.state),
+    DetailItem(strings["protocol"] ?: "协议", entry.protocol ?: "-"),
+    DetailItem("Requested protocols", entry.requestedProtocols ?: "-"),
+    DetailItem("URL", entry.url, monospace = true),
+    DetailItem(strings["duration"] ?: "耗时", entry.durationMs?.let { "${it}ms" } ?: "-"),
+    DetailItem("Messages", "IN $inferredIncoming / OUT $inferredOutgoing"),
+    DetailItem(
+      "Bytes",
+      "IN ${formatByteCount(context, entry.bytesIn)} / OUT ${formatByteCount(context, entry.bytesOut)}"
+    ),
+    DetailItem(strings["requestHeaders"] ?: "请求头", headerText(entry.requestHeaders), monospace = true)
+  )
+
+  if (entry.responseHeaders.isNotEmpty()) {
+    items += DetailItem(strings["responseHeaders"] ?: "响应头", headerText(entry.responseHeaders), monospace = true)
+  }
+
+  if (entry.status != null) {
+    items += DetailItem(strings["status"] ?: "状态码", entry.status.toString())
+  }
+
+  if (entry.requestedCloseCode != null || !entry.requestedCloseReason.isNullOrBlank()) {
+    items += DetailItem("Close requested", closeRequestSummary(entry), monospace = true)
+  }
+
+  if (entry.closeCode != null || entry.cleanClose != null || !entry.closeReason.isNullOrBlank()) {
+    items += DetailItem("Close result", closeResultSummary(entry), monospace = true)
+  }
+
+  items += DetailItem("Event timeline", entry.events ?: localizedNoEventsText(locale), monospace = true)
+  items += DetailItem(
+    strings["messages"] ?: "消息",
+    formattedMessagesText(entry.messages, strings["noMessages"] ?: "暂无消息"),
+    monospace = true
+  )
+
+  if (!entry.error.isNullOrBlank()) {
+    items += DetailItem(strings["errorTitle"] ?: "错误", entry.error.orEmpty(), monospace = true)
+  }
+
+  return items
+}
+
+private fun toneForLogLevel(level: String): PanelTone {
+  return when (level.lowercase(Locale.ROOT)) {
+    "error" -> PanelTone(
+      foreground = Color(0xFFB42318),
+      background = Color(0xFFFEEAEA)
+    )
+    "warn" -> PanelTone(
+      foreground = Color(0xFFD97706),
+      background = Color(0xFFFFF4DE)
+    )
+    "info" -> PanelTone(
+      foreground = Color(0xFF1D4ED8),
+      background = Color(0xFFEAF2FF)
+    )
+    "debug" -> PanelTone(
+      foreground = Color(0xFF475467),
+      background = Color(0xFFF2F4F7)
+    )
+    else -> PanelTone(
+      foreground = PanelColors.Primary,
+      background = PanelColors.SurfaceAlt
+    )
+  }
+}
+
+private fun toneForNetwork(entry: DebugNetworkEntry): PanelTone {
+  return when {
+    entry.state == "error" || (entry.status ?: 0) >= 400 -> toneForLogLevel("error")
+    entry.state == "pending" || entry.state == "connecting" -> PanelTone(
+      foreground = Color(0xFF4B5563),
+      background = Color(0xFFE5E7EB)
+    )
+    entry.state == "closed" || entry.state == "closing" -> toneForLogLevel("warn")
+    else -> toneForLogLevel("log")
+  }
+}
+
+private fun normalizedNetworkKind(rawKind: String): NetworkKindFilter {
+  return when (rawKind.trim().lowercase(Locale.ROOT)) {
+    "", "http", "https", "xhr", "xmlhttprequest", "fetch" -> NetworkKindFilter.Http
+    "websocket", "ws", "wss", "socket" -> NetworkKindFilter.WebSocket
+    else -> NetworkKindFilter.Other
+  }
+}
+
+private fun isWebSocketKind(rawKind: String): Boolean {
+  return normalizedNetworkKind(rawKind) == NetworkKindFilter.WebSocket
+}
+
+private fun networkKindBadgeTitle(rawKind: String): String {
+  return when (normalizedNetworkKind(rawKind)) {
+    NetworkKindFilter.Http -> "XHR/FETCH"
+    NetworkKindFilter.WebSocket -> "WS"
+    NetworkKindFilter.Other -> rawKind.trim().ifBlank { "OTHER" }.uppercase(Locale.ROOT)
+  }
+}
+
+private fun localizedNetworkTypeTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Request type"
+    locale.startsWith("ja") -> "通信種別"
+    locale == "zh-TW" -> "請求類型"
+    else -> "请求类型"
+  }
+}
+
+private fun localizedNetworkKindFilterTitle(kind: NetworkKindFilter, locale: String): String {
+  return when (kind) {
+    NetworkKindFilter.Http -> "XHR/Fetch"
+    NetworkKindFilter.WebSocket -> "WebSocket"
+    NetworkKindFilter.Other -> when {
+      locale.startsWith("en") -> "Other"
+      locale.startsWith("ja") -> "その他"
+      else -> "其他"
+    }
+  }
+}
+
+private fun localizedNetworkKindTitle(rawKind: String, locale: String): String {
+  return when (val normalized = normalizedNetworkKind(rawKind)) {
+    NetworkKindFilter.Http -> localizedNetworkKindFilterTitle(normalized, locale)
+    NetworkKindFilter.WebSocket -> localizedNetworkKindFilterTitle(normalized, locale)
+    NetworkKindFilter.Other -> rawKind.trim().takeIf {
+      it.isNotEmpty() && !it.equals(NetworkKindFilter.Other.rawValue, ignoreCase = true)
+    }?.uppercase(Locale.ROOT) ?: localizedNetworkKindFilterTitle(normalized, locale)
+  }
+}
+
+private fun isNativeOrigin(origin: String): Boolean {
+  return origin.equals("native", ignoreCase = true)
+}
+
+private fun localizedOriginTitle(origin: String, strings: Map<String, String>): String {
+  return if (isNativeOrigin(origin)) {
+    strings["nativeLogOrigin"] ?: "native"
+  } else {
+    strings["jsLogOrigin"] ?: "JS"
+  }
+}
+
+private fun localizedOriginTitleLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Origin"
+    locale.startsWith("ja") -> "送信元"
+    locale == "zh-TW" -> "來源"
+    else -> "来源"
+  }
+}
+
+private fun localizedLevelTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Level"
+    locale.startsWith("ja") -> "レベル"
+    locale == "zh-TW" -> "級別"
+    else -> "级别"
+  }
+}
+
+private fun localizedSortTitle(locale: String, ascending: Boolean): String {
+  return when {
+    locale.startsWith("en") -> if (ascending) "Time Asc" else "Time Desc"
+    locale.startsWith("ja") -> if (ascending) "時間昇順" else "時間降順"
+    else -> if (ascending) "时间升序" else "时间倒序"
+  }
+}
+
+private fun localizedNetworkSearchPlaceholder(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Search network..."
+    locale.startsWith("ja") -> "通信を検索..."
+    locale == "zh-TW" -> "搜尋網路請求..."
+    else -> "搜索网络请求..."
+  }
+}
+
+private fun localizedEmptyHint(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Try another keyword or generate new events."
+    locale.startsWith("ja") -> "別のキーワードを試すか、新しいイベントを生成してください。"
+    locale == "zh-TW" -> "換個關鍵字，或產生新的事件。"
+    else -> "换个关键词，或生成新的调试事件。"
+  }
+}
+
+private fun localizedNoLevelHint(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Select at least one level to show logs."
+    locale.startsWith("ja") -> "少なくとも 1 つのレベルを選択してください。"
+    locale == "zh-TW" -> "至少選擇一個級別。"
+    else -> "至少选择一个日志级别。"
+  }
+}
+
+private fun localizedNoLogOriginHint(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Select JS or native to show logs."
+    locale.startsWith("ja") -> "JS または native を選択してください。"
+    locale == "zh-TW" -> "請選擇 JS 或 native 日誌。"
+    else -> "请选择 JS 或 native 日志。"
+  }
+}
+
+private fun localizedNoNetworkOriginHint(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Select JS or native to show network entries."
+    locale.startsWith("ja") -> "JS または native を選択してください。"
+    locale == "zh-TW" -> "請選擇 JS 或 native 網路請求。"
+    else -> "请选择 JS 或 native 网络请求。"
+  }
+}
+
+private fun localizedNoNetworkKindHint(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Select at least one request type to show network entries."
+    locale.startsWith("ja") -> "少なくとも 1 つの通信種別を選択してください。"
+    locale == "zh-TW" -> "至少選擇一種請求類型。"
+    else -> "至少选择一种请求类型。"
+  }
+}
+
+private fun localizedNoNetworkFilterHint(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Select at least one source and request type to show network entries."
+    locale.startsWith("ja") -> "少なくとも 1 つの送信元と通信種別を選択してください。"
+    locale == "zh-TW" -> "至少選擇一種來源與請求類型。"
+    else -> "至少选择一种来源和请求类型。"
+  }
+}
+
+private fun localizedNoNetworkResultTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "No matching network requests found"
+    locale.startsWith("ja") -> "一致する通信が見つかりません"
+    locale == "zh-TW" -> "未找到符合的網路請求"
+    else -> "未找到匹配的网络请求"
+  }
+}
+
+private fun localizedResponseMetaTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Response metadata"
+    locale.startsWith("ja") -> "レスポンス情報"
+    locale == "zh-TW" -> "回應資訊"
+    else -> "响应信息"
+  }
+}
+
+private fun localizedResponseTypeTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Type"
+    locale.startsWith("ja") -> "種別"
+    locale == "zh-TW" -> "類型"
+    else -> "类型"
+  }
+}
+
+private fun localizedContentTypeTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Content-Type"
+    locale.startsWith("ja") -> "Content-Type"
+    else -> "Content-Type"
+  }
+}
+
+private fun localizedNoEventsText(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "No events yet"
+    locale.startsWith("ja") -> "イベントはまだありません"
+    locale == "zh-TW" -> "暫無事件"
+    else -> "暂无事件"
+  }
+}
+
+private fun localizedExpandLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Expand"
+    locale.startsWith("ja") -> "展開"
+    locale == "zh-TW" -> "展開"
+    else -> "展开"
+  }
+}
+
+private fun localizedCollapseLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Collapse"
+    locale.startsWith("ja") -> "折りたたむ"
+    locale == "zh-TW" -> "收起"
+    else -> "收起"
+  }
+}
+
+private fun headerText(headers: Map<String, String>): String {
+  if (headers.isEmpty()) {
+    return "-"
+  }
+  return headers.entries
+    .sortedBy { it.key.lowercase(Locale.ROOT) }
+    .joinToString("\n") { "${it.key}: ${it.value}" }
+}
+
+private fun formattedMessagesText(raw: String?, fallback: String): String {
+  return raw?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
+}
+
+private fun closeRequestSummary(entry: DebugNetworkEntry): String {
+  val code = entry.requestedCloseCode?.toString() ?: "-"
+  val reason = entry.requestedCloseReason?.ifBlank { "-" } ?: "-"
+  return "code: $code\nreason: $reason"
+}
+
+private fun closeResultSummary(entry: DebugNetworkEntry): String {
+  val code = entry.closeCode?.toString() ?: "-"
+  val clean = entry.cleanClose?.toString() ?: "-"
+  val reason = entry.closeReason?.ifBlank { "-" } ?: "-"
+  return "code: $code\nclean: $clean\nreason: $reason"
+}
+
+private fun countMessages(messages: String?, directionPrefix: String): Int {
+  return messages
+    ?.lineSequence()
+    ?.count { it.trimStart().startsWith(directionPrefix) }
+    ?: 0
+}
+
+private fun buildNetworkDurationSummary(
+  entry: DebugNetworkEntry,
+  strings: Map<String, String>
+): String {
+  val durationText = "${strings["duration"] ?: "耗时"} ${entry.durationMs?.let { "${it}ms" } ?: "-"}"
+  if (!isWebSocketKind(entry.kind)) {
+    return durationText
+  }
+  val incoming = entry.messageCountIn ?: countMessages(entry.messages, "<<")
+  val outgoing = entry.messageCountOut ?: countMessages(entry.messages, ">>")
+  return "$durationText · IN $incoming / OUT $outgoing"
+}
+
+private fun formatNetworkSummaryText(
+  entry: DebugNetworkEntry,
+  strings: Map<String, String>,
+  locale: String,
+  context: Context
+): String {
+  val parts = mutableListOf(
+    "${entry.method.uppercase(Locale.ROOT)} ${entry.url}",
+    "origin=${localizedOriginTitle(entry.origin, strings)}",
+    "type=${localizedNetworkKindTitle(entry.kind, locale)}",
+    "state=${entry.state}",
+    "status=${entry.status?.toString() ?: networkKindBadgeTitle(entry.kind)}",
+    "duration=${entry.durationMs?.let { "${it}ms" } ?: "-"}"
+  )
+  if (isWebSocketKind(entry.kind)) {
+    parts += "bytes=in ${formatByteCount(context, entry.bytesIn)} / out ${formatByteCount(context, entry.bytesOut)}"
+  }
+  if (!entry.error.isNullOrBlank()) {
+    parts += "error=${entry.error}"
+  }
+  return parts.joinToString(" | ")
+}
+
+private fun formatLogCopyText(entry: DebugLogEntry): String {
+  val metadataLines = mutableListOf("timestamp: ${entry.fullTimestamp.ifBlank { entry.timestamp }}")
+  metadataLines += "origin: ${entry.origin}"
+  entry.context?.takeIf { it.isNotBlank() }?.let { metadataLines += "context: $it" }
+  entry.details?.takeIf { it.isNotBlank() }?.let { metadataLines += it }
+  return metadataLines.joinToString("\n") + "\n\n" + entry.message
+}
+
+private fun shouldShowExpand(message: String, details: String): Boolean {
+  return message.length > 240 || details.length > 120 || message.count { it == '\n' } > 5
+}
+
+private fun formatByteCount(context: Context, count: Int?): String {
+  return if (count == null) {
+    "-"
+  } else {
+    Formatter.formatShortFileSize(context, count.coerceAtLeast(0).toLong())
+  }
+}
+
+private fun Set<String>.toggle(value: String): Set<String> {
+  val next = toMutableSet()
+  if (value in next) {
+    next.remove(value)
+  } else {
+    next.add(value)
+  }
+  return next
+}
+
+private fun copyToClipboard(text: String, successMessage: String, context: Context?) {
+  val actualContext = context ?: return
+  val clipboard = actualContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
   clipboard.setPrimaryClip(ClipData.newPlainText("expo-inapp-debugger", text))
-  android.widget.Toast.makeText(ctx, successMessage, android.widget.Toast.LENGTH_SHORT).show()
+  android.widget.Toast.makeText(actualContext, successMessage, android.widget.Toast.LENGTH_SHORT).show()
 }

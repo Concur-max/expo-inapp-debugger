@@ -1,10 +1,3 @@
-apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
-apply plugin: 'maven-publish'
-
-group = 'expo.modules.inappdebugger'
-version = '0.1.0'
-
 buildscript {
   def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
   if (expoModulesCorePlugin.exists()) {
@@ -31,8 +24,17 @@ buildscript {
 
   dependencies {
     classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${getKotlinVersion()}")
+    classpath("org.jetbrains.kotlin:compose-compiler-gradle-plugin:${getKotlinVersion()}")
   }
 }
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+apply plugin: 'maven-publish'
+
+group = 'expo.modules.inappdebugger'
+version = '0.1.0'
 
 afterEvaluate {
   publishing {
@@ -51,11 +53,11 @@ afterEvaluate {
 
 android {
   namespace "expo.modules.inappdebugger"
-  compileSdkVersion safeExtGet("compileSdkVersion", 34)
+  compileSdk safeExtGet("compileSdkVersion", 34)
 
   defaultConfig {
-    minSdkVersion safeExtGet("minSdkVersion", 24)
-    targetSdkVersion safeExtGet("targetSdkVersion", 34)
+    minSdk safeExtGet("minSdkVersion", 24)
+    targetSdk safeExtGet("targetSdkVersion", 34)
     versionCode 1
     versionName "0.1.0"
     consumerProguardFiles "consumer-rules.pro"
@@ -63,10 +65,6 @@ android {
 
   buildFeatures {
     compose true
-  }
-
-  composeOptions {
-    kotlinCompilerExtensionVersion safeExtGet("kotlinCompilerExtensionVersion", "1.5.14")
   }
 
   compileOptions {
@@ -108,4 +106,5 @@ dependencies {
   implementation "androidx.compose.foundation:foundation"
   implementation "androidx.compose.material3:material3"
   implementation "androidx.compose.material:material-icons-extended"
+  implementation "com.google.android.material:material:1.12.0"
 }

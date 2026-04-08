@@ -14,6 +14,9 @@ data class DebugConfig(
 data class DebugLogEntry(
   val id: String,
   val type: String,
+  val origin: String = "js",
+  val context: String? = null,
+  val details: String? = null,
   val message: String,
   val timestamp: String,
   val fullTimestamp: String
@@ -32,6 +35,7 @@ data class DebugNetworkEntry(
   val kind: String,
   val method: String,
   val url: String,
+  val origin: String = "js",
   val state: String,
   val startedAt: Long,
   val updatedAt: Long,
@@ -47,7 +51,17 @@ data class DebugNetworkEntry(
   val responseSize: Int? = null,
   val error: String? = null,
   val protocol: String? = null,
+  val requestedProtocols: String? = null,
   val closeReason: String? = null,
+  val closeCode: Int? = null,
+  val requestedCloseCode: Int? = null,
+  val requestedCloseReason: String? = null,
+  val cleanClose: Boolean? = null,
+  val messageCountIn: Int? = null,
+  val messageCountOut: Int? = null,
+  val bytesIn: Int? = null,
+  val bytesOut: Int? = null,
+  val events: String? = null,
   val messages: String? = null
 )
 
@@ -61,6 +75,9 @@ data class DebugPanelState(
 fun DebugLogEntry.toMap(): Map<String, Any?> = mapOf(
   "id" to id,
   "type" to type,
+  "origin" to origin,
+  "context" to context,
+  "details" to details,
   "message" to message,
   "timestamp" to timestamp,
   "fullTimestamp" to fullTimestamp
@@ -79,6 +96,7 @@ fun DebugNetworkEntry.toMap(): Map<String, Any?> = mapOf(
   "kind" to kind,
   "method" to method,
   "url" to url,
+  "origin" to origin,
   "state" to state,
   "startedAt" to startedAt,
   "updatedAt" to updatedAt,
@@ -94,6 +112,16 @@ fun DebugNetworkEntry.toMap(): Map<String, Any?> = mapOf(
   "responseSize" to responseSize,
   "error" to error,
   "protocol" to protocol,
+  "requestedProtocols" to requestedProtocols,
   "closeReason" to closeReason,
+  "closeCode" to closeCode,
+  "requestedCloseCode" to requestedCloseCode,
+  "requestedCloseReason" to requestedCloseReason,
+  "cleanClose" to cleanClose,
+  "messageCountIn" to messageCountIn,
+  "messageCountOut" to messageCountOut,
+  "bytesIn" to bytesIn,
+  "bytesOut" to bytesOut,
+  "events" to events,
   "messages" to messages
 )
