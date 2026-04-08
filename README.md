@@ -21,6 +21,14 @@ import {
 } from 'expo-inapp-debugger';
 ```
 
+`InAppDebugProvider` is disabled by default. The library only installs JS/native capture hooks after you explicitly pass `enabled={true}` or call the controller to enable it at runtime.
+
+```tsx
+<InAppDebugProvider enabled={__DEV__ && debugFlag}>
+  <App />
+</InAppDebugProvider>
+```
+
 ## Example
 
 See [`example/App.tsx`](./example/App.tsx) for a minimal integration.

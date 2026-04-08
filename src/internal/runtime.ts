@@ -113,9 +113,8 @@ export function resolveProviderConfig(input: {
   strings?: Partial<InAppDebugStrings>;
 }): ResolvedInAppDebugConfig {
   const resolved = resolveStrings(input.locale ?? 'zh-CN', input.strings);
-  const defaultEnabled = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
   return {
-    enabled: input.enabled ?? defaultEnabled,
+    enabled: input.enabled ?? false,
     initialVisible: input.initialVisible ?? true,
     enableNetworkTab: input.enableNetworkTab ?? true,
     maxLogs: input.maxLogs ?? 2000,

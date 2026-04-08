@@ -12,6 +12,12 @@ describe('formatMessage', () => {
   });
 });
 
+describe('resolveProviderConfig', () => {
+  it('defaults to disabled until explicitly enabled', () => {
+    expect(resolveProviderConfig({}).enabled).toBe(false);
+  });
+});
+
 describe('DebugRuntime', () => {
   const originalConsole = { ...console };
 
