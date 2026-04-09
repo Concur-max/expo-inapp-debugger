@@ -9,6 +9,7 @@ import android.text.format.Formatter
 import android.view.View
 import android.view.ViewGroup
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.Icons
@@ -76,8 +79,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -85,6 +90,8 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 class InAppDebuggerPanelDialogFragment : Fragment() {
   private var previousLightStatusBars: Boolean? = null
@@ -802,6 +809,10 @@ private fun SearchAndActionRow(
   onClear: () -> Unit
 ) {
   var filterMenuExpanded by rememberSaveable { mutableStateOf(false) }
+  val searchFieldTextStyle = MaterialTheme.typography.bodyLarge.copy(
+    lineHeight = 20.sp,
+    platformStyle = PlatformTextStyle(includeFontPadding = true)
+  )
   Row(
     modifier = Modifier
       .fillMaxWidth()
@@ -813,8 +824,15 @@ private fun SearchAndActionRow(
       onValueChange = onQueryChange,
       modifier = Modifier
         .weight(1f)
-        .height(48.dp),
-      placeholder = { Text(placeholder) },
+        .heightIn(min = 56.dp),
+      textStyle = searchFieldTextStyle,
+      placeholder = {
+        Text(
+          text = placeholder,
+          style = searchFieldTextStyle,
+          maxLines = 1
+        )
+      },
       leadingIcon = {
         Icon(
           imageVector = Icons.Outlined.Search,
@@ -949,12 +967,15 @@ private fun LogCard(
   locale: String
 ) {
   var expanded by remember(log.id) { mutableStateOf(false) }
+  var detailsOverflow by remember(log.id) { mutableStateOf(false) }
+  var messageOverflow by remember(log.id) { mutableStateOf(false) }
   val context = LocalContext.current
   val tone = toneForLogLevel(log.type)
   val details = listOfNotNull(
     log.context?.takeIf { it.isNotBlank() },
     log.details?.takeIf { it.isNotBlank() }
   ).joinToString("\n")
+  val canExpand = expanded || detailsOverflow || messageOverflow
 
   Card(
     modifier = Modifier.fillMaxWidth(),
@@ -971,7 +992,11 @@ private fun LogCard(
           .background(tone.foreground)
       )
 
-      Column(modifier = Modifier.padding(12.dp)) {
+      Column(
+        modifier = Modifier
+          .padding(12.dp)
+          .animateContentSize()
+      ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
           PanelChip(
             text = localizedOriginTitle(log.origin, strings),
@@ -1005,27 +1030,47 @@ private fun LogCard(
           }
         }
 
-        if (details.isNotBlank()) {
-          Text(
-            text = details,
-            style = MaterialTheme.typography.labelMedium,
-            color = PanelColors.MutedText,
-            maxLines = if (expanded) Int.MAX_VALUE else 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 6.dp)
-          )
+        SelectionContainer(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = if (details.isNotBlank()) 6.dp else 8.dp)
+        ) {
+          Column(modifier = Modifier.fillMaxWidth()) {
+            if (details.isNotBlank()) {
+              Text(
+                text = details,
+                style = MaterialTheme.typography.labelMedium,
+                color = PanelColors.MutedText,
+                maxLines = if (expanded) Int.MAX_VALUE else 2,
+                overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+                onTextLayout = { layoutResult ->
+                  if (!expanded) {
+                    detailsOverflow = layoutResult.hasVisualOverflow
+                  }
+                }
+              )
+            }
+
+            Text(
+              text = log.message,
+              color = PanelColors.Text,
+              fontFamily = FontFamily.Monospace,
+              maxLines = if (expanded) Int.MAX_VALUE else 6,
+              overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+              modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = if (details.isNotBlank()) 8.dp else 0.dp),
+              onTextLayout = { layoutResult ->
+                if (!expanded) {
+                  messageOverflow = layoutResult.hasVisualOverflow
+                }
+              }
+            )
+          }
         }
 
-        Text(
-          text = log.message,
-          color = PanelColors.Text,
-          fontFamily = FontFamily.Monospace,
-          maxLines = if (expanded) Int.MAX_VALUE else 6,
-          overflow = TextOverflow.Ellipsis,
-          modifier = Modifier.padding(top = 8.dp)
-        )
-
-        if (shouldShowExpand(log.message, details)) {
+        if (canExpand) {
           TextButton(onClick = { expanded = !expanded }) {
             Text(if (expanded) localizedCollapseLabel(locale) else localizedExpandLabel(locale))
           }
@@ -1043,6 +1088,7 @@ private fun NetworkCard(
   onClick: () -> Unit
 ) {
   val tone = toneForNetwork(entry)
+  val trailingBadgeText = networkTrailingBadgeTitle(entry)
   Card(
     modifier = Modifier.fillMaxWidth(),
     colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
@@ -1072,12 +1118,14 @@ private fun NetworkCard(
             background = PanelColors.SurfaceAlt,
             foreground = PanelColors.Primary
           )
-          Spacer(modifier = Modifier.width(8.dp))
-          PanelChip(
-            text = entry.status?.toString() ?: networkKindBadgeTitle(entry.kind),
-            background = tone.background,
-            foreground = tone.foreground
-          )
+          trailingBadgeText?.let { badgeText ->
+            Spacer(modifier = Modifier.width(8.dp))
+            PanelChip(
+              text = badgeText,
+              background = tone.background,
+              foreground = tone.foreground
+            )
+          }
           Spacer(modifier = Modifier.weight(1f))
           Text(
             text = entry.state.uppercase(Locale.ROOT),
@@ -1126,11 +1174,14 @@ private fun DetailSection(
         color = PanelColors.Text
       )
       Spacer(modifier = Modifier.height(6.dp))
-      Text(
-        text = content,
-        color = PanelColors.Text,
-        fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default
-      )
+      SelectionContainer(modifier = Modifier.fillMaxWidth()) {
+        Text(
+          text = content,
+          color = PanelColors.Text,
+          fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+          modifier = Modifier.fillMaxWidth()
+        )
+      }
     }
   }
 }
@@ -1289,12 +1340,12 @@ private fun buildHttpSections(
     DetailItem(strings["responseHeaders"] ?: "响应头", headerText(entry.responseHeaders), monospace = true),
     DetailItem(
       strings["requestBody"] ?: "请求体",
-      entry.requestBody ?: (strings["noRequestBody"] ?: "无请求体"),
+      formattedStructuredContent(entry.requestBody, strings["noRequestBody"] ?: "无请求体"),
       monospace = true
     ),
     DetailItem(
       strings["responseBody"] ?: "响应体",
-      entry.responseBody ?: (strings["noResponseBody"] ?: "无响应体"),
+      formattedStructuredContent(entry.responseBody, strings["noResponseBody"] ?: "无响应体"),
       monospace = true
     )
   )
@@ -1370,7 +1421,7 @@ private fun buildWebSocketSections(
   items += DetailItem("Event timeline", entry.events ?: localizedNoEventsText(locale), monospace = true)
   items += DetailItem(
     strings["messages"] ?: "消息",
-    formattedMessagesText(entry.messages, strings["noMessages"] ?: "暂无消息"),
+    formattedWebSocketMessagesText(entry.messages, strings["noMessages"] ?: "暂无消息"),
     monospace = true
   )
 
@@ -1585,6 +1636,14 @@ private fun networkKindBadgeTitle(rawKind: String): String {
     NetworkKindFilter.Http -> "XHR/FETCH"
     NetworkKindFilter.WebSocket -> "WS"
     NetworkKindFilter.Other -> rawKind.trim().ifBlank { "OTHER" }.uppercase(Locale.ROOT)
+  }
+}
+
+private fun networkTrailingBadgeTitle(entry: DebugNetworkEntry): String? {
+  return when {
+    entry.status != null -> entry.status.toString()
+    isWebSocketKind(entry.kind) -> null
+    else -> networkKindBadgeTitle(entry.kind)
   }
 }
 
@@ -2489,6 +2548,99 @@ private fun formattedMessagesText(raw: String?, fallback: String): String {
   return raw?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
 }
 
+private fun formattedStructuredContent(raw: String?, fallback: String): String {
+  val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return fallback
+  return prettyJsonOrOriginal(normalized)
+}
+
+private fun formattedWebSocketMessagesText(raw: String?, fallback: String): String {
+  val source = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return fallback
+  val renderedBlocks = mutableListOf<String>()
+  var currentPrefix: String? = null
+  val currentPayloadLines = mutableListOf<String>()
+
+  fun flushCurrentBlock() {
+    if (currentPrefix == null && currentPayloadLines.isEmpty()) {
+      return
+    }
+
+    val payload = currentPayloadLines.joinToString("\n").trimEnd()
+    val renderedBlock =
+      currentPrefix?.let { prefix ->
+        formatDirectionalMessageBlock(prefix, payload)
+      } ?: prettyJsonOrOriginal(payload)
+
+    if (renderedBlock.isNotBlank()) {
+      renderedBlocks += renderedBlock
+    }
+
+    currentPrefix = null
+    currentPayloadLines.clear()
+  }
+
+  source.lineSequence().forEach { line ->
+    val prefix = directionalMessagePrefix(line)
+    if (prefix != null) {
+      flushCurrentBlock()
+      currentPrefix = prefix
+      currentPayloadLines += extractDirectionalMessagePayload(line, prefix)
+    } else {
+      currentPayloadLines += line
+    }
+  }
+
+  flushCurrentBlock()
+  return renderedBlocks.joinToString("\n")
+}
+
+private fun formatDirectionalMessageBlock(prefix: String, payload: String): String {
+  val formattedPayload = prettyJsonOrOriginal(payload)
+  if (formattedPayload.isBlank()) {
+    return prefix
+  }
+
+  val lines = formattedPayload.lines()
+  val continuationIndent = " ".repeat(prefix.length + 1)
+  return buildString {
+    append(prefix)
+    append(' ')
+    append(lines.first())
+    lines.drop(1).forEach { line ->
+      append('\n')
+      append(continuationIndent)
+      append(line)
+    }
+  }
+}
+
+private fun directionalMessagePrefix(line: String): String? {
+  return when {
+    line.startsWith(">> ") || line == ">>" -> ">>"
+    line.startsWith("<< ") || line == "<<" -> "<<"
+    else -> null
+  }
+}
+
+private fun extractDirectionalMessagePayload(line: String, prefix: String): String {
+  return line.removePrefix("$prefix ").removePrefix(prefix)
+}
+
+private fun prettyJsonOrOriginal(raw: String): String {
+  val trimmed = raw.trim()
+  if (trimmed.isEmpty()) {
+    return raw.trimEnd()
+  }
+  return prettyJsonOrNull(trimmed) ?: raw.trimEnd()
+}
+
+private fun prettyJsonOrNull(raw: String): String? {
+  return when {
+    raw.startsWith("{") && raw.endsWith("}") -> runCatching { JSONObject(raw).toString(2) }.getOrNull()
+    raw.startsWith("[") && raw.endsWith("]") -> runCatching { JSONArray(raw).toString(2) }.getOrNull()
+    else -> null
+  }
+}
+
 private fun closeRequestSummary(entry: DebugNetworkEntry): String {
   val code = entry.requestedCloseCode?.toString() ?: "-"
   val reason = entry.requestedCloseReason?.ifBlank { "-" } ?: "-"
@@ -2551,10 +2703,6 @@ private fun formatLogCopyText(entry: DebugLogEntry): String {
   entry.context?.takeIf { it.isNotBlank() }?.let { metadataLines += "context: $it" }
   entry.details?.takeIf { it.isNotBlank() }?.let { metadataLines += it }
   return metadataLines.joinToString("\n") + "\n\n" + entry.message
-}
-
-private fun shouldShowExpand(message: String, details: String): Boolean {
-  return message.length > 240 || details.length > 120 || message.count { it == '\n' } > 5
 }
 
 private fun formatByteCount(context: Context, count: Int?): String {
