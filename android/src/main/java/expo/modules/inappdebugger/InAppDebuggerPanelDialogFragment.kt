@@ -80,6 +80,9 @@ import androidx.compose.ui.unit.dp
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 class InAppDebuggerPanelDialogFragment : Fragment() {
@@ -184,6 +187,8 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
 }
 
 const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
+private const val ANDROID_PANEL_TITLE = "Debugging panel"
+private const val ANDROID_SEARCH_PLACEHOLDER = "Please enter"
 
 private enum class DebugTab {
   Logs,
@@ -234,6 +239,9 @@ private data class FilterMenuSection(
   val title: String,
   val items: List<FilterMenuItem>
 )
+
+private val appInfoCrashTimestampFormatter: DateTimeFormatter =
+  DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
 
 private object PanelPreferences {
   private const val PREFS_NAME = "expo.modules.inappdebugger.panel"
@@ -340,7 +348,7 @@ private fun DebugPanel(onDismiss: () -> Unit) {
   Scaffold(
     topBar = {
       TopAppBar(
-        title = { Text(strings["title"] ?: "调试面板") },
+        title = { Text(ANDROID_PANEL_TITLE) },
         colors = TopAppBarDefaults.topAppBarColors(
           containerColor = PanelColors.Background,
           titleContentColor = PanelColors.Text,
@@ -415,10 +423,11 @@ private fun AppInfoTab(
     InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
   }
 
-  val sections = remember(state.runtimeInfo, state.config, locale) {
+  val sections = remember(state.runtimeInfo, state.config, state.errors, locale) {
     buildDebuggerInfoSections(
       runtimeInfo = state.runtimeInfo,
       config = state.config,
+      appErrors = state.errors,
       locale = locale
     )
   }
@@ -472,7 +481,7 @@ private fun LogsTab(
   Column(modifier = Modifier.fillMaxSize()) {
     SearchAndActionRow(
       query = searchQuery,
-      placeholder = strings["searchPlaceholder"] ?: "搜索日志...",
+      placeholder = localizedAndroidSearchPlaceholder(),
       filterTitle = strings["filter"] ?: "筛选",
       clearLabel = strings["clear"] ?: "清空",
       sortLabel = localizedSortTitle(locale, sortOrder == SortOrder.Asc),
@@ -584,7 +593,7 @@ private fun NetworkTab(
   Column(modifier = Modifier.fillMaxSize()) {
     SearchAndActionRow(
       query = searchQuery,
-      placeholder = localizedNetworkSearchPlaceholder(locale),
+      placeholder = localizedAndroidSearchPlaceholder(),
       filterTitle = strings["filter"] ?: "筛选",
       clearLabel = strings["clear"] ?: "清空",
       sortLabel = localizedSortTitle(locale, sortOrder == SortOrder.Asc),
@@ -752,13 +761,15 @@ private fun SearchAndActionRow(
   Row(
     modifier = Modifier
       .fillMaxWidth()
-      .padding(horizontal = 12.dp, vertical = 6.dp),
+      .padding(horizontal = 12.dp, vertical = 4.dp),
     verticalAlignment = Alignment.CenterVertically
   ) {
     OutlinedTextField(
       value = query,
       onValueChange = onQueryChange,
-      modifier = Modifier.weight(1f),
+      modifier = Modifier
+        .weight(1f)
+        .height(48.dp),
       placeholder = { Text(placeholder) },
       leadingIcon = {
         Icon(
@@ -1326,9 +1337,11 @@ private fun buildWebSocketSections(
 private fun buildDebuggerInfoSections(
   runtimeInfo: DebugRuntimeInfo,
   config: DebugConfig,
+  appErrors: List<DebugErrorEntry>,
   locale: String
 ): List<DetailItem> {
-  return listOf(
+  return buildList {
+    add(
     DetailItem(
       title = localizedHostRuntimeTitle(locale),
       content = buildString {
@@ -1345,11 +1358,15 @@ private fun buildDebuggerInfoSections(
         append("${localizedAbiLabel(locale)}: ${runtimeInfo.supportedAbis.joinToString().ifBlank { "-" }}")
       },
       monospace = true
-    ),
+    )
+    )
+    add(
     DetailItem(
       title = localizedDebuggerCapabilityTitle(locale),
       content = buildCapabilitySummary(runtimeInfo, config, locale)
-    ),
+    )
+    )
+    add(
     DetailItem(
       title = localizedCaptureStatusTitle(locale),
       content = buildString {
@@ -1365,12 +1382,106 @@ private fun buildDebuggerInfoSections(
         append("${localizedBuffersLabel(locale)}: ${runtimeInfo.buffers.joinToString().ifBlank { "-" }}")
       },
       monospace = true
-    ),
-    DetailItem(
+    )
+    )
+    addAll(buildCrashRecordSections(runtimeInfo, locale))
+    addAll(buildFatalErrorSections(appErrors, locale))
+    add(
+      DetailItem(
       title = localizedLimitationsTitle(locale),
       content = buildLimitationsSummary(runtimeInfo, config, locale)
     )
-  )
+    )
+  }
+}
+
+private fun buildFatalErrorSections(
+  appErrors: List<DebugErrorEntry>,
+  locale: String
+): List<DetailItem> {
+  val fatalErrors = appErrors.filter { error ->
+    error.source in setOf("global", "react") || error.message.contains("[FATAL]")
+  }.sortedByDescending(DebugErrorEntry::fullTimestamp)
+
+  if (fatalErrors.isEmpty()) {
+    return listOf(
+      DetailItem(
+        title = localizedFatalErrorRecordsTitle(locale),
+        content = localizedNoFatalErrorRecordsText(locale)
+      )
+    )
+  }
+
+  return buildList {
+    add(
+      DetailItem(
+        title = localizedFatalErrorRecordsTitle(locale),
+        content = localizedFatalErrorRecordsSummaryText(locale, fatalErrors.size)
+      )
+    )
+    fatalErrors.forEachIndexed { index, error ->
+      add(
+        DetailItem(
+          title = localizedFatalErrorTitle(locale, index + 1),
+          content = buildString {
+            appendLine("${localizedCrashTimeLabel(locale)}: ${error.fullTimestamp.ifBlank { error.timestamp.ifBlank { "-" } }}")
+            appendLine("${localizedFatalErrorSourceLabel(locale)}: ${error.source.ifBlank { "-" }}")
+            appendLine("${localizedFatalErrorMessageLabel(locale)}:")
+            append(error.message.ifBlank { "-" })
+          },
+          monospace = true
+        )
+      )
+    }
+  }
+}
+
+private fun buildCrashRecordSections(
+  runtimeInfo: DebugRuntimeInfo,
+  locale: String
+): List<DetailItem> {
+  val records = runtimeInfo.crashRecords.sortedByDescending(DebugCrashRecord::timestampMillis)
+  if (records.isEmpty()) {
+    return listOf(
+      DetailItem(
+        title = localizedCrashRecordsTitle(locale),
+        content = localizedNoCrashRecordsText(locale)
+      )
+    )
+  }
+
+  return buildList {
+    add(
+      DetailItem(
+        title = localizedCrashRecordsTitle(locale),
+        content = localizedCrashRecordsSummaryText(locale, records.size)
+      )
+    )
+    records.forEachIndexed { index, record ->
+      add(
+        DetailItem(
+          title = localizedCrashRecordTitle(locale, index + 1),
+          content = formatCrashRecord(record, locale),
+          monospace = true
+        )
+      )
+    }
+  }
+}
+
+private fun formatCrashRecord(record: DebugCrashRecord, locale: String): String {
+  return buildString {
+    appendLine("${localizedCrashTimeLabel(locale)}: ${formatCrashTimestamp(record.timestampMillis)}")
+    appendLine("${localizedCrashThreadLabel(locale)}: ${record.threadName.ifBlank { "-" }}")
+    appendLine("${localizedCrashExceptionLabel(locale)}: ${record.exceptionClass.ifBlank { "-" }}")
+    appendLine("${localizedCrashMessageLabel(locale)}: ${record.message.ifBlank { "-" }}")
+    appendLine(localizedCrashStackLabel(locale) + ":")
+    append(record.stackTrace.ifBlank { "-" })
+  }
+}
+
+private fun formatCrashTimestamp(timestampMillis: Long): String {
+  return appInfoCrashTimestampFormatter.format(Instant.ofEpochMilli(timestampMillis))
 }
 
 private fun toneForLogLevel(level: String): PanelTone {
@@ -1499,13 +1610,8 @@ private fun localizedSortTitle(locale: String, ascending: Boolean): String {
   }
 }
 
-private fun localizedNetworkSearchPlaceholder(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Search network..."
-    locale.startsWith("ja") -> "通信を検索..."
-    locale == "zh-TW" -> "搜尋網路請求..."
-    else -> "搜索网络请求..."
-  }
+private fun localizedAndroidSearchPlaceholder(): String {
+  return ANDROID_SEARCH_PLACEHOLDER
 }
 
 private fun localizedEmptyHint(locale: String): String {
@@ -2042,6 +2148,141 @@ private fun localizedCaptureDisabledLabel(locale: String): String {
     locale.startsWith("ja") -> "無効"
     locale == "zh-TW" -> "未啟用"
     else -> "未启用"
+  }
+}
+
+private fun localizedCrashRecordsTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Crash Records"
+    locale.startsWith("ja") -> "クラッシュ記録"
+    locale == "zh-TW" -> "崩潰記錄"
+    else -> "崩溃记录"
+  }
+}
+
+private fun localizedCrashRecordsSummaryText(locale: String, count: Int): String {
+  return when {
+    locale.startsWith("en") -> "Recent native uncaught crash records: $count"
+    locale.startsWith("ja") -> "最近のネイティブ未捕捉クラッシュ記録: $count"
+    locale == "zh-TW" -> "最近的原生未捕捉崩潰記錄：$count"
+    else -> "最近的原生未捕获崩溃记录：$count"
+  }
+}
+
+private fun localizedNoCrashRecordsText(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "No native crash records yet."
+    locale.startsWith("ja") -> "ネイティブクラッシュ記録はまだありません。"
+    locale == "zh-TW" -> "暫無原生崩潰記錄。"
+    else -> "暂无原生崩溃记录。"
+  }
+}
+
+private fun localizedCrashRecordTitle(locale: String, index: Int): String {
+  return when {
+    locale.startsWith("en") -> "Crash #$index"
+    locale.startsWith("ja") -> "クラッシュ #$index"
+    locale == "zh-TW" -> "崩潰 #$index"
+    else -> "崩溃 #$index"
+  }
+}
+
+private fun localizedCrashTimeLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Time"
+    locale.startsWith("ja") -> "時間"
+    locale == "zh-TW" -> "時間"
+    else -> "时间"
+  }
+}
+
+private fun localizedCrashThreadLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Thread"
+    locale.startsWith("ja") -> "スレッド"
+    locale == "zh-TW" -> "執行緒"
+    else -> "线程"
+  }
+}
+
+private fun localizedCrashExceptionLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Exception"
+    locale.startsWith("ja") -> "例外"
+    locale == "zh-TW" -> "異常"
+    else -> "异常"
+  }
+}
+
+private fun localizedCrashMessageLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Message"
+    locale.startsWith("ja") -> "訊息"
+    locale == "zh-TW" -> "訊息"
+    else -> "消息"
+  }
+}
+
+private fun localizedCrashStackLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Stack trace"
+    locale.startsWith("ja") -> "スタックトレース"
+    locale == "zh-TW" -> "堆疊追蹤"
+    else -> "堆栈追踪"
+  }
+}
+
+private fun localizedFatalErrorRecordsTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Fatal Error Records"
+    locale.startsWith("ja") -> "致命エラー記録"
+    locale == "zh-TW" -> "致命錯誤記錄"
+    else -> "致命错误记录"
+  }
+}
+
+private fun localizedFatalErrorRecordsSummaryText(locale: String, count: Int): String {
+  return when {
+    locale.startsWith("en") -> "Recent JS / runtime fatal error records: $count"
+    locale.startsWith("ja") -> "最近の JS / ランタイム致命エラー記録: $count"
+    locale == "zh-TW" -> "最近的 JS / 執行期致命錯誤記錄：$count"
+    else -> "最近的 JS / 运行时致命错误记录：$count"
+  }
+}
+
+private fun localizedNoFatalErrorRecordsText(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "No JS / runtime fatal error records yet."
+    locale.startsWith("ja") -> "JS / ランタイム致命エラー記録はまだありません。"
+    locale == "zh-TW" -> "暫無 JS / 執行期致命錯誤記錄。"
+    else -> "暂无 JS / 运行时致命错误记录。"
+  }
+}
+
+private fun localizedFatalErrorTitle(locale: String, index: Int): String {
+  return when {
+    locale.startsWith("en") -> "Fatal Error #$index"
+    locale.startsWith("ja") -> "致命エラー #$index"
+    locale == "zh-TW" -> "致命錯誤 #$index"
+    else -> "致命错误 #$index"
+  }
+}
+
+private fun localizedFatalErrorSourceLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Source"
+    locale.startsWith("ja") -> "來源"
+    locale == "zh-TW" -> "來源"
+    else -> "来源"
+  }
+}
+
+private fun localizedFatalErrorMessageLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Message"
+    locale.startsWith("ja") -> "訊息"
+    locale == "zh-TW" -> "訊息"
+    else -> "消息"
   }
 }
 

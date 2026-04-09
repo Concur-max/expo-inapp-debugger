@@ -273,7 +273,7 @@ export class NetworkCollector {
           url,
           origin: 'js',
           protocol: protocols?.join(', ') || '',
-          state: 'pending',
+          state: 'connecting',
           startedAt: timestamp,
           updatedAt: timestamp,
           messages: '',
@@ -288,7 +288,7 @@ export class NetworkCollector {
       const entry = this.requests.get(`ws_${socketId}`);
       if (!entry) return;
       const timestamp = now();
-      entry.state = 'success';
+      entry.state = 'open';
       entry.updatedAt = timestamp;
       this.emit(entry);
     });
@@ -314,14 +314,28 @@ export class NetworkCollector {
     this.webSocketInterceptor.setCloseCallback?.((code: number | null, reason: string | null, socketId: number) => {
       const entry = this.requests.get(`ws_${socketId}`);
       if (!entry) return;
-      const endedAt = now();
-      entry.state = entry.error ? 'error' : 'closed';
-      entry.closeReason = [code, reason].filter(Boolean).join(' ');
-      entry.endedAt = endedAt;
-      entry.durationMs = endedAt - entry.startedAt;
-      entry.updatedAt = endedAt;
+      const timestamp = now();
+      entry.state = entry.error ? 'error' : 'closing';
+      entry.requestedCloseCode = code ?? undefined;
+      entry.requestedCloseReason = reason ?? undefined;
+      entry.updatedAt = timestamp;
       this.emit(entry);
     });
+
+    this.webSocketInterceptor.setOnCloseCallback?.(
+      (payload: { code: number; reason?: string | null }, socketId: number) => {
+        const entry = this.requests.get(`ws_${socketId}`);
+        if (!entry) return;
+        const endedAt = now();
+        entry.state = entry.error ? 'error' : 'closed';
+        entry.closeCode = payload.code;
+        entry.closeReason = payload.reason ?? undefined;
+        entry.endedAt = endedAt;
+        entry.durationMs = endedAt - entry.startedAt;
+        entry.updatedAt = endedAt;
+        this.emit(entry);
+      }
+    );
 
     this.webSocketInterceptor.enableInterception?.();
   }

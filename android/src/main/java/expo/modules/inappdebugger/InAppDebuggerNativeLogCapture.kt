@@ -6,6 +6,8 @@ import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.Process as AndroidProcess
 import android.system.Os
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.Closeable
 import java.io.File
@@ -25,10 +27,12 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 private const val CRASH_REPORT_FILE = "expo-inapp-debugger-last-native-crash-android.log"
+private const val CRASH_HISTORY_FILE = "expo-inapp-debugger-native-crash-history-android.json"
 private const val STATUS_CONTEXT = "android-native-status"
 private const val LOGCAT_CONTEXT = "logcat"
 private const val STDOUT_FD = 1
 private const val STDERR_FD = 2
+private const val MAX_CRASH_HISTORY = 6
 
 object InAppDebuggerNativeLogCapture {
   private val lock = Any()
@@ -47,6 +51,7 @@ object InAppDebuggerNativeLogCapture {
   private var rootStatus = "not_requested"
   private var rootDetails: String? = null
   private var rootProbeInFlight = false
+  private var crashHistory = emptyList<DebugCrashRecord>()
 
   fun applyConfig(context: Context?, config: DebugConfig) {
     synchronized(lock) {
@@ -209,6 +214,7 @@ object InAppDebuggerNativeLogCapture {
       appContextRef = WeakReference(context.applicationContext)
     }
     val actualContext = appContextRef?.get() ?: return
+    crashHistory = loadCrashHistory(actualContext)
     if (crashReplayLoaded) {
       return
     }
@@ -279,7 +285,8 @@ object InAppDebuggerNativeLogCapture {
       activeLogcatMode = activeLogcatMode,
       rootStatus = rootStatus,
       rootDetails = rootDetails,
-      buffers = nativeConfig.buffers
+      buffers = nativeConfig.buffers,
+      crashRecords = crashHistory
     )
   }
 
@@ -364,7 +371,9 @@ object InAppDebuggerNativeLogCapture {
     originalUncaughtExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
     Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
       try {
-        persistCrashReport(context, thread, throwable)
+        val crashRecord = createCrashRecord(thread, throwable)
+        persistCrashReport(context, crashRecord)
+        appendCrashHistoryLocked(context, crashRecord)
         InAppDebuggerStore.appendNativeLog(
           createNativeDebugLogEntry(
             type = "error",
@@ -701,6 +710,17 @@ object InAppDebuggerNativeLogCapture {
     val exceptionClass = parts.getOrNull(2).orEmpty()
     val exceptionMessage = parts.getOrNull(3).orEmpty()
     val stackTrace = parts.getOrNull(4).orEmpty()
+    val crashRecord = createCrashRecord(
+      timestampMillis = timestampMillis,
+      threadName = threadName,
+      exceptionClass = exceptionClass,
+      message = exceptionMessage,
+      stackTrace = stackTrace
+    )
+
+    if (crashHistory.none { it.id == crashRecord.id }) {
+      appendCrashHistoryLocked(context, crashRecord)
+    }
 
     InAppDebuggerStore.appendNativeLog(
       createNativeDebugLogEntry(
@@ -728,23 +748,24 @@ object InAppDebuggerNativeLogCapture {
     )
   }
 
-  private fun persistCrashReport(context: Context, thread: Thread, throwable: Throwable) {
+  private fun persistCrashReport(context: Context, crashRecord: DebugCrashRecord) {
     val crashFile = crashReportFile(context)
     val payload = buildString {
-      append(System.currentTimeMillis())
+      append(crashRecord.timestampMillis)
       append("\n---\n")
-      append(thread.name)
+      append(crashRecord.threadName)
       append("\n---\n")
-      append(throwable.javaClass.name)
+      append(crashRecord.exceptionClass)
       append("\n---\n")
-      append(throwable.message.orEmpty())
+      append(crashRecord.message)
       append("\n---\n")
-      append(stackTraceString(throwable))
+      append(crashRecord.stackTrace)
     }
     crashFile.writeText(payload)
   }
 
   private fun crashReportFile(context: Context): File = File(context.cacheDir, CRASH_REPORT_FILE)
+  private fun crashHistoryFile(context: Context): File = File(context.cacheDir, CRASH_HISTORY_FILE)
 
   private fun appendStatusLocked(type: String, message: String, details: String) {
     InAppDebuggerStore.appendNativeLog(
@@ -882,6 +903,131 @@ object InAppDebuggerNativeLogCapture {
       throwable.printStackTrace(printWriter)
     }
     return writer.toString()
+  }
+
+  private fun createCrashRecord(thread: Thread, throwable: Throwable): DebugCrashRecord {
+    return createCrashRecord(
+      timestampMillis = System.currentTimeMillis(),
+      threadName = thread.name,
+      exceptionClass = throwable.javaClass.name,
+      message = throwable.message.orEmpty(),
+      stackTrace = stackTraceString(throwable)
+    )
+  }
+
+  private fun createCrashRecord(
+    timestampMillis: Long,
+    threadName: String,
+    exceptionClass: String,
+    message: String,
+    stackTrace: String
+  ): DebugCrashRecord {
+    val normalizedMessage = message.ifBlank {
+      exceptionClass.ifBlank { "Uncaught exception" }
+    }
+    return DebugCrashRecord(
+      id = buildCrashRecordId(timestampMillis, threadName, exceptionClass, normalizedMessage),
+      timestampMillis = timestampMillis,
+      threadName = threadName,
+      exceptionClass = exceptionClass,
+      message = normalizedMessage,
+      stackTrace = stackTrace
+    )
+  }
+
+  private fun buildCrashRecordId(
+    timestampMillis: Long,
+    threadName: String,
+    exceptionClass: String,
+    message: String
+  ): String {
+    val fingerprint = listOf(threadName, exceptionClass, message).joinToString("|").hashCode()
+    return "crash_${timestampMillis}_$fingerprint"
+  }
+
+  private fun appendCrashHistoryLocked(context: Context, crashRecord: DebugCrashRecord) {
+    synchronized(lock) {
+      crashHistory = buildList {
+        add(crashRecord)
+        crashHistory.forEach { existing ->
+          if (existing.id != crashRecord.id) {
+            add(existing)
+          }
+        }
+      }.take(MAX_CRASH_HISTORY)
+      persistCrashHistory(context, crashHistory)
+      publishRuntimeInfoLocked()
+    }
+  }
+
+  private fun loadCrashHistory(context: Context): List<DebugCrashRecord> {
+    val crashFile = crashHistoryFile(context)
+    if (!crashFile.exists()) {
+      return emptyList()
+    }
+
+    val raw = try {
+      crashFile.readText()
+    } catch (_: Throwable) {
+      return emptyList()
+    }
+
+    if (raw.isBlank()) {
+      return emptyList()
+    }
+
+    return try {
+      val array = JSONArray(raw)
+      buildList {
+        for (index in 0 until array.length()) {
+          val item = array.optJSONObject(index) ?: continue
+          parseCrashRecord(item)?.let(::add)
+        }
+      }.sortedByDescending(DebugCrashRecord::timestampMillis).take(MAX_CRASH_HISTORY)
+    } catch (_: Throwable) {
+      emptyList()
+    }
+  }
+
+  private fun persistCrashHistory(context: Context, history: List<DebugCrashRecord>) {
+    val payload = JSONArray().apply {
+      history.forEach { put(it.toJson()) }
+    }
+    crashHistoryFile(context).writeText(payload.toString())
+  }
+
+  private fun parseCrashRecord(json: JSONObject): DebugCrashRecord? {
+    val timestampMillis = json.optLong("timestampMillis", 0L)
+    if (timestampMillis <= 0L) {
+      return null
+    }
+
+    val threadName = json.optString("threadName", "")
+    val exceptionClass = json.optString("exceptionClass", "")
+    val message = json.optString("message", "")
+    val stackTrace = json.optString("stackTrace", "")
+    return DebugCrashRecord(
+      id = json.optString(
+        "id",
+        buildCrashRecordId(timestampMillis, threadName, exceptionClass, message)
+      ),
+      timestampMillis = timestampMillis,
+      threadName = threadName,
+      exceptionClass = exceptionClass,
+      message = message,
+      stackTrace = stackTrace
+    )
+  }
+
+  private fun DebugCrashRecord.toJson(): JSONObject {
+    return JSONObject().apply {
+      put("id", id)
+      put("timestampMillis", timestampMillis)
+      put("threadName", threadName)
+      put("exceptionClass", exceptionClass)
+      put("message", message)
+      put("stackTrace", stackTrace)
+    }
   }
 
   private fun closeQuietly(closeable: Closeable?) {

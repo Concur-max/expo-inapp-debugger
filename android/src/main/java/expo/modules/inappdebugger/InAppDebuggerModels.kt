@@ -108,7 +108,17 @@ data class DebugRuntimeInfo(
   val activeLogcatMode: String = "disabled",
   val rootStatus: String = "not_requested",
   val rootDetails: String? = null,
-  val buffers: List<String> = emptyList()
+  val buffers: List<String> = emptyList(),
+  val crashRecords: List<DebugCrashRecord> = emptyList()
+)
+
+data class DebugCrashRecord(
+  val id: String,
+  val timestampMillis: Long,
+  val threadName: String = "",
+  val exceptionClass: String = "",
+  val message: String = "",
+  val stackTrace: String = ""
 )
 
 data class DebugPanelState(
