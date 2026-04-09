@@ -1,4 +1,4 @@
-import type { DebugSnapshot } from './types';
+import type { AndroidNativeLogsConfig, DebugSnapshot } from './types';
 import { debugRuntime } from './internal/singleton';
 
 export const InAppDebugController = {
@@ -19,5 +19,8 @@ export const InAppDebugController = {
   },
   exportSnapshot(): Promise<DebugSnapshot> {
     return debugRuntime.exportSnapshot();
+  },
+  configureAndroidNativeLogs(options: Partial<AndroidNativeLogsConfig>) {
+    return debugRuntime.configureAndroidNativeLogs(options);
   },
 };

@@ -12,6 +12,7 @@ export function InAppDebugProvider({
   maxLogs,
   maxErrors,
   maxRequests,
+  androidNativeLogs,
   locale,
   strings,
 }: InAppDebugProviderProps) {
@@ -24,10 +25,21 @@ export function InAppDebugProvider({
         maxLogs,
         maxErrors,
         maxRequests,
+        androidNativeLogs,
         locale,
         strings,
       }),
-    [enabled, initialVisible, enableNetworkTab, maxLogs, maxErrors, maxRequests, locale, strings]
+    [
+      enabled,
+      initialVisible,
+      enableNetworkTab,
+      maxLogs,
+      maxErrors,
+      maxRequests,
+      androidNativeLogs,
+      locale,
+      strings,
+    ]
   );
 
   React.useEffect(() => {

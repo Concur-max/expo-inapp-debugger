@@ -6,17 +6,25 @@ import kotlinx.coroutines.flow.asStateFlow
 object InAppDebuggerStore {
   private var config = DebugConfig()
   private val logs = mutableListOf<DebugLogEntry>()
+  private val pendingNativeLogs = mutableListOf<DebugLogEntry>()
   private val errors = mutableListOf<DebugErrorEntry>()
   private val network = mutableListOf<DebugNetworkEntry>()
   private val networkIndexById = mutableMapOf<String, Int>()
+  private var runtimeInfo = DebugRuntimeInfo()
 
   private val _state = MutableStateFlow(DebugPanelState())
   val state = _state.asStateFlow()
 
   @Synchronized
   fun updateConfig(next: DebugConfig) {
+    val shouldFlushPendingNativeLogs = next.enabled && pendingNativeLogs.isNotEmpty()
     config = next
+    if (shouldFlushPendingNativeLogs) {
+      logs.addAll(pendingNativeLogs)
+      pendingNativeLogs.clear()
+    }
     trimLogs()
+    trimPendingNativeLogs()
     trimErrors()
     trimNetwork()
     emit()
@@ -37,7 +45,10 @@ object InAppDebuggerStore {
   @Synchronized
   fun clear(kind: String) {
     when (kind) {
-      "logs" -> logs.clear()
+      "logs" -> {
+        logs.clear()
+        pendingNativeLogs.clear()
+      }
       "errors" -> errors.clear()
       "network" -> {
         network.clear()
@@ -45,6 +56,7 @@ object InAppDebuggerStore {
       }
       else -> {
         logs.clear()
+        pendingNativeLogs.clear()
         errors.clear()
         network.clear()
         networkIndexById.clear()
@@ -71,6 +83,27 @@ object InAppDebuggerStore {
       return network[existingIndex]
     }
     return network.firstOrNull { it.id == id }
+  }
+
+  @Synchronized
+  fun appendNativeLog(entry: DebugLogEntry) {
+    appendNativeLogLocked(entry)
+    emit()
+  }
+
+  @Synchronized
+  fun appendNativeLogs(entries: List<DebugLogEntry>) {
+    if (entries.isEmpty()) {
+      return
+    }
+    entries.forEach(::appendNativeLogLocked)
+    emit()
+  }
+
+  @Synchronized
+  fun updateRuntimeInfo(next: DebugRuntimeInfo) {
+    runtimeInfo = next
+    emit()
   }
 
   private fun appendLog(entry: DebugLogEntry) {
@@ -100,6 +133,12 @@ object InAppDebuggerStore {
     }
   }
 
+  private fun trimPendingNativeLogs() {
+    while (pendingNativeLogs.size > config.maxLogs) {
+      pendingNativeLogs.removeAt(0)
+    }
+  }
+
   private fun trimErrors() {
     while (errors.size > config.maxErrors) {
       errors.removeAt(0)
@@ -121,7 +160,8 @@ object InAppDebuggerStore {
       config = config,
       logs = logs.toList(),
       errors = errors.toList(),
-      network = network.toList()
+      network = network.toList(),
+      runtimeInfo = runtimeInfo
     )
   }
 
@@ -192,6 +232,16 @@ object InAppDebuggerStore {
     networkIndexById.clear()
     network.forEachIndexed { index, entry ->
       networkIndexById[entry.id] = index
+    }
+  }
+
+  private fun appendNativeLogLocked(entry: DebugLogEntry) {
+    if (config.enabled) {
+      logs.add(entry)
+      trimLogs()
+    } else {
+      pendingNativeLogs.add(entry)
+      trimPendingNativeLogs()
     }
   }
 }

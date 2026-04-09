@@ -1,11 +1,14 @@
 import type { NativeConfig, NativeBatchEntry } from '../InAppDebugModule';
 import type {
+  AndroidLogcatBuffer,
+  AndroidNativeLogsConfig,
   DebugErrorEntry,
   DebugErrorSource,
   DebugLevel,
   DebugLogEntry,
   DebugNetworkEntry,
   InAppDebugStrings,
+  ResolvedAndroidNativeLogsConfig,
   ResolvedInAppDebugConfig,
 } from '../types';
 import { defaultStrings, resolveStrings } from './strings';
@@ -41,6 +44,14 @@ type RuntimeNativeModule = {
 
 const FLUSH_DELAY_MS = 64;
 const MAX_BUFFERED_BATCH_SIZE = 120;
+const DEFAULT_ANDROID_LOGCAT_BUFFERS: AndroidLogcatBuffer[] = ['main', 'system', 'crash'];
+const VALID_ANDROID_LOGCAT_BUFFERS = new Set<AndroidLogcatBuffer>([
+  'main',
+  'system',
+  'crash',
+  'events',
+  'radio',
+]);
 
 export type DebugRuntimeDependencies = {
   nativeModule: RuntimeNativeModule;
@@ -97,9 +108,66 @@ function toNativeConfig(config: ResolvedInAppDebugConfig): NativeConfig {
     maxLogs: config.maxLogs,
     maxErrors: config.maxErrors,
     maxRequests: config.maxRequests,
+    androidNativeLogs: config.androidNativeLogs,
     locale: config.locale,
     strings: config.strings,
   };
+}
+
+function resolveAndroidNativeLogsConfig(
+  input?: AndroidNativeLogsConfig
+): ResolvedAndroidNativeLogsConfig {
+  return {
+    enabled: input?.enabled ?? true,
+    captureLogcat: input?.captureLogcat ?? true,
+    captureStdoutStderr: input?.captureStdoutStderr ?? true,
+    captureUncaughtExceptions: input?.captureUncaughtExceptions ?? true,
+    logcatScope: input?.logcatScope === 'device' ? 'device' : 'app',
+    rootMode: input?.rootMode === 'auto' ? 'auto' : 'off',
+    buffers: sanitizeAndroidLogcatBuffers(input?.buffers),
+  };
+}
+
+function normalizeAndroidNativeLogsOverride(
+  input: Partial<AndroidNativeLogsConfig>
+): Partial<ResolvedAndroidNativeLogsConfig> {
+  const next: Partial<ResolvedAndroidNativeLogsConfig> = {};
+
+  if (typeof input.enabled === 'boolean') {
+    next.enabled = input.enabled;
+  }
+  if (typeof input.captureLogcat === 'boolean') {
+    next.captureLogcat = input.captureLogcat;
+  }
+  if (typeof input.captureStdoutStderr === 'boolean') {
+    next.captureStdoutStderr = input.captureStdoutStderr;
+  }
+  if (typeof input.captureUncaughtExceptions === 'boolean') {
+    next.captureUncaughtExceptions = input.captureUncaughtExceptions;
+  }
+  if (input.logcatScope != null) {
+    next.logcatScope = input.logcatScope === 'device' ? 'device' : 'app';
+  }
+  if (input.rootMode != null) {
+    next.rootMode = input.rootMode === 'auto' ? 'auto' : 'off';
+  }
+  if (input.buffers != null) {
+    next.buffers = sanitizeAndroidLogcatBuffers(input.buffers);
+  }
+
+  return next;
+}
+
+function sanitizeAndroidLogcatBuffers(
+  buffers: AndroidNativeLogsConfig['buffers']
+): AndroidLogcatBuffer[] {
+  const values = buffers?.filter((buffer): buffer is AndroidLogcatBuffer =>
+    VALID_ANDROID_LOGCAT_BUFFERS.has(buffer)
+  );
+  if (!values?.length) {
+    return [...DEFAULT_ANDROID_LOGCAT_BUFFERS];
+  }
+  return [...new Set(values)];
 }
 
 export function resolveProviderConfig(input: {
@@ -109,6 +177,7 @@ export function resolveProviderConfig(input: {
   maxLogs?: number;
   maxErrors?: number;
   maxRequests?: number;
+  androidNativeLogs?: AndroidNativeLogsConfig;
   locale?: 'auto' | 'en-US' | 'zh-CN' | 'zh-TW' | 'ja';
   strings?: Partial<InAppDebugStrings>;
 }): ResolvedInAppDebugConfig {
@@ -120,6 +189,7 @@ export function resolveProviderConfig(input: {
     maxLogs: input.maxLogs ?? 2000,
     maxErrors: input.maxErrors ?? 100,
     maxRequests: input.maxRequests ?? 100,
+    androidNativeLogs: resolveAndroidNativeLogsConfig(input.androidNativeLogs),
     locale: resolved.locale,
     strings: resolved.strings,
   };
@@ -142,9 +212,11 @@ export class DebugRuntime {
     maxLogs: 2000,
     maxErrors: 100,
     maxRequests: 100,
+    androidNativeLogs: resolveAndroidNativeLogsConfig(),
     locale: 'zh-CN',
     strings: defaultStrings,
   };
+  private androidNativeLogsOverride: Partial<ResolvedAndroidNativeLogsConfig> | null = null;
   private manualEnabledOverride: boolean | null = null;
   private queue: NativeBatchEntry[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -200,6 +272,14 @@ export class DebugRuntime {
 
   async disable() {
     this.manualEnabledOverride = false;
+    await this.applyConfig();
+  }
+
+  async configureAndroidNativeLogs(options: Partial<AndroidNativeLogsConfig>) {
+    this.androidNativeLogsOverride = {
+      ...(this.androidNativeLogsOverride ?? {}),
+      ...normalizeAndroidNativeLogsOverride(options),
+    };
     await this.applyConfig();
   }
 
@@ -260,9 +340,10 @@ export class DebugRuntime {
   }
 
   private async applyConfig() {
-    const resolvedEnabled = this.manualEnabledOverride ?? this.providerConfig.enabled;
+    const mergedConfig = this.getMergedConfig();
+    const resolvedEnabled = this.manualEnabledOverride ?? mergedConfig.enabled;
     const nextConfig = {
-      ...this.providerConfig,
+      ...mergedConfig,
       enabled: resolvedEnabled,
     };
 
@@ -416,5 +497,21 @@ export class DebugRuntime {
 
   private internalWarn(message: string, error?: unknown) {
     this.originalConsole.warn(`[expo-inapp-debugger] ${message}`, error ?? '');
+  }
+
+  private getMergedConfig(): ResolvedInAppDebugConfig {
+    const overrides = this.androidNativeLogsOverride;
+    if (!overrides) {
+      return this.providerConfig;
+    }
+
+    return {
+      ...this.providerConfig,
+      androidNativeLogs: {
+        ...this.providerConfig.androidNativeLogs,
+        ...overrides,
+        buffers: overrides.buffers ?? this.providerConfig.androidNativeLogs.buffers,
+      },
+    };
   }
 }

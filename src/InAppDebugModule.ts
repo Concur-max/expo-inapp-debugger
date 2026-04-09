@@ -1,5 +1,9 @@
 import { requireOptionalNativeModule } from 'expo-modules-core';
-import type { DebugSnapshot, InAppDebugStrings } from './types';
+import type {
+  DebugSnapshot,
+  InAppDebugStrings,
+  ResolvedAndroidNativeLogsConfig,
+} from './types';
 
 export type NativeBatchEntry =
   | {
@@ -22,6 +26,7 @@ export type NativeConfig = {
   maxLogs: number;
   maxErrors: number;
   maxRequests: number;
+  androidNativeLogs: ResolvedAndroidNativeLogsConfig;
   locale: string;
   strings: InAppDebugStrings;
 };

@@ -4,6 +4,10 @@ export { InAppDebugProvider } from './InAppDebugProvider';
 export { InAppDebugController } from './InAppDebugController';
 export { inAppDebug } from './inAppDebug';
 export type {
+  AndroidLogcatBuffer,
+  AndroidLogcatScope,
+  AndroidNativeLogsConfig,
+  AndroidRootLogMode,
   DebugErrorEntry,
   DebugErrorSource,
   DebugLevel,

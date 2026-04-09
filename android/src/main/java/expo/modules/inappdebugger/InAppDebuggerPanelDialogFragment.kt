@@ -26,10 +26,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -187,7 +187,8 @@ const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
 
 private enum class DebugTab {
   Logs,
-  Network
+  Network,
+  AppInfo
 }
 
 private enum class SortOrder {
@@ -374,13 +375,21 @@ private fun DebugPanel(onDismiss: () -> Unit) {
             selectedNetworkId = null
             activeTab = DebugTab.Logs
           },
-          text = { Text(strings["logsTab"] ?: "日志") }
+          text = { Text("log") }
         )
         Tab(
           selected = activeTab == DebugTab.Network,
           onClick = { activeTab = DebugTab.Network },
           enabled = state.config.enableNetworkTab,
-          text = { Text(strings["networkTab"] ?: "网络") }
+          text = { Text("network") }
+        )
+        Tab(
+          selected = activeTab == DebugTab.AppInfo,
+          onClick = {
+            InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
+            activeTab = DebugTab.AppInfo
+          },
+          text = { Text("app Info") }
         )
       }
 
@@ -391,7 +400,46 @@ private fun DebugPanel(onDismiss: () -> Unit) {
           locale = locale,
           onSelectNetwork = { selectedNetworkId = it }
         )
+        DebugTab.AppInfo -> AppInfoTab(state = state, locale = locale)
       }
+    }
+  }
+}
+
+@Composable
+private fun AppInfoTab(
+  state: DebugPanelState,
+  locale: String
+) {
+  LaunchedEffect(Unit) {
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
+  }
+
+  val sections = remember(state.runtimeInfo, state.config, locale) {
+    buildDebuggerInfoSections(
+      runtimeInfo = state.runtimeInfo,
+      config = state.config,
+      locale = locale
+    )
+  }
+
+  LazyColumn(
+    modifier = Modifier.fillMaxSize(),
+    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+    verticalArrangement = Arrangement.spacedBy(10.dp)
+  ) {
+    items(
+      items = sections,
+      key = { it.title }
+    ) { section ->
+      DetailSection(
+        title = section.title,
+        content = section.content,
+        monospace = section.monospace
+      )
+    }
+    item("app_info_footer") {
+      Spacer(modifier = Modifier.height(12.dp))
     }
   }
 }
@@ -657,7 +705,7 @@ private fun NetworkDetailScreen(
         ),
         navigationIcon = {
           IconButton(onClick = onBack) {
-            Icon(Icons.Outlined.ArrowBack, contentDescription = "Back")
+            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
           }
         },
         actions = {
@@ -1275,6 +1323,56 @@ private fun buildWebSocketSections(
   return items
 }
 
+private fun buildDebuggerInfoSections(
+  runtimeInfo: DebugRuntimeInfo,
+  config: DebugConfig,
+  locale: String
+): List<DetailItem> {
+  return listOf(
+    DetailItem(
+      title = localizedHostRuntimeTitle(locale),
+      content = buildString {
+        appendLine("${localizedHostAppNameLabel(locale)}: ${runtimeInfo.appName.ifBlank { "-" }}")
+        appendLine("${localizedPackageNameLabel(locale)}: ${runtimeInfo.packageName.ifBlank { "-" }}")
+        appendLine("${localizedVersionLabel(locale)}: ${formatVersionSummary(runtimeInfo)}")
+        appendLine("${localizedProcessLabel(locale)}: ${runtimeInfo.processName.ifBlank { "-" }}")
+        appendLine("PID / UID: ${runtimeInfo.pid} / ${runtimeInfo.uid}")
+        appendLine("${localizedDebuggableLabel(locale)}: ${localizedBooleanValue(runtimeInfo.debuggable, locale)}")
+        appendLine("${localizedSdkLabel(locale)}: Android ${runtimeInfo.release.ifBlank { "-" }} (SDK ${runtimeInfo.sdkInt})")
+        appendLine("${localizedTargetSdkLabel(locale)}: ${runtimeInfo.targetSdk.takeIf { it > 0 } ?: "-"}")
+        appendLine("${localizedMinSdkLabel(locale)}: ${runtimeInfo.minSdk.takeIf { it > 0 } ?: "-"}")
+        appendLine("${localizedDeviceLabel(locale)}: ${formatDeviceSummary(runtimeInfo)}")
+        append("${localizedAbiLabel(locale)}: ${runtimeInfo.supportedAbis.joinToString().ifBlank { "-" }}")
+      },
+      monospace = true
+    ),
+    DetailItem(
+      title = localizedDebuggerCapabilityTitle(locale),
+      content = buildCapabilitySummary(runtimeInfo, config, locale)
+    ),
+    DetailItem(
+      title = localizedCaptureStatusTitle(locale),
+      content = buildString {
+        appendLine("${localizedRootStatusLabel(locale)}: ${localizedRootStatus(runtimeInfo.rootStatus, locale)}")
+        runtimeInfo.rootDetails?.takeIf { it.isNotBlank() }?.let {
+          appendLine("${localizedRootDetailLabel(locale)}: $it")
+        }
+        appendLine("${localizedNativeLogsStatusLabel(locale)}: ${localizedBooleanValue(runtimeInfo.nativeLogsEnabled, locale)}")
+        appendLine("${localizedLogcatModeLabel(locale)}: ${localizedLogcatMode(runtimeInfo.activeLogcatMode, locale)}")
+        appendLine("${localizedRequestedScopeLabel(locale)}: ${localizedLogcatScope(runtimeInfo.requestedLogcatScope, locale)}")
+        appendLine("${localizedRequestedRootModeLabel(locale)}: ${localizedRootMode(runtimeInfo.requestedRootMode, locale)}")
+        appendLine("${localizedCaptureItemLabel(locale)}: ${buildCaptureItemsSummary(runtimeInfo, locale)}")
+        append("${localizedBuffersLabel(locale)}: ${runtimeInfo.buffers.joinToString().ifBlank { "-" }}")
+      },
+      monospace = true
+    ),
+    DetailItem(
+      title = localizedLimitationsTitle(locale),
+      content = buildLimitationsSummary(runtimeInfo, config, locale)
+    )
+  )
+}
+
 private fun toneForLogLevel(level: String): PanelTone {
   return when (level.lowercase(Locale.ROOT)) {
     "error" -> PanelTone(
@@ -1523,6 +1621,552 @@ private fun localizedCollapseLabel(locale: String): String {
     locale.startsWith("ja") -> "折りたたむ"
     locale == "zh-TW" -> "收起"
     else -> "收起"
+  }
+}
+
+private fun buildCapabilitySummary(
+  runtimeInfo: DebugRuntimeInfo,
+  config: DebugConfig,
+  locale: String
+): String {
+  val lines = mutableListOf<String>()
+  lines += localizedCapabilityJsLogs(locale)
+  lines += localizedCapabilityJsErrors(locale)
+  lines += if (runtimeInfo.nativeLogsEnabled) {
+    localizedCapabilityNativeLogs(runtimeInfo, locale)
+  } else {
+    localizedCapabilityNativeDisabled(locale)
+  }
+  lines += if (runtimeInfo.networkTabEnabled) {
+    localizedCapabilityNetworkEnabled(locale)
+  } else {
+    localizedCapabilityNetworkDisabled(locale)
+  }
+  if (config.androidNativeLogs.rootMode == "auto" && runtimeInfo.rootStatus == "root") {
+    lines += localizedCapabilityRootEnhanced(locale)
+  }
+  return lines.joinToString("\n") { "• $it" }
+}
+
+private fun buildLimitationsSummary(
+  runtimeInfo: DebugRuntimeInfo,
+  config: DebugConfig,
+  locale: String
+): String {
+  val lines = mutableListOf<String>()
+  lines += localizedLimitationStartupTiming(locale)
+  lines += localizedLimitationStdoutTiming(locale)
+
+  if (runtimeInfo.activeLogcatMode != "root-device") {
+    lines += localizedLimitationNonRootScope(locale)
+  }
+  if (config.androidNativeLogs.rootMode != "auto") {
+    lines += localizedLimitationRootNotEnabled(locale)
+  }
+  if (runtimeInfo.networkTabEnabled) {
+    lines += localizedLimitationAndroidNativeNetwork(locale)
+  } else {
+    lines += localizedLimitationNetworkTabDisabled(locale)
+  }
+
+  return lines.joinToString("\n") { "• $it" }
+}
+
+private fun formatVersionSummary(runtimeInfo: DebugRuntimeInfo): String {
+  val versionName = runtimeInfo.versionName.ifBlank { "-" }
+  val versionCode = runtimeInfo.versionCode?.toString() ?: "-"
+  return if (versionName == "-" && versionCode == "-") "-" else "$versionName ($versionCode)"
+}
+
+private fun formatDeviceSummary(runtimeInfo: DebugRuntimeInfo): String {
+  val summary = listOfNotNull(
+    runtimeInfo.deviceModel.takeIf { it.isNotBlank() },
+    runtimeInfo.brand.takeIf { it.isNotBlank() && !runtimeInfo.deviceModel.contains(it, ignoreCase = true) }
+  ).joinToString(" / ")
+  return summary.ifBlank { runtimeInfo.manufacturer.ifBlank { "-" } }
+}
+
+private fun buildCaptureItemsSummary(runtimeInfo: DebugRuntimeInfo, locale: String): String {
+  val items = mutableListOf<String>()
+  if (runtimeInfo.captureLogcat) {
+    items += localizedCaptureLogcatLabel(locale)
+  }
+  if (runtimeInfo.captureStdoutStderr) {
+    items += localizedCaptureStdoutLabel(locale)
+  }
+  if (runtimeInfo.captureUncaughtExceptions) {
+    items += localizedCaptureExceptionLabel(locale)
+  }
+  return items.joinToString().ifBlank { localizedCaptureDisabledLabel(locale) }
+}
+
+private fun localizedHostRuntimeTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Host Runtime"
+    locale.startsWith("ja") -> "ホストアプリ実行情報"
+    locale == "zh-TW" -> "宿主應用執行資訊"
+    else -> "宿主应用运行信息"
+  }
+}
+
+private fun localizedDebuggerCapabilityTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "What This Debugger Can Inspect"
+    locale.startsWith("ja") -> "このデバッガーで確認できる内容"
+    locale == "zh-TW" -> "目前調試器可查看的內容"
+    else -> "当前调试器可查看的内容"
+  }
+}
+
+private fun localizedCaptureStatusTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Current Capture Status"
+    locale.startsWith("ja") -> "現在の採集状態"
+    locale == "zh-TW" -> "目前採集狀態"
+    else -> "当前采集状态"
+  }
+}
+
+private fun localizedLimitationsTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Current Limitations"
+    locale.startsWith("ja") -> "現在の制限事項"
+    locale == "zh-TW" -> "目前限制"
+    else -> "当前限制"
+  }
+}
+
+private fun localizedCloseLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Close"
+    locale.startsWith("ja") -> "閉じる"
+    locale == "zh-TW" -> "關閉"
+    else -> "关闭"
+  }
+}
+
+private fun localizedHostAppNameLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "App name"
+    locale.startsWith("ja") -> "アプリ名"
+    locale == "zh-TW" -> "應用名稱"
+    else -> "应用名称"
+  }
+}
+
+private fun localizedPackageNameLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Package"
+    locale.startsWith("ja") -> "パッケージ名"
+    locale == "zh-TW" -> "套件名"
+    else -> "包名"
+  }
+}
+
+private fun localizedVersionLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Version"
+    locale.startsWith("ja") -> "バージョン"
+    locale == "zh-TW" -> "版本"
+    else -> "版本"
+  }
+}
+
+private fun localizedProcessLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Process"
+    locale.startsWith("ja") -> "プロセス"
+    locale == "zh-TW" -> "程序"
+    else -> "进程"
+  }
+}
+
+private fun localizedDebuggableLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Debuggable"
+    locale.startsWith("ja") -> "デバッグ可能"
+    locale == "zh-TW" -> "可調試"
+    else -> "可调试"
+  }
+}
+
+private fun localizedSdkLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "OS"
+    locale.startsWith("ja") -> "系統"
+    locale == "zh-TW" -> "系統"
+    else -> "系统"
+  }
+}
+
+private fun localizedTargetSdkLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Target SDK"
+    locale.startsWith("ja") -> "Target SDK"
+    locale == "zh-TW" -> "Target SDK"
+    else -> "Target SDK"
+  }
+}
+
+private fun localizedMinSdkLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Min SDK"
+    locale.startsWith("ja") -> "Min SDK"
+    locale == "zh-TW" -> "Min SDK"
+    else -> "Min SDK"
+  }
+}
+
+private fun localizedDeviceLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Device"
+    locale.startsWith("ja") -> "デバイス"
+    locale == "zh-TW" -> "裝置"
+    else -> "设备"
+  }
+}
+
+private fun localizedAbiLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "ABIs"
+    locale.startsWith("ja") -> "ABI"
+    locale == "zh-TW" -> "ABI"
+    else -> "ABI"
+  }
+}
+
+private fun localizedRootStatusLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Root status"
+    locale.startsWith("ja") -> "root 状態"
+    locale == "zh-TW" -> "root 狀態"
+    else -> "root 状态"
+  }
+}
+
+private fun localizedRootDetailLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Root detail"
+    locale.startsWith("ja") -> "root 詳細"
+    locale == "zh-TW" -> "root 詳情"
+    else -> "root 详情"
+  }
+}
+
+private fun localizedNativeLogsStatusLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native logs enabled"
+    locale.startsWith("ja") -> "ネイティブログ有効"
+    locale == "zh-TW" -> "原生日誌已啟用"
+    else -> "原生日志已启用"
+  }
+}
+
+private fun localizedLogcatModeLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Active logcat mode"
+    locale.startsWith("ja") -> "現在の logcat モード"
+    locale == "zh-TW" -> "目前 logcat 模式"
+    else -> "当前 logcat 模式"
+  }
+}
+
+private fun localizedRequestedScopeLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Requested scope"
+    locale.startsWith("ja") -> "要求された範囲"
+    locale == "zh-TW" -> "要求範圍"
+    else -> "请求范围"
+  }
+}
+
+private fun localizedRequestedRootModeLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Root mode"
+    locale.startsWith("ja") -> "root モード"
+    locale == "zh-TW" -> "root 模式"
+    else -> "root 模式"
+  }
+}
+
+private fun localizedCaptureItemLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Capture items"
+    locale.startsWith("ja") -> "採集項目"
+    locale == "zh-TW" -> "採集項目"
+    else -> "采集项目"
+  }
+}
+
+private fun localizedBuffersLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Buffers"
+    locale.startsWith("ja") -> "バッファ"
+    locale == "zh-TW" -> "緩衝區"
+    else -> "缓冲区"
+  }
+}
+
+private fun localizedBooleanValue(value: Boolean, locale: String): String {
+  return when {
+    locale.startsWith("en") -> if (value) "Yes" else "No"
+    locale.startsWith("ja") -> if (value) "はい" else "いいえ"
+    locale == "zh-TW" -> if (value) "是" else "否"
+    else -> if (value) "是" else "否"
+  }
+}
+
+private fun localizedRootStatus(status: String, locale: String): String {
+  return when (status) {
+    "root" -> when {
+      locale.startsWith("en") -> "Root verified"
+      locale.startsWith("ja") -> "root を確認済み"
+      locale == "zh-TW" -> "已驗證 root"
+      else -> "已验证 root"
+    }
+    "non_root" -> when {
+      locale.startsWith("en") -> "Non-root or root denied"
+      locale.startsWith("ja") -> "非 root または拒否"
+      locale == "zh-TW" -> "非 root 或已拒絕"
+      else -> "非 root 或已拒绝"
+    }
+    "checking" -> when {
+      locale.startsWith("en") -> "Checking..."
+      locale.startsWith("ja") -> "確認中..."
+      locale == "zh-TW" -> "檢查中..."
+      else -> "检测中..."
+    }
+    "unknown" -> when {
+      locale.startsWith("en") -> "Unknown"
+      locale.startsWith("ja") -> "不明"
+      locale == "zh-TW" -> "未知"
+      else -> "未知"
+    }
+    else -> when {
+      locale.startsWith("en") -> "Not probed yet"
+      locale.startsWith("ja") -> "まだ確認していません"
+      locale == "zh-TW" -> "尚未驗證"
+      else -> "尚未验证"
+    }
+  }
+}
+
+private fun localizedLogcatMode(mode: String, locale: String): String {
+  return when (mode) {
+    "app" -> when {
+      locale.startsWith("en") -> "App-only logcat"
+      locale.startsWith("ja") -> "アプリ限定 logcat"
+      locale == "zh-TW" -> "僅宿主應用 logcat"
+      else -> "仅宿主应用 logcat"
+    }
+    "app-fallback" -> when {
+      locale.startsWith("en") -> "App-only logcat (fallback)"
+      locale.startsWith("ja") -> "アプリ限定 logcat（回退）"
+      locale == "zh-TW" -> "僅宿主應用 logcat（回退）"
+      else -> "仅宿主应用 logcat（回退）"
+    }
+    "root-device" -> when {
+      locale.startsWith("en") -> "Device-wide logcat via root"
+      locale.startsWith("ja") -> "root 経由の端末全体 logcat"
+      locale == "zh-TW" -> "透過 root 的整機 logcat"
+      else -> "通过 root 的整机 logcat"
+    }
+    else -> when {
+      locale.startsWith("en") -> "Disabled"
+      locale.startsWith("ja") -> "無効"
+      locale == "zh-TW" -> "未啟用"
+      else -> "未启用"
+    }
+  }
+}
+
+private fun localizedLogcatScope(scope: String, locale: String): String {
+  return when (scope) {
+    "device" -> when {
+      locale.startsWith("en") -> "Device-wide"
+      locale.startsWith("ja") -> "端末全体"
+      locale == "zh-TW" -> "整機"
+      else -> "整机"
+    }
+    else -> when {
+      locale.startsWith("en") -> "Current app"
+      locale.startsWith("ja") -> "現在のアプリ"
+      locale == "zh-TW" -> "目前宿主應用"
+      else -> "当前宿主应用"
+    }
+  }
+}
+
+private fun localizedRootMode(mode: String, locale: String): String {
+  return when (mode) {
+    "auto" -> when {
+      locale.startsWith("en") -> "Auto root-enhanced"
+      locale.startsWith("ja") -> "自動 root 拡張"
+      locale == "zh-TW" -> "自動 root 增強"
+      else -> "自动 root 增强"
+    }
+    else -> when {
+      locale.startsWith("en") -> "Off"
+      locale.startsWith("ja") -> "オフ"
+      locale == "zh-TW" -> "關閉"
+      else -> "关闭"
+    }
+  }
+}
+
+private fun localizedCaptureLogcatLabel(locale: String): String {
+  return if (locale.startsWith("ja")) "logcat" else "logcat"
+}
+
+private fun localizedCaptureStdoutLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "stdout / stderr"
+    locale.startsWith("ja") -> "stdout / stderr"
+    locale == "zh-TW" -> "stdout / stderr"
+    else -> "stdout / stderr"
+  }
+}
+
+private fun localizedCaptureExceptionLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "uncaught exceptions"
+    locale.startsWith("ja") -> "未捕捉例外"
+    locale == "zh-TW" -> "未捕捉例外"
+    else -> "未捕获异常"
+  }
+}
+
+private fun localizedCaptureDisabledLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Disabled"
+    locale.startsWith("ja") -> "無効"
+    locale == "zh-TW" -> "未啟用"
+    else -> "未启用"
+  }
+}
+
+private fun localizedCapabilityJsLogs(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "JS console logs, React error boundaries, global errors, and unhandled promise rejections."
+    locale.startsWith("ja") -> "JS の console ログ、React エラーバウンダリ、グローバルエラー、未処理 Promise rejection。"
+    locale == "zh-TW" -> "JS console 日誌、React 錯誤邊界、全域錯誤與未處理 Promise rejection。"
+    else -> "JS console 日志、React 错误边界、全局错误与未处理 Promise rejection。"
+  }
+}
+
+private fun localizedCapabilityJsErrors(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Structured log filtering, search, sorting, copy, and snapshot export inside the panel."
+    locale.startsWith("ja") -> "面板內では構造化フィルタ、検索、並び替え、コピー、スナップショット出力ができます。"
+    locale == "zh-TW" -> "面板內支援結構化篩選、搜尋、排序、複製與快照匯出。"
+    else -> "面板内支持结构化筛选、搜索、排序、复制与快照导出。"
+  }
+}
+
+private fun localizedCapabilityNativeLogs(runtimeInfo: DebugRuntimeInfo, locale: String): String {
+  return when (runtimeInfo.activeLogcatMode) {
+    "root-device" -> when {
+      locale.startsWith("en") -> "Android native logs from stdout, stderr, uncaught exceptions, and device-wide logcat through root."
+      locale.startsWith("ja") -> "Android ネイティブログ: stdout、stderr、未捕捉例外、および root 経由の端末全体 logcat。"
+      locale == "zh-TW" -> "Android 原生日誌：stdout、stderr、未捕捉例外，以及透過 root 的整機 logcat。"
+      else -> "Android 原生日志：stdout、stderr、未捕获异常，以及通过 root 的整机 logcat。"
+    }
+    else -> when {
+      locale.startsWith("en") -> "Android native logs from the current app process: logcat, stdout, stderr, and uncaught exceptions."
+      locale.startsWith("ja") -> "Android ネイティブログ: 現在のアプリプロセスの logcat、stdout、stderr、未捕捉例外。"
+      locale == "zh-TW" -> "Android 原生日誌：目前宿主應用程序的 logcat、stdout、stderr、未捕捉例外。"
+      else -> "Android 原生日志：当前宿主应用进程的 logcat、stdout、stderr、未捕获异常。"
+    }
+  }
+}
+
+private fun localizedCapabilityNativeDisabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Android native log capture is currently disabled."
+    locale.startsWith("ja") -> "Android ネイティブログ採集は現在無効です。"
+    locale == "zh-TW" -> "Android 原生日誌採集目前未啟用。"
+    else -> "Android 原生日志采集当前未启用。"
+  }
+}
+
+private fun localizedCapabilityNetworkEnabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "JS network events for XMLHttpRequest and WebSocket in the network tab."
+    locale.startsWith("ja") -> "ネットワーク面板中的 XMLHttpRequest / WebSocket JS 通信イベント。"
+    locale == "zh-TW" -> "網路面板中的 XMLHttpRequest / WebSocket JS 通信事件。"
+    else -> "网络面板中的 XMLHttpRequest / WebSocket JS 通信事件。"
+  }
+}
+
+private fun localizedCapabilityNetworkDisabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "The network tab is disabled in the current configuration."
+    locale.startsWith("ja") -> "現在の設定では通信タブが無効です。"
+    locale == "zh-TW" -> "目前設定已關閉網路面板。"
+    else -> "当前配置已关闭网络面板。"
+  }
+}
+
+private fun localizedCapabilityRootEnhanced(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Root-enhanced device-wide logcat is available on this host."
+    locale.startsWith("ja") -> "この宿主環境では root 強化の端末全体 logcat が利用可能です。"
+    locale == "zh-TW" -> "此宿主環境可使用 root 增強的整機 logcat。"
+    else -> "此宿主环境可使用 root 增强的整机 logcat。"
+  }
+}
+
+private fun localizedLimitationStartupTiming(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Logs emitted before the debugger hooks started are not fully replayed, except for the persisted uncaught crash report."
+    locale.startsWith("ja") -> "デバッガーフック起動前のログは、保存済みの未捕捉クラッシュレポートを除き完全には再生されません。"
+    locale == "zh-TW" -> "除已持久化的未捕捉崩潰報告外，調試器掛鉤啟動前輸出的日誌不會被完整回放。"
+    else -> "除已持久化的未捕获崩溃报告外，调试器挂钩启动前输出的日志不会被完整回放。"
+  }
+}
+
+private fun localizedLimitationStdoutTiming(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "stdout and stderr are captured only after the current process installs the redirection hook."
+    locale.startsWith("ja") -> "stdout / stderr は、現在のプロセスにリダイレクトフックが入った後の内容のみ採集されます。"
+    locale == "zh-TW" -> "stdout / stderr 僅能採集目前進程安裝重定向掛鉤之後輸出的內容。"
+    else -> "stdout / stderr 只能采集当前进程安装重定向挂钩之后输出的内容。"
+  }
+}
+
+private fun localizedLimitationNonRootScope(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Without active root device-wide capture, this panel does not guarantee logs from other apps, system_server, kernel, or radio buffers."
+    locale.startsWith("ja") -> "root による端末全体採集が有効でない場合、他アプリ、system_server、kernel、radio のログは保証されません。"
+    locale == "zh-TW" -> "若未啟用 root 的整機採集，則無法保證看到其他應用、system_server、kernel 或 radio 緩衝區日誌。"
+    else -> "若未启用 root 的整机采集，则无法保证看到其他应用、system_server、kernel 或 radio 缓冲区日志。"
+  }
+}
+
+private fun localizedLimitationRootNotEnabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Root-enhanced capture is not enabled in the current configuration, even if the host may support root."
+    locale.startsWith("ja") -> "ホストが root 対応でも、現在の設定では root 強化採集は有効化されていません。"
+    locale == "zh-TW" -> "即使宿主裝置可能支援 root，目前設定也未啟用 root 增強採集。"
+    else -> "即使宿主设备可能支持 root，当前配置也未启用 root 增强采集。"
+  }
+}
+
+private fun localizedLimitationAndroidNativeNetwork(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Android native HTTP client / socket traffic is not yet captured. The current network tab focuses on JS-layer XHR and WebSocket events."
+    locale.startsWith("ja") -> "Android ネイティブの HTTP クライアント / socket 通信はまだ採集していません。現在のネットワークタブは JS 層の XHR / WebSocket に焦点を当てています。"
+    locale == "zh-TW" -> "Android 原生 HTTP 客戶端 / socket 通信目前尚未採集；現在的網路面板主要覆蓋 JS 層 XHR / WebSocket。"
+    else -> "Android 原生 HTTP 客户端 / socket 通信目前尚未采集；当前网络面板主要覆盖 JS 层 XHR / WebSocket。"
+  }
+}
+
+private fun localizedLimitationNetworkTabDisabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "The network tab is disabled, so no network events are collected for display."
+    locale.startsWith("ja") -> "通信タブが無効のため、表示用の通信イベントは採集されません。"
+    locale == "zh-TW" -> "網路面板已關閉，因此不會採集可供展示的網路事件。"
+    else -> "网络面板已关闭，因此不会采集可供展示的网络事件。"
   }
 }
 

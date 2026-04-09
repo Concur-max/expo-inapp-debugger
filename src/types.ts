@@ -19,6 +19,22 @@ export type DebugNetworkState =
 
 export type SupportedLocale = 'auto' | 'en-US' | 'zh-CN' | 'zh-TW' | 'ja';
 
+export type AndroidLogcatBuffer = 'main' | 'system' | 'crash' | 'events' | 'radio';
+
+export type AndroidLogcatScope = 'app' | 'device';
+
+export type AndroidRootLogMode = 'off' | 'auto';
+
+export type AndroidNativeLogsConfig = {
+  enabled?: boolean;
+  captureLogcat?: boolean;
+  captureStdoutStderr?: boolean;
+  captureUncaughtExceptions?: boolean;
+  logcatScope?: AndroidLogcatScope;
+  rootMode?: AndroidRootLogMode;
+  buffers?: AndroidLogcatBuffer[];
+};
+
 export type DebugLogEntry = {
   id: string;
   type: DebugLevel;
@@ -129,6 +145,7 @@ export type InAppDebugProviderProps = {
   maxLogs?: number;
   maxErrors?: number;
   maxRequests?: number;
+  androidNativeLogs?: AndroidNativeLogsConfig;
   locale?: SupportedLocale;
   strings?: Partial<InAppDebugStrings>;
   children: React.ReactNode;
@@ -152,6 +169,17 @@ export type ResolvedInAppDebugConfig = {
   maxLogs: number;
   maxErrors: number;
   maxRequests: number;
+  androidNativeLogs: ResolvedAndroidNativeLogsConfig;
   locale: Exclude<SupportedLocale, 'auto'>;
   strings: InAppDebugStrings;
+};
+
+export type ResolvedAndroidNativeLogsConfig = {
+  enabled: boolean;
+  captureLogcat: boolean;
+  captureStdoutStderr: boolean;
+  captureUncaughtExceptions: boolean;
+  logcatScope: AndroidLogcatScope;
+  rootMode: AndroidRootLogMode;
+  buffers: AndroidLogcatBuffer[];
 };

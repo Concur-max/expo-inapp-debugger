@@ -1,5 +1,20 @@
 package expo.modules.inappdebugger
 
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.UUID
+
+data class AndroidNativeLogsConfig(
+  val enabled: Boolean = true,
+  val captureLogcat: Boolean = true,
+  val captureStdoutStderr: Boolean = true,
+  val captureUncaughtExceptions: Boolean = true,
+  val logcatScope: String = "app",
+  val rootMode: String = "off",
+  val buffers: List<String> = listOf("main", "system", "crash")
+)
+
 data class DebugConfig(
   val enabled: Boolean = false,
   val initialVisible: Boolean = true,
@@ -7,6 +22,7 @@ data class DebugConfig(
   val maxLogs: Int = 2000,
   val maxErrors: Int = 100,
   val maxRequests: Int = 100,
+  val androidNativeLogs: AndroidNativeLogsConfig = AndroidNativeLogsConfig(),
   val locale: String = "zh-CN",
   val strings: Map<String, String> = emptyMap()
 )
@@ -65,12 +81,66 @@ data class DebugNetworkEntry(
   val messages: String? = null
 )
 
+data class DebugRuntimeInfo(
+  val appName: String = "",
+  val packageName: String = "",
+  val versionName: String = "",
+  val versionCode: Long? = null,
+  val processName: String = "",
+  val pid: Int = 0,
+  val uid: Int = 0,
+  val debuggable: Boolean = false,
+  val targetSdk: Int = 0,
+  val minSdk: Int = 0,
+  val manufacturer: String = "",
+  val brand: String = "",
+  val deviceModel: String = "",
+  val sdkInt: Int = 0,
+  val release: String = "",
+  val supportedAbis: List<String> = emptyList(),
+  val networkTabEnabled: Boolean = false,
+  val nativeLogsEnabled: Boolean = false,
+  val captureLogcat: Boolean = false,
+  val captureStdoutStderr: Boolean = false,
+  val captureUncaughtExceptions: Boolean = false,
+  val requestedLogcatScope: String = "app",
+  val requestedRootMode: String = "off",
+  val activeLogcatMode: String = "disabled",
+  val rootStatus: String = "not_requested",
+  val rootDetails: String? = null,
+  val buffers: List<String> = emptyList()
+)
+
 data class DebugPanelState(
   val config: DebugConfig = DebugConfig(),
   val logs: List<DebugLogEntry> = emptyList(),
   val errors: List<DebugErrorEntry> = emptyList(),
-  val network: List<DebugNetworkEntry> = emptyList()
+  val network: List<DebugNetworkEntry> = emptyList(),
+  val runtimeInfo: DebugRuntimeInfo = DebugRuntimeInfo()
 )
+
+private val nativeLogClockFormatter: DateTimeFormatter =
+  DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
+
+fun createNativeDebugLogEntry(
+  type: String,
+  message: String,
+  context: String? = null,
+  details: String? = null,
+  timestampMillis: Long = System.currentTimeMillis()
+): DebugLogEntry {
+  val instant = Instant.ofEpochMilli(timestampMillis)
+  return DebugLogEntry(
+    id = "native_${timestampMillis}_${UUID.randomUUID()}",
+    type = type,
+    origin = "native",
+    context = context,
+    details = details,
+    message = message,
+    timestamp = nativeLogClockFormatter.format(instant),
+    fullTimestamp = instant.toString()
+  )
+}
 
 fun DebugLogEntry.toMap(): Map<String, Any?> = mapOf(
   "id" to id,
