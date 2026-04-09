@@ -9,6 +9,7 @@ Native in-app debugging toolkit for Expo prebuild/dev build and bare React Nativ
 - Console, global error, promise rejection, React error boundary capture
 - Android native log capture for app `logcat`, `stdout`, `stderr`, and uncaught exceptions
 - JS networking capture for `XMLHttpRequest` and `WebSocket`
+- Android native HTTP and WebSocket handshake capture on instrumented `OkHttp` paths
 - Search, level filtering, sorting, copy, clear, and snapshot export
 
 ## Public API

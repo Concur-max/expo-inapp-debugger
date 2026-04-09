@@ -45,6 +45,7 @@ class InAppDebuggerModule : Module() {
       )
       InAppDebuggerOverlayManager.applyConfig(appContext, config)
       InAppDebuggerNativeLogCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
+      InAppDebuggerNativeNetworkCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
     }
 
     AsyncFunction("ingestBatch") { batch: List<Map<String, Any?>> ->
@@ -77,6 +78,10 @@ class InAppDebuggerModule : Module() {
 
     OnActivityEntersForeground {
       InAppDebuggerNativeLogCapture.updateContext(appContext.currentActivity?.applicationContext)
+      InAppDebuggerNativeNetworkCapture.applyConfig(
+        appContext.currentActivity?.applicationContext,
+        InAppDebuggerStore.currentConfig()
+      )
       InAppDebuggerOverlayManager.onActivityForeground(appContext)
     }
 
@@ -86,6 +91,7 @@ class InAppDebuggerModule : Module() {
 
     OnDestroy {
       InAppDebuggerNativeLogCapture.shutdown()
+      InAppDebuggerNativeNetworkCapture.shutdown()
       InAppDebuggerOverlayManager.hide(appContext)
     }
   }

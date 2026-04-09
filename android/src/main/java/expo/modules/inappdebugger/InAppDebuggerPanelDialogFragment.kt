@@ -60,6 +60,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -315,32 +316,45 @@ private object PanelPreferences {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DebugPanel(onDismiss: () -> Unit) {
-  val state by InAppDebuggerStore.state.collectAsStateWithLifecycle()
-  val locale = state.config.locale
-  val strings = state.config.strings
+  val chromeState by InAppDebuggerStore.chromeState.collectAsStateWithLifecycle()
+  val locale = chromeState.config.locale
+  val strings = chromeState.config.strings
   var activeTab by rememberSaveable { mutableStateOf(DebugTab.Logs) }
   var selectedNetworkId by rememberSaveable { mutableStateOf<String?>(null) }
 
-  LaunchedEffect(state.config.enableNetworkTab) {
-    if (!state.config.enableNetworkTab && activeTab == DebugTab.Network) {
+  DisposableEffect(Unit) {
+    InAppDebuggerStore.setPanelVisible(true)
+    onDispose {
+      InAppDebuggerStore.setActiveFeed(DebugPanelFeed.None)
+      InAppDebuggerStore.setPanelVisible(false)
+    }
+  }
+
+  LaunchedEffect(activeTab, selectedNetworkId) {
+    val activeFeed =
+      when {
+        selectedNetworkId != null -> DebugPanelFeed.Network
+        activeTab == DebugTab.Logs -> DebugPanelFeed.Logs
+        activeTab == DebugTab.Network -> DebugPanelFeed.Network
+        else -> DebugPanelFeed.AppInfo
+      }
+    InAppDebuggerStore.setActiveFeed(activeFeed)
+  }
+
+  LaunchedEffect(chromeState.config.enableNetworkTab) {
+    if (!chromeState.config.enableNetworkTab && activeTab == DebugTab.Network) {
       activeTab = DebugTab.Logs
     }
   }
 
-  val selectedEntry = state.network.firstOrNull { it.id == selectedNetworkId }
-  LaunchedEffect(selectedNetworkId, state.network) {
-    if (selectedNetworkId != null && selectedEntry == null) {
-      selectedNetworkId = null
-    }
-  }
-
-  if (selectedEntry != null) {
+  if (selectedNetworkId != null) {
     NetworkDetailScreen(
-      entry = selectedEntry,
+      entryId = selectedNetworkId.orEmpty(),
       strings = strings,
       locale = locale,
       onBack = { selectedNetworkId = null },
-      onClose = onDismiss
+      onClose = onDismiss,
+      onMissing = { selectedNetworkId = null }
     )
     return
   }
@@ -388,7 +402,7 @@ private fun DebugPanel(onDismiss: () -> Unit) {
         Tab(
           selected = activeTab == DebugTab.Network,
           onClick = { activeTab = DebugTab.Network },
-          enabled = state.config.enableNetworkTab,
+          enabled = chromeState.config.enableNetworkTab,
           text = { Text("network") }
         )
         Tab(
@@ -402,13 +416,17 @@ private fun DebugPanel(onDismiss: () -> Unit) {
       }
 
       when (activeTab) {
-        DebugTab.Logs -> LogsTab(state = state, locale = locale)
+        DebugTab.Logs -> LogsTab(config = chromeState.config, locale = locale)
         DebugTab.Network -> NetworkTab(
-          state = state,
+          config = chromeState.config,
           locale = locale,
           onSelectNetwork = { selectedNetworkId = it }
         )
-        DebugTab.AppInfo -> AppInfoTab(state = state, locale = locale)
+        DebugTab.AppInfo -> AppInfoTab(
+          config = chromeState.config,
+          runtimeInfo = chromeState.runtimeInfo,
+          locale = locale
+        )
       }
     }
   }
@@ -416,18 +434,21 @@ private fun DebugPanel(onDismiss: () -> Unit) {
 
 @Composable
 private fun AppInfoTab(
-  state: DebugPanelState,
+  config: DebugConfig,
+  runtimeInfo: DebugRuntimeInfo,
   locale: String
 ) {
+  val errorsWindowState by InAppDebuggerStore.errorsWindowState.collectAsStateWithLifecycle()
+
   LaunchedEffect(Unit) {
     InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
   }
 
-  val sections = remember(state.runtimeInfo, state.config, state.errors, locale) {
+  val sections = remember(runtimeInfo, config, errorsWindowState.version, locale) {
     buildDebuggerInfoSections(
-      runtimeInfo = state.runtimeInfo,
-      config = state.config,
-      appErrors = state.errors,
+      runtimeInfo = runtimeInfo,
+      config = config,
+      appErrors = errorsWindowState.items,
       locale = locale
     )
   }
@@ -455,11 +476,12 @@ private fun AppInfoTab(
 
 @Composable
 private fun LogsTab(
-  state: DebugPanelState,
+  config: DebugConfig,
   locale: String
 ) {
+  val logsWindowState by InAppDebuggerStore.logsWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
-  val strings = state.config.strings
+  val strings = config.strings
   var searchQuery by rememberSaveable { mutableStateOf("") }
   var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Desc) }
   var selectedLevels by remember { mutableStateOf(PanelPreferences.loadLogLevels(context)) }
@@ -468,9 +490,10 @@ private fun LogsTab(
     PanelPreferences.hasActiveLogFilters(selectedLevels, selectedOrigins)
   }
 
-  val visibleLogs = remember(state.logs, searchQuery, sortOrder, selectedLevels, selectedOrigins) {
+  val visibleLogs =
+    remember(logsWindowState.version, searchQuery, sortOrder, selectedLevels, selectedOrigins) {
     filterLogs(
-      source = state.logs,
+      source = logsWindowState.items,
       query = searchQuery,
       sortOrder = sortOrder,
       selectedLevels = selectedLevels,
@@ -565,12 +588,13 @@ private fun LogsTab(
 
 @Composable
 private fun NetworkTab(
-  state: DebugPanelState,
+  config: DebugConfig,
   locale: String,
   onSelectNetwork: (String) -> Unit
 ) {
+  val networkWindowState by InAppDebuggerStore.networkWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
-  val strings = state.config.strings
+  val strings = config.strings
   var searchQuery by rememberSaveable { mutableStateOf("") }
   var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Desc) }
   var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
@@ -579,9 +603,16 @@ private fun NetworkTab(
     PanelPreferences.hasActiveNetworkFilters(selectedOrigins, selectedKinds)
   }
 
-  val visibleEntries = remember(state.network, searchQuery, sortOrder, selectedOrigins, selectedKinds, locale) {
+  val visibleEntries = remember(
+    networkWindowState.version,
+    searchQuery,
+    sortOrder,
+    selectedOrigins,
+    selectedKinds,
+    locale
+  ) {
     filterNetwork(
-      source = state.network,
+      source = networkWindowState.items,
       query = searchQuery,
       sortOrder = sortOrder,
       selectedOrigins = selectedOrigins,
@@ -687,18 +718,31 @@ private fun NetworkTab(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NetworkDetailScreen(
-  entry: DebugNetworkEntry,
+  entryId: String,
   strings: Map<String, String>,
   locale: String,
   onBack: () -> Unit,
-  onClose: () -> Unit
+  onClose: () -> Unit,
+  onMissing: () -> Unit
 ) {
+  val networkWindowState by InAppDebuggerStore.networkWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
-  val sections = remember(entry, strings, locale) {
-    if (isWebSocketKind(entry.kind)) {
-      buildWebSocketSections(entry, strings, locale, context)
+  val entry = remember(entryId, networkWindowState.version) {
+    networkWindowState.items.firstOrNull { it.id == entryId } ?: InAppDebuggerStore.networkEntry(entryId)
+  }
+
+  LaunchedEffect(entryId, networkWindowState.version) {
+    if (entry == null) {
+      onMissing()
+    }
+  }
+
+  val resolvedEntry = entry ?: return
+  val sections = remember(resolvedEntry, strings, locale) {
+    if (isWebSocketKind(resolvedEntry.kind)) {
+      buildWebSocketSections(resolvedEntry, strings, locale, context)
     } else {
-      buildHttpSections(entry, strings, locale, context)
+      buildHttpSections(resolvedEntry, strings, locale, context)
     }
   }
 
@@ -1252,13 +1296,16 @@ private fun buildHttpSections(
       strings["responseBody"] ?: "响应体",
       entry.responseBody ?: (strings["noResponseBody"] ?: "无响应体"),
       monospace = true
-    ),
-    DetailItem(
-      strings["messages"] ?: "消息",
-      formattedMessagesText(entry.messages, strings["noMessages"] ?: "暂无消息"),
-      monospace = true
     )
   )
+
+  entry.events?.takeIf { it.isNotBlank() }?.let { events ->
+    items += DetailItem(
+      title = localizedNetworkEventsTitle(locale),
+      content = formattedMessagesText(events, localizedNoNetworkEvents(locale)),
+      monospace = true
+    )
+  }
 
   if (!entry.error.isNullOrBlank()) {
     items += DetailItem(strings["errorTitle"] ?: "错误", entry.error.orEmpty(), monospace = true)
@@ -2332,10 +2379,10 @@ private fun localizedCapabilityNativeDisabled(locale: String): String {
 
 private fun localizedCapabilityNetworkEnabled(locale: String): String {
   return when {
-    locale.startsWith("en") -> "JS network events for XMLHttpRequest and WebSocket in the network tab."
-    locale.startsWith("ja") -> "ネットワーク面板中的 XMLHttpRequest / WebSocket JS 通信イベント。"
-    locale == "zh-TW" -> "網路面板中的 XMLHttpRequest / WebSocket JS 通信事件。"
-    else -> "网络面板中的 XMLHttpRequest / WebSocket JS 通信事件。"
+    locale.startsWith("en") -> "JS XHR / WebSocket events plus Android native HTTP traffic and native WebSocket handshakes on instrumented OkHttp paths."
+    locale.startsWith("ja") -> "JS 層の XHR / WebSocket イベントに加え、計装済み OkHttp 経路の Android ネイティブ HTTP 通信とネイティブ WebSocket ハンドシェイク。"
+    locale == "zh-TW" -> "除 JS 層 XHR / WebSocket 事件外，也覆蓋已掛接 OkHttp 路徑上的 Android 原生 HTTP 通信與原生 WebSocket 握手。"
+    else -> "除 JS 层 XHR / WebSocket 事件外，也覆盖已挂接 OkHttp 路径上的 Android 原生 HTTP 通信与原生 WebSocket 握手。"
   }
 }
 
@@ -2395,10 +2442,28 @@ private fun localizedLimitationRootNotEnabled(locale: String): String {
 
 private fun localizedLimitationAndroidNativeNetwork(locale: String): String {
   return when {
-    locale.startsWith("en") -> "Android native HTTP client / socket traffic is not yet captured. The current network tab focuses on JS-layer XHR and WebSocket events."
-    locale.startsWith("ja") -> "Android ネイティブの HTTP クライアント / socket 通信はまだ採集していません。現在のネットワークタブは JS 層の XHR / WebSocket に焦点を当てています。"
-    locale == "zh-TW" -> "Android 原生 HTTP 客戶端 / socket 通信目前尚未採集；現在的網路面板主要覆蓋 JS 層 XHR / WebSocket。"
-    else -> "Android 原生 HTTP 客户端 / socket 通信目前尚未采集；当前网络面板主要覆盖 JS 层 XHR / WebSocket。"
+    locale.startsWith("en") -> "Android now captures native HTTP traffic on instrumented OkHttp paths. Traffic outside OkHttp, plus full native WebSocket frame lifecycle, is still not automatically covered."
+    locale.startsWith("ja") -> "Android は計装済み OkHttp 経路のネイティブ HTTP 通信を採集できるようになりました。OkHttp 外の通信と、ネイティブ WebSocket フレームの完全なライフサイクルはまだ自動採集できません。"
+    locale == "zh-TW" -> "Android 現已可採集已掛接 OkHttp 路徑上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命週期，仍未自動覆蓋。"
+    else -> "Android 现已可采集已挂接 OkHttp 路径上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命周期，仍未自动覆盖。"
+  }
+}
+
+private fun localizedNetworkEventsTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Events"
+    locale.startsWith("ja") -> "イベント"
+    locale == "zh-TW" -> "事件"
+    else -> "事件"
+  }
+}
+
+private fun localizedNoNetworkEvents(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "No event timeline"
+    locale.startsWith("ja") -> "イベントタイムラインはありません"
+    locale == "zh-TW" -> "暫無事件時間線"
+    else -> "暂无事件时间线"
   }
 }
 

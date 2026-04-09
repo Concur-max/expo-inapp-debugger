@@ -121,12 +121,22 @@ data class DebugCrashRecord(
   val stackTrace: String = ""
 )
 
-data class DebugPanelState(
+enum class DebugPanelFeed {
+  None,
+  Logs,
+  Network,
+  AppInfo
+}
+
+data class DebugPanelChromeState(
   val config: DebugConfig = DebugConfig(),
-  val logs: List<DebugLogEntry> = emptyList(),
-  val errors: List<DebugErrorEntry> = emptyList(),
-  val network: List<DebugNetworkEntry> = emptyList(),
   val runtimeInfo: DebugRuntimeInfo = DebugRuntimeInfo()
+)
+
+data class DebugListWindowState<T>(
+  val version: Long = 0,
+  val totalSize: Int = 0,
+  val items: List<T> = emptyList()
 )
 
 private val nativeLogClockFormatter: DateTimeFormatter =
