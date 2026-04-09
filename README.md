@@ -2,6 +2,23 @@
 
 Native in-app debugging toolkit for Expo prebuild/dev build and bare React Native apps.
 
+## Install
+
+```bash
+pnpm add expo-inapp-debugger
+```
+
+This package ships native iOS and Android code, so after installing you still need to rebuild the native app:
+
+```bash
+npx expo prebuild
+npx expo run:android
+# or
+npx expo run:ios
+```
+
+Expo Go is not supported.
+
 ## Features
 
 - Native floating entry button on Android and iOS

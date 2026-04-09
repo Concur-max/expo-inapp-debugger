@@ -1,0 +1,7 @@
+android/build/
+ios/build/
+example/
+__tests__/
+HANDOFF.md
+*.tgz
+.DS_Store

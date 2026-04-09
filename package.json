@@ -4,14 +4,24 @@
   "description": "Native in-app debugger for Expo and React Native projects.",
   "license": "MIT",
   "author": "xingyuyang",
-  "homepage": "https://localhost/expo-inapp-debugger",
+  "homepage": "https://github.com/Concur-max/expo-inapp-debugger#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Concur-max/expo-inapp-debugger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Concur-max/expo-inapp-debugger/issues"
+  },
   "main": "src/index.ts",
   "types": "src/index.ts",
   "source": "src/index.ts",
   "react-native": "src/index.ts",
   "files": [
-    "android",
-    "ios",
+    "android/build.gradle",
+    "android/consumer-rules.pro",
+    "android/src",
+    "ios/*.podspec",
+    "ios/*.swift",
     "src",
     "expo-module.config.json",
     "README.md"

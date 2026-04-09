@@ -12,10 +12,10 @@ Pod::Spec.new do |s|
   s.description = 'Provides a native floating debugger entry and panel for Expo prebuild and bare React Native apps.'
   s.license = package['license'] || 'MIT'
   s.author = package['author'] || 'xingyuyang'
-  s.homepage = package['homepage'] || 'https://localhost/expo-inapp-debugger'
+  s.homepage = package['homepage'] || 'https://github.com/Concur-max/expo-inapp-debugger'
   s.platform = :ios, '15.5'
   s.swift_version = '5.9'
-  s.source = { git: 'https://localhost/expo-inapp-debugger' }
+  s.source = { git: 'https://github.com/Concur-max/expo-inapp-debugger.git', tag: s.version.to_s }
   s.static_framework = true
 
   s.compiler_flags = new_arch_compiler_flags if new_arch_enabled
