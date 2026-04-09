@@ -53,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -68,6 +69,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -90,6 +92,9 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -446,6 +451,12 @@ private fun AppInfoTab(
   locale: String
 ) {
   val errorsWindowState by InAppDebuggerStore.errorsWindowState.collectAsStateWithLifecycle()
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  var rootTogglePending by remember { mutableStateOf(false) }
+  val rootEnhancedEnabled = remember(config.androidNativeLogs.logcatScope, config.androidNativeLogs.rootMode) {
+    isRootEnhancedRequested(config)
+  }
 
   LaunchedEffect(Unit) {
     InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
@@ -465,6 +476,27 @@ private fun AppInfoTab(
     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp)
   ) {
+    item("app_info_root_control") {
+      RootEnhancedControlCard(
+        checked = rootEnhancedEnabled,
+        enabled = runtimeInfo.rootStatus != "checking" && !rootTogglePending,
+        pending = rootTogglePending,
+        runtimeInfo = runtimeInfo,
+        locale = locale,
+        onCheckedChange = { enabled ->
+          rootTogglePending = true
+          scope.launch {
+            try {
+              withContext(Dispatchers.Default) {
+                applyPanelRootEnhancedMode(context.applicationContext, enabled)
+              }
+            } finally {
+              rootTogglePending = false
+            }
+          }
+        }
+      )
+    }
     items(
       items = sections,
       key = { it.title }
@@ -477,6 +509,71 @@ private fun AppInfoTab(
     }
     item("app_info_footer") {
       Spacer(modifier = Modifier.height(12.dp))
+    }
+  }
+}
+
+@Composable
+private fun RootEnhancedControlCard(
+  checked: Boolean,
+  enabled: Boolean,
+  pending: Boolean,
+  runtimeInfo: DebugRuntimeInfo,
+  locale: String,
+  onCheckedChange: (Boolean) -> Unit
+) {
+  val tone = toneForRootEnhancedControl(runtimeInfo, checked, pending)
+
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, PanelColors.Border),
+    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+  ) {
+    Column(modifier = Modifier.padding(12.dp)) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+            text = localizedRootEnhancedControlTitle(locale),
+            style = MaterialTheme.typography.titleSmall,
+            color = PanelColors.Text
+          )
+          Spacer(modifier = Modifier.height(6.dp))
+          Text(
+            text = localizedRootEnhancedControlSummary(runtimeInfo, checked, pending, locale),
+            style = MaterialTheme.typography.bodyMedium,
+            color = PanelColors.MutedText
+          )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(
+          checked = checked,
+          enabled = enabled,
+          onCheckedChange = onCheckedChange
+        )
+      }
+
+      Spacer(modifier = Modifier.height(10.dp))
+      PanelChip(
+        text = localizedRootEnhancedControlStatus(runtimeInfo, checked, pending, locale),
+        background = tone.background,
+        foreground = tone.foreground
+      )
+
+      runtimeInfo.rootDetails?.takeIf { it.isNotBlank() }?.let { details ->
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+          text = details,
+          color = PanelColors.MutedText,
+          style = MaterialTheme.typography.bodySmall,
+          fontFamily = FontFamily.Monospace,
+          modifier = Modifier.fillMaxWidth()
+        )
+      }
     }
   }
 }
@@ -1186,6 +1283,30 @@ private fun DetailSection(
   }
 }
 
+private fun applyPanelRootEnhancedMode(context: Context?, enabled: Boolean) {
+  val currentConfig = InAppDebuggerStore.currentConfig()
+  val nextAndroidNativeLogs = currentConfig.androidNativeLogs.copy(
+    logcatScope = if (enabled) "device" else "app",
+    rootMode = if (enabled) "auto" else "off"
+  )
+
+  if (nextAndroidNativeLogs == currentConfig.androidNativeLogs) {
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = enabled)
+    return
+  }
+
+  val nextConfig = currentConfig.copy(androidNativeLogs = nextAndroidNativeLogs)
+  InAppDebuggerStore.updateConfig(nextConfig)
+  InAppDebuggerNativeLogCapture.applyConfig(context?.applicationContext, nextConfig)
+  InAppDebuggerNativeNetworkCapture.applyConfig(context?.applicationContext, nextConfig)
+  InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = enabled)
+}
+
+private fun isRootEnhancedRequested(config: DebugConfig): Boolean {
+  return config.androidNativeLogs.logcatScope == "device" &&
+    config.androidNativeLogs.rootMode == "auto"
+}
+
 @Composable
 private fun EmptyState(
   title: String,
@@ -1619,6 +1740,27 @@ private fun toneForNetwork(entry: DebugNetworkEntry): PanelTone {
   }
 }
 
+private fun toneForRootEnhancedControl(
+  runtimeInfo: DebugRuntimeInfo,
+  checked: Boolean,
+  pending: Boolean
+): PanelTone {
+  return when {
+    pending || runtimeInfo.rootStatus == "checking" -> toneForLogLevel("warn")
+    checked && runtimeInfo.activeLogcatMode == "root-device" -> PanelTone(
+      foreground = Color(0xFF067647),
+      background = Color(0xFFE8F7EE)
+    )
+    checked && runtimeInfo.rootStatus == "non_root" -> toneForLogLevel("error")
+    checked -> toneForLogLevel("info")
+    runtimeInfo.rootStatus == "root" -> PanelTone(
+      foreground = Color(0xFF067647),
+      background = Color(0xFFE8F7EE)
+    )
+    else -> toneForLogLevel("debug")
+  }
+}
+
 private fun normalizedNetworkKind(rawKind: String): NetworkKindFilter {
   return when (rawKind.trim().lowercase(Locale.ROOT)) {
     "", "http", "https", "xhr", "xmlhttprequest", "fetch" -> NetworkKindFilter.Http
@@ -1927,6 +2069,113 @@ private fun localizedDebuggerCapabilityTitle(locale: String): String {
     locale.startsWith("ja") -> "このデバッガーで確認できる内容"
     locale == "zh-TW" -> "目前調試器可查看的內容"
     else -> "当前调试器可查看的内容"
+  }
+}
+
+private fun localizedRootEnhancedControlTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Root-Enhanced Device Logcat"
+    locale.startsWith("ja") -> "root 強化の端末全体 logcat"
+    locale == "zh-TW" -> "root 增強整機 logcat"
+    else -> "root 增强整机 logcat"
+  }
+}
+
+private fun localizedRootEnhancedControlStatus(
+  runtimeInfo: DebugRuntimeInfo,
+  checked: Boolean,
+  pending: Boolean,
+  locale: String
+): String {
+  return when {
+    pending -> when {
+      locale.startsWith("en") -> "Applying..."
+      locale.startsWith("ja") -> "適用中..."
+      locale == "zh-TW" -> "套用中..."
+      else -> "应用中..."
+    }
+    checked && runtimeInfo.activeLogcatMode == "root-device" -> when {
+      locale.startsWith("en") -> "Root device-wide capture active"
+      locale.startsWith("ja") -> "root による端末全体採集が有効"
+      locale == "zh-TW" -> "root 整機採集已啟用"
+      else -> "root 整机采集已启用"
+    }
+    checked && runtimeInfo.rootStatus == "checking" -> when {
+      locale.startsWith("en") -> "Checking root availability"
+      locale.startsWith("ja") -> "root 利用可否を確認中"
+      locale == "zh-TW" -> "檢查 root 可用性中"
+      else -> "正在检查 root 可用性"
+    }
+    checked && runtimeInfo.rootStatus == "non_root" -> when {
+      locale.startsWith("en") -> "Requested, but root is unavailable"
+      locale.startsWith("ja") -> "要求済みですが root は利用不可"
+      locale == "zh-TW" -> "已請求，但 root 不可用"
+      else -> "已请求，但 root 不可用"
+    }
+    checked -> when {
+      locale.startsWith("en") -> "Requested"
+      locale.startsWith("ja") -> "要求済み"
+      locale == "zh-TW" -> "已請求"
+      else -> "已请求"
+    }
+    runtimeInfo.rootStatus == "root" -> when {
+      locale.startsWith("en") -> "Root available"
+      locale.startsWith("ja") -> "root 利用可能"
+      locale == "zh-TW" -> "root 可用"
+      else -> "root 可用"
+    }
+    else -> when {
+      locale.startsWith("en") -> "App-only capture"
+      locale.startsWith("ja") -> "アプリ限定採集"
+      locale == "zh-TW" -> "僅應用採集"
+      else -> "仅应用采集"
+    }
+  }
+}
+
+private fun localizedRootEnhancedControlSummary(
+  runtimeInfo: DebugRuntimeInfo,
+  checked: Boolean,
+  pending: Boolean,
+  locale: String
+): String {
+  return when {
+    pending -> when {
+      locale.startsWith("en") -> "Updating the collector now. The panel will refresh after the native logcat readers restart."
+      locale.startsWith("ja") -> "現在コレクターを更新しています。ネイティブ logcat リーダー再起動後に面板が更新されます。"
+      locale == "zh-TW" -> "正在更新採集器，原生 logcat 讀取器重啟後面板會自動刷新。"
+      else -> "正在更新采集器，原生 logcat 读取器重启后面板会自动刷新。"
+    }
+    checked && runtimeInfo.activeLogcatMode == "root-device" -> when {
+      locale.startsWith("en") -> "The debugger is reading device-wide Android logcat through root, including logs outside the current app process."
+      locale.startsWith("ja") -> "デバッガーは root 経由で端末全体の Android logcat を読み取っており、現在のアプリプロセス外のログも含まれます。"
+      locale == "zh-TW" -> "調試器目前正透過 root 讀取整機 Android logcat，包含目前應用進程之外的日誌。"
+      else -> "调试器当前正通过 root 读取整机 Android logcat，包含当前应用进程之外的日志。"
+    }
+    checked && runtimeInfo.rootStatus == "non_root" -> when {
+      locale.startsWith("en") -> "Root-enhanced mode is requested, but root was unavailable or denied. Capture falls back to the current app until root is granted."
+      locale.startsWith("ja") -> "root 強化モードは要求されていますが、root が利用できないか拒否されました。root が許可されるまでは現在のアプリ採集に回退します。"
+      locale == "zh-TW" -> "已請求 root 增強模式，但 root 不可用或已被拒絕；在授權前會回退為目前應用採集。"
+      else -> "已请求 root 增强模式，但 root 不可用或已被拒绝；在授权前会回退为当前应用采集。"
+    }
+    checked -> when {
+      locale.startsWith("en") -> "This requests device-wide Android logcat through root. If root is unavailable, the collector falls back to app-only capture."
+      locale.startsWith("ja") -> "これは root 経由の端末全体 Android logcat を要求します。root が利用できない場合はアプリ限定採集に回退します。"
+      locale == "zh-TW" -> "這會要求透過 root 讀取整機 Android logcat；若 root 不可用，則會回退到僅當前應用採集。"
+      else -> "这会要求通过 root 读取整机 Android logcat；若 root 不可用，则会回退到仅当前应用采集。"
+    }
+    runtimeInfo.rootStatus == "root" -> when {
+      locale.startsWith("en") -> "Root is available on this device. Turn this on to upgrade Android logcat capture from app-only to device-wide."
+      locale.startsWith("ja") -> "この端末では root が利用可能です。オンにすると Android logcat 採集をアプリ限定から端末全体へ拡張できます。"
+      locale == "zh-TW" -> "此裝置可使用 root；打開後可將 Android logcat 採集從僅當前應用提升為整機範圍。"
+      else -> "此设备可使用 root；打开后可将 Android logcat 采集从仅当前应用提升为整机范围。"
+    }
+    else -> when {
+      locale.startsWith("en") -> "Keep this off to stay on current-app logcat only. Turn it on later if root becomes available."
+      locale.startsWith("ja") -> "オフのままだと現在のアプリの logcat のみを採集します。root が使えるようになったら後でオンにできます。"
+      locale == "zh-TW" -> "保持關閉時只採集目前應用的 logcat；若之後可用 root，再打開即可。"
+      else -> "保持关闭时只采集当前应用的 logcat；如果之后可用 root，再打开即可。"
+    }
   }
 }
 

@@ -82,6 +82,8 @@ InAppDebugController.configureAndroidNativeLogs({
 });
 ```
 
+On Android, the panel `app Info` tab also exposes a runtime switch for this root-enhanced mode so you can turn it on directly from the device UI after root is available.
+
 `rootMode: 'auto'` is an explicit opt-in. If root is unavailable or denied, the Android collector falls back to app-only `logcat`.
 
 ## Example
