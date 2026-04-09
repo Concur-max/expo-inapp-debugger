@@ -3,9 +3,12 @@ package expo.modules.inappdebugger
 import android.app.Activity
 import android.os.Looper
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.fragment.app.FragmentManager
 import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.commit
 import expo.modules.kotlin.AppContext
 import java.lang.ref.WeakReference
 
@@ -111,7 +114,7 @@ object InAppDebuggerOverlayManager {
           "floatingButton tapped stateSaved=${activity.supportFragmentManager.isStateSaved}"
         )
         if (!activity.supportFragmentManager.isStateSaved) {
-          InAppDebuggerPanelDialogFragment().show(activity.supportFragmentManager, PANEL_TAG)
+          showPanel(activity)
         }
       }
 
@@ -154,9 +157,59 @@ object InAppDebuggerOverlayManager {
     }
     currentActivityRef?.get()?.runOnUiThread(action)
   }
+
+  private fun showPanel(activity: FragmentActivity) {
+    val fragmentManager = activity.supportFragmentManager
+    if (fragmentManager.findFragmentByTag(PANEL_TAG) != null) {
+      return
+    }
+
+    val panelContainer = ensurePanelContainer(activity) ?: return
+    fragmentManager.commit {
+      setReorderingAllowed(true)
+      setCustomAnimations(
+        R.anim.expo_in_app_debugger_panel_enter,
+        R.anim.expo_in_app_debugger_panel_exit,
+        R.anim.expo_in_app_debugger_panel_enter,
+        R.anim.expo_in_app_debugger_panel_exit
+      )
+      add(panelContainer.id, InAppDebuggerPanelDialogFragment(), PANEL_TAG)
+      addToBackStack(PANEL_BACK_STACK_NAME)
+    }
+  }
+
+  private fun ensurePanelContainer(activity: FragmentActivity): ViewGroup? {
+    val decorView = activity.window.decorView as? ViewGroup ?: return null
+    decorView.findViewById<ViewGroup>(R.id.expo_in_app_debugger_panel_container)?.let { existing ->
+      existing.bringToFront()
+      return existing
+    }
+
+    return FrameLayout(activity).apply {
+      id = R.id.expo_in_app_debugger_panel_container
+      layoutParams = ViewGroup.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+      )
+      clipChildren = false
+      clipToPadding = false
+      fitsSystemWindows = false
+      importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+      decorView.addView(this)
+    }
+  }
 }
 
 private fun FragmentManager.dismissPanel() {
   (findFragmentByTag("expo.modules.inappdebugger.panel") as? InAppDebuggerPanelDialogFragment)
-    ?.dismissAllowingStateLoss()
+    ?.let { panel ->
+      if (isStateSaved) {
+        commit(allowStateLoss = true) {
+          setReorderingAllowed(true)
+          remove(panel)
+        }
+      } else {
+        popBackStack(PANEL_BACK_STACK_NAME, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+      }
+    }
 }

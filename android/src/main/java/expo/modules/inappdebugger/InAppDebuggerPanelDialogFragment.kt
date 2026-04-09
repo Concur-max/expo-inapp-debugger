@@ -4,13 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
-import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.text.format.Formatter
 import android.view.View
 import android.view.ViewGroup
-import android.widget.FrameLayout
-import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -80,17 +77,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.google.android.material.bottomsheet.BottomSheetDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import java.util.Locale
 
-class InAppDebuggerPanelDialogFragment : BottomSheetDialogFragment() {
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    setStyle(STYLE_NORMAL, com.google.android.material.R.style.Theme_Design_Light_BottomSheetDialog)
-  }
+class InAppDebuggerPanelDialogFragment : Fragment() {
+  private var previousLightStatusBars: Boolean? = null
+  private var previousLightNavigationBars: Boolean? = null
 
   override fun onCreateView(
     inflater: android.view.LayoutInflater,
@@ -109,76 +103,87 @@ class InAppDebuggerPanelDialogFragment : BottomSheetDialogFragment() {
           )
         ) {
           Surface(modifier = Modifier.fillMaxSize(), color = PanelColors.Background) {
-            DebugPanel(onDismiss = { dismissAllowingStateLoss() })
+            DebugPanel(onDismiss = ::closePanel)
           }
         }
       }
     }
   }
 
-  override fun onCreateDialog(savedInstanceState: Bundle?): android.app.Dialog {
-    return BottomSheetDialog(requireContext(), theme).apply {
-      dismissWithAnimation = false
-      behavior.skipCollapsed = true
-      behavior.state = BottomSheetBehavior.STATE_EXPANDED
-      setOnShowListener {
-        configureBottomSheet(this)
-      }
-    }
+  override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+    super.onViewCreated(view, savedInstanceState)
+    view.fitsSystemWindows = false
+    view.setBackgroundColor(PanelColors.Background.toArgb())
+    view.requestApplyInsets()
   }
 
   override fun onStart() {
     super.onStart()
-    (dialog as? BottomSheetDialog)?.let(::configureBottomSheet)
+    configureWindow()
   }
 
-  private fun configureBottomSheet(dialog: BottomSheetDialog) {
-    val background = PanelColors.Background.toArgb()
-    dialog.window?.let { window ->
-      window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-      WindowCompat.setDecorFitsSystemWindows(window, false)
-      window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
-      window.decorView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-      val insetsController = WindowInsetsControllerCompat(window, window.decorView)
-      insetsController.isAppearanceLightStatusBars = true
-      insetsController.isAppearanceLightNavigationBars = true
-      @Suppress("DEPRECATION")
-      run {
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
-      }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        window.isNavigationBarContrastEnforced = false
-      }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        val attributes = window.attributes
-        attributes.layoutInDisplayCutoutMode =
-          android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        window.attributes = attributes
-      }
-      window.decorView.setPadding(0, 0, 0, 0)
+  override fun onStop() {
+    restoreWindowAppearance()
+    super.onStop()
+  }
+
+  override fun onDestroyView() {
+    cleanupPanelContainer()
+    super.onDestroyView()
+  }
+
+  private fun closePanel() {
+    parentFragmentManager.popBackStack(PANEL_BACK_STACK_NAME, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+  }
+
+  private fun configureWindow() {
+    val window = activity?.window ?: return
+    val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+    if (previousLightStatusBars == null) {
+      previousLightStatusBars = insetsController.isAppearanceLightStatusBars
     }
-
-    val bottomSheet =
-      dialog.findViewById<FrameLayout>(com.google.android.material.R.id.design_bottom_sheet) ?: return
-
-    bottomSheet.layoutParams = bottomSheet.layoutParams.apply {
-      height = ViewGroup.LayoutParams.MATCH_PARENT
+    if (previousLightNavigationBars == null) {
+      previousLightNavigationBars = insetsController.isAppearanceLightNavigationBars
     }
-    bottomSheet.fitsSystemWindows = false
-    bottomSheet.minimumHeight = resources.displayMetrics.heightPixels
-    bottomSheet.setBackgroundColor(background)
-    bottomSheet.setPadding(0, 0, 0, 0)
+    insetsController.isAppearanceLightStatusBars = true
+    insetsController.isAppearanceLightNavigationBars = true
+    @Suppress("DEPRECATION")
+    run {
+      window.statusBarColor = android.graphics.Color.TRANSPARENT
+      window.navigationBarColor = android.graphics.Color.TRANSPARENT
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      window.isNavigationBarContrastEnforced = false
+    }
+  }
 
-    dialog.behavior.apply {
-      isFitToContents = false
-      expandedOffset = 0
-      skipCollapsed = true
-      state = BottomSheetBehavior.STATE_EXPANDED
-      peekHeight = resources.displayMetrics.heightPixels
+  private fun restoreWindowAppearance() {
+    val window = activity?.window ?: return
+    val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+    previousLightStatusBars?.let {
+      insetsController.isAppearanceLightStatusBars = it
+    }
+    previousLightNavigationBars?.let {
+      insetsController.isAppearanceLightNavigationBars = it
+    }
+    previousLightStatusBars = null
+    previousLightNavigationBars = null
+  }
+
+  private fun cleanupPanelContainer() {
+    val hostActivity = activity ?: return
+    val container =
+      hostActivity.window.decorView.findViewById<ViewGroup>(R.id.expo_in_app_debugger_panel_container)
+        ?: return
+    container.post {
+      if (container.childCount == 0) {
+        (container.parent as? ViewGroup)?.removeView(container)
+      }
     }
   }
 }
+
+const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
 
 private enum class DebugTab {
   Logs,
