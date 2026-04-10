@@ -54,6 +54,32 @@ export default function Root() {
 
 `InAppDebugProvider` 默认是关闭的。只有传入 `enabled={true}`，或运行时调用 `InAppDebugController.enable()` 后，库才会创建运行时并安装 JS / native 采集 hook。
 
+## 生产环境按需开启
+
+如果你希望把库随生产包一起发布，但只给少量内部同学或测试账号开启，推荐把 `enabled` 绑定到业务开关，而不是直接跟 `__DEV__` 绑定：
+
+```tsx
+import {
+  InAppDebugBoundary,
+  InAppDebugProvider,
+} from 'expo-inapp-debugger';
+
+export default function Root() {
+  const debuggerEnabled =
+    isInternalDeveloper && remoteConfig.inAppDebuggerEnabled;
+
+  return (
+    <InAppDebugProvider enabled={debuggerEnabled} locale="zh-CN">
+      <InAppDebugBoundary>
+        <App />
+      </InAppDebugBoundary>
+    </InAppDebugProvider>
+  );
+}
+```
+
+建议尽量在应用启动早期完成这个判断。这样命中的内部人员可以拿到更完整的启动期信息，而绝大部分 `enabled={false}` 的用户会保持休眠态。
+
 ## 关闭状态对宿主的影响
 
 如果明确传入 `enabled={false}`，并且没有再调用 `InAppDebugController.enable()` / `show()` / `exportSnapshot()` 这类运行时 API，调试器会保持休眠：
@@ -65,7 +91,7 @@ export default function Root() {
 
 这里的“关闭”指运行期不介入宿主逻辑。只要依赖仍然安装并被原生工程链接，它仍然会带来不可避免的包体、编译产物和 Expo module 注册成本。生产环境如果要求完全零体积、零注册成本，建议用 dev-only 入口或构建变体让生产包不安装 / 不导入这个库。
 
-如果曾经启用过再调用 `disable()`，库会停止采集并隐藏 UI；已经安装过的底层网络 hook 会进入快速跳过路径，但这和“进程启动后从未启用”不是同一个零介入状态。
+如果曾经启用过再调用 `disable()`，从 `0.3.0` 开始库会停止采集、隐藏 UI，并尽量释放已占用的 store / overlay / native log 资源；不过已经安装过的底层网络 hook 会进入快速跳过路径，这仍然和“进程启动后从未启用”不是同一个零介入状态。
 
 ## 面板说明
 
@@ -76,6 +102,12 @@ export default function Root() {
 - `app Info`：宿主运行环境、调试器能力、采集状态、最近崩溃 / 严重错误、限制说明。
 
 面板支持搜索、过滤、排序、复制、清空和网络详情查看。
+
+不同 tab 也会影响采集强度：
+
+- `log` 激活且 native 来源可见时，才会尽量启动较重的 native log 采集。
+- `network` 激活时，才会尽量处理更完整的 native request / response payload preview。
+- 不在对应 tab 时，会优先保留轻量元数据，尽量减少对宿主应用的影响。
 
 ## 可以采集什么
 

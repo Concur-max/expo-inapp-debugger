@@ -140,6 +140,18 @@ final class InAppDebuggerNativeLogCapture {
     }
   }
 
+  func shutdown() {
+    queue.sync {
+      captureEnabled = false
+      panelActive = false
+      stopDetailedCollectorsLocked()
+      stopLifecycleObserversLocked()
+      stopStreamCaptureLocked()
+      closeCrashPersistenceLocked()
+      didLogSessionStart = false
+    }
+  }
+
   func setPanelActive(_ active: Bool) {
     queue.async {
       self.panelActive = active
@@ -149,6 +161,9 @@ final class InAppDebuggerNativeLogCapture {
 
   private func prepareLocked() {
     guard !isPrepared else {
+      if inAppDebuggerCrashFileDescriptor < 0 {
+        prepareCrashPersistence()
+      }
       return
     }
     replayPersistedCrashReportIfNeeded()
@@ -288,10 +303,7 @@ final class InAppDebuggerNativeLogCapture {
   }
 
   private func prepareCrashPersistence() {
-    if inAppDebuggerCrashFileDescriptor >= 0 {
-      Darwin.close(inAppDebuggerCrashFileDescriptor)
-      inAppDebuggerCrashFileDescriptor = -1
-    }
+    closeCrashPersistenceLocked()
 
     inAppDebuggerCrashReportURL.path.withCString { crashPath in
       inAppDebuggerCrashFileDescriptor = Darwin.open(
@@ -314,6 +326,13 @@ final class InAppDebuggerNativeLogCapture {
       Darwin.fsync(inAppDebuggerCrashFileDescriptor)
     } else {
       try? data.write(to: inAppDebuggerCrashReportURL, options: .atomic)
+    }
+  }
+
+  private func closeCrashPersistenceLocked() {
+    if inAppDebuggerCrashFileDescriptor >= 0 {
+      Darwin.close(inAppDebuggerCrashFileDescriptor)
+      inAppDebuggerCrashFileDescriptor = -1
     }
   }
 

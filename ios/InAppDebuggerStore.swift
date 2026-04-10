@@ -64,6 +64,21 @@ final class InAppDebuggerStore {
     return config
   }
 
+  func shutdown() {
+    lock.lock()
+    config = DebugConfig()
+    logs = InAppDebuggerRingBuffer<DebugLogEntry>(capacity: DebugConfig().maxLogs)
+    pendingNativeLogs = InAppDebuggerRingBuffer<DebugLogEntry>(capacity: DebugConfig().maxLogs)
+    errors = InAppDebuggerRingBuffer<DebugErrorEntry>(capacity: DebugConfig().maxErrors)
+    network = InAppDebuggerKeyedRingBuffer<String, DebugNetworkEntry>(
+      capacity: DebugConfig().maxRequests,
+      key: \.id
+    )
+    liveUpdatesEnabled = false
+    notificationScheduled = false
+    lock.unlock()
+  }
+
   func snapshotState() -> (DebugConfig, [DebugLogEntry], [DebugErrorEntry], [DebugNetworkEntry]) {
     lock.lock()
     defer { lock.unlock() }

@@ -22,16 +22,21 @@ public final class InAppDebuggerModule: Module {
       if !config.enabled && !inAppDebuggerNativeRuntimeActive {
         return
       }
-      if config.enabled {
-        inAppDebuggerNativeRuntimeActive = true
+      if !config.enabled {
+        InAppDebuggerNativeLogCapture.shared.shutdown()
+        InAppDebuggerNativeNetworkCapture.shared.setEnabled(false)
+        InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
+        InAppDebuggerOverlayManager.shared.shutdown()
+        InAppDebuggerStore.shared.shutdown()
+        inAppDebuggerNativeRuntimeActive = false
+        return
       }
+
+      inAppDebuggerNativeRuntimeActive = true
       InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled)
       InAppDebuggerNativeNetworkCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
       InAppDebuggerNativeWebSocketCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
       InAppDebuggerOverlayManager.shared.apply(config: config)
-      if !config.enabled {
-        inAppDebuggerNativeRuntimeActive = false
-      }
     }
 
     AsyncFunction("ingestBatch") { (logs: [[Any]]?, errors: [[Any]]?, network: [[Any]]?) in
@@ -78,10 +83,11 @@ public final class InAppDebuggerModule: Module {
       guard inAppDebuggerNativeRuntimeActive else {
         return
       }
-      InAppDebuggerNativeLogCapture.shared.setEnabled(false)
+      InAppDebuggerNativeLogCapture.shared.shutdown()
       InAppDebuggerNativeNetworkCapture.shared.setEnabled(false)
       InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
-      InAppDebuggerOverlayManager.shared.hide()
+      InAppDebuggerOverlayManager.shared.shutdown()
+      InAppDebuggerStore.shared.shutdown()
       inAppDebuggerNativeRuntimeActive = false
     }
   }

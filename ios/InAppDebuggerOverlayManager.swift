@@ -139,6 +139,18 @@ final class InAppDebuggerOverlayManager {
     }
   }
 
+  func shutdown() {
+    DispatchQueue.main.async {
+      self.visible = false
+      self.rootViewController.dismiss(animated: false)
+      self.floatingButton?.removeFromSuperview()
+      self.floatingButton = nil
+      self.debugWindow?.isHidden = true
+      self.debugWindow?.rootViewController = nil
+      self.debugWindow = nil
+    }
+  }
+
   func presentPanel() {
     DispatchQueue.main.async {
       guard self.visible, self.rootViewController.presentedViewController == nil else {
