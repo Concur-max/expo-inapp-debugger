@@ -1,5 +1,6 @@
 package expo.modules.inappdebugger
 
+import com.facebook.react.bridge.ReadableArray
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -46,8 +47,24 @@ class InAppDebuggerModule : Module() {
       InAppDebuggerNativeNetworkCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
     }
 
-    AsyncFunction("ingestBatch") { batch: Map<String, Any?> ->
-      InAppDebuggerStore.ingestBatch(batch)
+    AsyncFunction("ingestBatch") { logs: ReadableArray?, errors: ReadableArray?, network: ReadableArray? ->
+      inAppDebuggerDiagnostic("NativeModule") {
+        "ingestBatch logsType=${logs?.javaClass?.name ?: "null"} " +
+          "errorsType=${errors?.javaClass?.name ?: "null"} " +
+          "networkType=${network?.javaClass?.name ?: "null"} " +
+          "logsSize=${logs?.size() ?: 0} errorsSize=${errors?.size() ?: 0} networkSize=${network?.size() ?: 0}"
+      }
+      InAppDebuggerStore.ingestBatch(
+        mapOf(
+          "logs" to logs?.toArrayList(),
+          "errors" to errors?.toArrayList(),
+          "network" to network?.toArrayList()
+        )
+      )
+    }
+
+    AsyncFunction("emitDiagnostic") { source: String, message: String ->
+      inAppDebuggerDiagnostic(source) { message }
     }
 
     AsyncFunction("clear") { kind: String ->

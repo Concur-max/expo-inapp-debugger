@@ -41,11 +41,16 @@ type RuntimeGlobal = typeof globalThis & {
 
 type RuntimeNativeModule = {
   configure(config: NativeConfig): Promise<void>;
-  ingestBatch(batch: NativeBatchPayload): Promise<void>;
+  ingestBatch(
+    logs?: NativeLogWireEntry[] | null,
+    errors?: NativeErrorWireEntry[] | null,
+    network?: NativeNetworkWireEntry[] | null
+  ): Promise<void>;
   clear(kind: 'logs' | 'errors' | 'network' | 'all'): Promise<void>;
   show(): Promise<void>;
   hide(): Promise<void>;
   exportSnapshot(): Promise<any>;
+  emitDiagnostic?: (source: string, message: string) => Promise<void>;
 };
 
 const FLUSH_DELAY_MS = 64;
@@ -72,6 +77,7 @@ export type DebugRuntimeDependencies = {
     maxRequests: number;
     onEntry: (entry: DebugNetworkEntry) => void;
     onInternalWarning?: (message: string, error?: unknown) => void;
+    onDiagnostic?: (component: string, message: string) => void;
   }) => { enable(): void; disable(): void; updateOptions(options: { maxRequests: number }): void };
 };
 
@@ -268,16 +274,23 @@ export class DebugRuntime {
         maxRequests: this.providerConfig.maxRequests,
         onEntry: (entry) => this.captureNetwork(entry),
         onInternalWarning: (message, error) => this.internalWarn(message, error),
+        onDiagnostic: (component, message) => this.emitDiagnostic(component, message),
       }) ??
       new NetworkCollector({
         maxRequests: this.providerConfig.maxRequests,
         onEntry: (entry) => this.captureNetwork(entry),
         onInternalWarning: (message, error) => this.internalWarn(message, error),
+        onDiagnostic: (component, message) => this.emitDiagnostic(component, message),
       });
   }
 
   async registerProvider(config: ResolvedInAppDebugConfig) {
     this.providerConfig = config;
+    this.emitDiagnostic(
+      'JSRuntime',
+      `registerProvider enabled=${config.enabled} network=${config.enableNetworkTab} ` +
+        `maxLogs=${config.maxLogs} maxRequests=${config.maxRequests}`
+    );
     this.networkCollector.updateOptions({ maxRequests: config.maxRequests });
     await this.applyConfig();
   }
@@ -363,9 +376,15 @@ export class DebugRuntime {
       ...mergedConfig,
       enabled: resolvedEnabled,
     };
+    this.emitDiagnostic(
+      'JSRuntime',
+      `applyConfig start enabled=${resolvedEnabled} network=${nextConfig.enableNetworkTab} ` +
+        `initialVisible=${nextConfig.initialVisible}`
+    );
 
     await this.dependencies.nativeModule.configure(toNativeConfig(nextConfig));
     this.configured = true;
+    this.emitDiagnostic('JSRuntime', 'applyConfig native configure resolved');
 
     if (resolvedEnabled) {
       this.installCollectors(nextConfig.enableNetworkTab);
@@ -406,6 +425,10 @@ export class DebugRuntime {
       };
     }
 
+    this.emitDiagnostic(
+      'JSRuntime',
+      `installCollectors consolePatched=${this.consolePatched} network=${enableNetworkCapture}`
+    );
     this.installGlobalErrorHandler();
     this.installUnhandledRejectionHandler();
     if (enableNetworkCapture) {
@@ -564,14 +587,24 @@ export class DebugRuntime {
     if (this.networkQueue.length > 0) {
       batch.network = this.networkQueue
     }
+    this.emitDiagnostic(
+      'JSRuntime',
+      `flush logs=${this.logQueue.length} errors=${this.errorQueue.length} network=${this.networkQueue.length}`
+    );
     this.logQueue = [];
     this.errorQueue = [];
     this.networkQueue = [];
     this.queuedNetworkEntryIndexes.clear();
     const flushPromise = (async () => {
       try {
-        await this.dependencies.nativeModule.ingestBatch(batch);
+        await this.dependencies.nativeModule.ingestBatch(
+          batch.logs ?? null,
+          batch.errors ?? null,
+          batch.network ?? null
+        );
+        this.emitDiagnostic('JSRuntime', 'flush ingestBatch resolved');
       } catch (error) {
+        this.emitDiagnostic('JSRuntime', `flush ingestBatch failed error=${String(error)}`);
         this.internalWarn('Failed to ingest debug batch', error);
       }
     })();
@@ -589,7 +622,12 @@ export class DebugRuntime {
   }
 
   private internalWarn(message: string, error?: unknown) {
+    this.emitDiagnostic('JSRuntime', `warning message=${message} error=${String(error ?? '')}`);
     this.originalConsole.warn(`[expo-inapp-debugger] ${message}`, error ?? '');
+  }
+
+  private emitDiagnostic(source: string, message: string) {
+    void this.dependencies.nativeModule.emitDiagnostic?.(source, message).catch(() => undefined);
   }
 
   private getMergedConfig(): ResolvedInAppDebugConfig {
@@ -645,8 +683,8 @@ function encodeNetworkEntry(entry: DebugNetworkEntry): NativeNetworkWireEntry {
     entry.endedAt ?? null,
     entry.durationMs ?? null,
     entry.status ?? null,
-    entry.requestHeaders ?? null,
-    entry.responseHeaders ?? null,
+    encodeHeaderMap(entry.requestHeaders),
+    encodeHeaderMap(entry.responseHeaders),
     entry.requestBody ?? null,
     entry.responseBody ?? null,
     entry.responseType ?? null,
@@ -667,4 +705,21 @@ function encodeNetworkEntry(entry: DebugNetworkEntry): NativeNetworkWireEntry {
     entry.events ?? null,
     entry.messages ?? null,
   ]
+}
+
+function encodeHeaderMap(headers: DebugNetworkEntry['requestHeaders']): string[] | null {
+  if (!headers) {
+    return null;
+  }
+
+  const entries = Object.entries(headers);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const result: string[] = [];
+  for (const [key, value] of entries) {
+    result.push(key, value);
+  }
+  return result;
 }

@@ -633,6 +633,21 @@ private fun LogsTab(
       }
   }
 
+  LaunchedEffect(
+    logsWindowState.version,
+    logsWindowState.totalSize,
+    visibleLogs.size,
+    searchQuery,
+    selectedLevels,
+    selectedOrigins
+  ) {
+    inAppDebuggerDiagnostic("LogsTab") {
+      "version=${logsWindowState.version} total=${logsWindowState.totalSize} " +
+        "visible=${visibleLogs.size} query=${searchQuery.trim()} " +
+        "levels=${selectedLevels.toList().sorted()} origins=${selectedOrigins.toList().sorted()}"
+    }
+  }
+
   Column(modifier = Modifier.fillMaxSize()) {
     SearchAndActionRow(
       query = searchQuery,
@@ -756,6 +771,21 @@ private fun NetworkTab(
           allFiltersSelected = PanelPreferences.isAllNetworkFiltersSelected(selectedOrigins, selectedKinds)
         )
       }
+  }
+
+  LaunchedEffect(
+    networkWindowState.version,
+    networkWindowState.totalSize,
+    visibleEntries.size,
+    searchQuery,
+    selectedOrigins,
+    selectedKinds
+  ) {
+    inAppDebuggerDiagnostic("NetworkTab") {
+      "version=${networkWindowState.version} total=${networkWindowState.totalSize} " +
+        "visible=${visibleEntries.size} query=${searchQuery.trim()} " +
+        "origins=${selectedOrigins.toList().sorted()} kinds=${selectedKinds.toList().sorted()}"
+    }
   }
 
   Column(modifier = Modifier.fillMaxSize()) {

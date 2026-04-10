@@ -101,10 +101,11 @@ describe('DebugRuntime', () => {
 
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
     expect(consoleRef.info).toHaveBeenCalledWith('details');
-    const [batch] = nativeModule.ingestBatch.mock.calls[0];
+    const [logs, errors, network] = nativeModule.ingestBatch.mock.calls[0];
+    const batch = { logs, errors, network };
     expect(batch.logs).toHaveLength(3);
     expect(batch.errors).toHaveLength(1);
-    expect(batch.network).toBeUndefined();
+    expect(batch.network).toBeNull();
     expect(batch.logs[0][5]).toBe('hello');
     expect(batch.errors[0][1]).toBe('console');
 
@@ -163,7 +164,8 @@ describe('DebugRuntime', () => {
     jest.advanceTimersByTime(64);
     await flushPromises();
 
-    const [batch] = nativeModule.ingestBatch.mock.calls[0];
+    const [logs, errors] = nativeModule.ingestBatch.mock.calls[0];
+    const batch = { logs, errors };
     expect(batch.errors).toHaveLength(2);
     expect(batch.errors[0][1]).toBe('global');
     expect(batch.errors[1][1]).toBe('promise');
@@ -223,8 +225,8 @@ describe('DebugRuntime', () => {
     await flushPromises();
 
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(2);
-    expect(nativeModule.ingestBatch.mock.calls[1][0].logs).toHaveLength(1);
-    expect(nativeModule.ingestBatch.mock.calls[1][0].logs[0][5]).toBe('second');
+    expect(nativeModule.ingestBatch.mock.calls[1][0]).toHaveLength(1);
+    expect(nativeModule.ingestBatch.mock.calls[1][0][0][5]).toBe('second');
   });
 
   it('coalesces repeated network updates for the same request within one buffered batch', async () => {
@@ -262,7 +264,7 @@ describe('DebugRuntime', () => {
       state: 'pending',
       startedAt: 1,
       updatedAt: 1,
-      requestHeaders: {},
+      requestHeaders: { accept: 'application/json' },
       responseHeaders: {},
     });
     runtime.captureNetwork({
@@ -277,8 +279,8 @@ describe('DebugRuntime', () => {
       endedAt: 2,
       durationMs: 1,
       status: 200,
-      requestHeaders: {},
-      responseHeaders: {},
+      requestHeaders: { accept: 'application/json' },
+      responseHeaders: { 'content-type': 'application/json' },
       responseBody: '{"ok":true}',
     });
 
@@ -286,9 +288,12 @@ describe('DebugRuntime', () => {
     await flushPromises();
 
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
-    const [batch] = nativeModule.ingestBatch.mock.calls[0];
+    const [logs, errors, network] = nativeModule.ingestBatch.mock.calls[0];
+    const batch = { logs, errors, network };
     expect(batch.network).toHaveLength(1);
     expect(batch.network[0][5]).toBe('success');
     expect(batch.network[0][10]).toBe(200);
+    expect(batch.network[0][11]).toEqual(['accept', 'application/json']);
+    expect(batch.network[0][12]).toEqual(['content-type', 'application/json']);
   });
 });

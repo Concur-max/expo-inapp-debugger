@@ -1,6 +1,7 @@
 import type { DebugNetworkEntry } from '../types';
 
 type HeaderMap = Record<string, string>;
+type RawHeaderMap = HeaderMap | string | null | undefined;
 
 type XHRInterceptorModule = {
   isInterceptorEnabled?: () => boolean;
@@ -30,6 +31,7 @@ type NetworkCollectorOptions = {
   maxRequests: number;
   onEntry: (entry: DebugNetworkEntry) => void;
   onInternalWarning?: (message: string, error?: unknown) => void;
+  onDiagnostic?: (component: string, message: string) => void;
 };
 
 type MutableNetworkEntry = DebugNetworkEntry & {
@@ -123,6 +125,7 @@ export class NetworkCollector {
       return;
     }
     this.enabled = true;
+    this.options.onDiagnostic?.('JSNetwork', `enable maxRequests=${this.options.maxRequests}`);
     this.attachXHR();
     this.attachWebSocket();
   }
@@ -155,8 +158,10 @@ export class NetworkCollector {
     this.xhrInterceptor = resolveXHRInterceptor();
     if (!this.xhrInterceptor) {
       this.options.onInternalWarning?.('XHR interceptor was not found');
+      this.options.onDiagnostic?.('JSNetwork', 'attachXHR missing interceptor');
       return;
     }
+    this.options.onDiagnostic?.('JSNetwork', 'attachXHR interceptor resolved');
 
     this.xhrInterceptor.setOpenCallback?.((method: string, url: string, xhr: XHRShell) => {
       const interceptorId = this.nextId++;
@@ -178,6 +183,7 @@ export class NetworkCollector {
         responseHeaders: {},
       };
       this.requests.set(requestId, entry);
+      this.options.onDiagnostic?.('JSNetwork', `xhr open id=${requestId} method=${entry.method} url=${url}`);
       this.emit(entry);
     });
 
@@ -203,18 +209,13 @@ export class NetworkCollector {
     });
 
     this.xhrInterceptor.setHeaderReceivedCallback?.(
-      (
-        responseContentType: string,
-        responseSize: number,
-        responseHeaders: HeaderMap,
-        xhr: XHRShell
-      ) => {
+      (responseContentType: string, responseSize: number, responseHeaders: RawHeaderMap, xhr: XHRShell) => {
         const entry = this.getXHRRequest(xhr);
         if (!entry) return;
         const timestamp = now();
         entry.responseContentType = responseContentType;
         entry.responseSize = responseSize;
-        entry.responseHeaders = responseHeaders;
+        entry.responseHeaders = normalizeHeaderMap(responseHeaders);
         entry.updatedAt = timestamp;
         this.emit(entry);
       }
@@ -243,12 +244,17 @@ export class NetworkCollector {
         if (timeout) {
           entry.error = `timeout=${timeout}`;
         }
+        this.options.onDiagnostic?.(
+          'JSNetwork',
+          `xhr complete id=${entry.id} status=${status} state=${entry.state} url=${entry.url}`
+        );
         this.emit(entry);
         this.releaseXHRRequest(entry.id);
       }
     );
 
     this.xhrInterceptor.enableInterception?.();
+    this.options.onDiagnostic?.('JSNetwork', 'attachXHR enableInterception called');
   }
 
   private attachWebSocket() {
@@ -259,8 +265,10 @@ export class NetworkCollector {
     this.webSocketInterceptor = resolveWebSocketInterceptor();
     if (!this.webSocketInterceptor) {
       this.options.onInternalWarning?.('WebSocket interceptor was not found');
+      this.options.onDiagnostic?.('JSNetwork', 'attachWebSocket missing interceptor');
       return;
     }
+    this.options.onDiagnostic?.('JSNetwork', 'attachWebSocket interceptor resolved');
 
     this.webSocketInterceptor.setConnectCallback?.(
       (url: string, protocols: string[] | null, _options: unknown, socketId: number) => {
@@ -279,6 +287,7 @@ export class NetworkCollector {
           messagesList: [],
         };
         this.requests.set(entry.id, entry);
+        this.options.onDiagnostic?.('JSNetwork', `ws connect id=${entry.id} url=${url}`);
         this.emit(entry);
       }
     );
@@ -289,6 +298,7 @@ export class NetworkCollector {
       const timestamp = now();
       entry.state = 'open';
       entry.updatedAt = timestamp;
+      this.options.onDiagnostic?.('JSNetwork', `ws open id=${entry.id}`);
       this.emit(entry);
     });
 
@@ -307,6 +317,10 @@ export class NetworkCollector {
       entry.state = 'error';
       entry.error = payload?.message || 'WebSocket error';
       entry.updatedAt = timestamp;
+      this.options.onDiagnostic?.(
+        'JSNetwork',
+        `ws error id=${entry.id} message=${entry.error ?? ''}`
+      );
       this.emit(entry);
     });
 
@@ -332,11 +346,16 @@ export class NetworkCollector {
         entry.endedAt = endedAt;
         entry.durationMs = endedAt - entry.startedAt;
         entry.updatedAt = endedAt;
+        this.options.onDiagnostic?.(
+          'JSNetwork',
+          `ws close id=${entry.id} state=${entry.state} code=${payload.code}`
+        );
         this.emit(entry);
       }
     );
 
     this.webSocketInterceptor.enableInterception?.();
+    this.options.onDiagnostic?.('JSNetwork', 'attachWebSocket enableInterception called');
   }
 
   private appendMessage(socketId: number, message: string) {
@@ -393,4 +412,47 @@ export class NetworkCollector {
     this.requestToXHRId.delete(requestId);
     this.xhrIdMap.delete(xhrId);
   }
+}
+
+function normalizeHeaderMap(headers: RawHeaderMap): HeaderMap {
+  if (!headers) {
+    return {};
+  }
+
+  if (typeof headers === 'string') {
+    return parseRawResponseHeaders(headers);
+  }
+
+  const result: HeaderMap = {};
+  for (const [key, value] of Object.entries(headers)) {
+    result[key] = String(value);
+  }
+  return result;
+}
+
+function parseRawResponseHeaders(rawHeaders: string): HeaderMap {
+  if (!rawHeaders) {
+    return {};
+  }
+
+  const result: HeaderMap = {};
+  const lines = rawHeaders.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) {
+      continue;
+    }
+    const separatorIndex = line.indexOf(':');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    if (!key) {
+      continue;
+    }
+    const value = line.slice(separatorIndex + 1).trim();
+    const existingValue = result[key];
+    result[key] = existingValue ? `${existingValue}, ${value}` : value;
+  }
+  return result;
 }

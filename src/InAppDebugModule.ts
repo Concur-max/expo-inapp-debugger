@@ -32,8 +32,8 @@ export type NativeNetworkWireEntry = [
   endedAt: number | null,
   durationMs: number | null,
   status: number | null,
-  requestHeaders: Record<string, unknown> | null,
-  responseHeaders: Record<string, unknown> | null,
+  requestHeaders: string[] | null,
+  responseHeaders: string[] | null,
   requestBody: string | null,
   responseBody: string | null,
   responseType: string | null,
@@ -75,11 +75,16 @@ export type NativeConfig = {
 
 export type InAppDebugNativeModuleType = {
   configure(config: NativeConfig): Promise<void>;
-  ingestBatch(batch: NativeBatchPayload): Promise<void>;
+  ingestBatch(
+    logs?: NativeLogWireEntry[] | null,
+    errors?: NativeErrorWireEntry[] | null,
+    network?: NativeNetworkWireEntry[] | null
+  ): Promise<void>;
   clear(kind: 'logs' | 'errors' | 'network' | 'all'): Promise<void>;
   show(): Promise<void>;
   hide(): Promise<void>;
   exportSnapshot(): Promise<DebugSnapshot>;
+  emitDiagnostic?(source: string, message: string): Promise<void>;
 };
 
 const fallbackModule: InAppDebugNativeModuleType = {
@@ -88,6 +93,7 @@ const fallbackModule: InAppDebugNativeModuleType = {
   async clear() {},
   async show() {},
   async hide() {},
+  async emitDiagnostic() {},
   async exportSnapshot() {
     return {
       logs: [],

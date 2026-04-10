@@ -10,8 +10,29 @@ type WebSocketCallbacks = {
   onClose?: (payload: { code: number; reason?: string | null }, socketId: number) => void;
 };
 
+type XHRCallbacks = {
+  open?: (method: string, url: string, xhr: Record<string, unknown>) => void;
+  requestHeader?: (header: string, value: string, xhr: Record<string, unknown>) => void;
+  send?: (data: unknown, xhr: Record<string, unknown>) => void;
+  headerReceived?: (
+    responseContentType: string | undefined,
+    responseSize: number | undefined,
+    responseHeaders: string,
+    xhr: Record<string, unknown>
+  ) => void;
+  response?: (
+    status: number,
+    timeout: number,
+    response: unknown,
+    responseURL: string,
+    responseType: string,
+    xhr: Record<string, unknown>
+  ) => void;
+};
+
 function loadNetworkCollector() {
   const callbacks: WebSocketCallbacks = {};
+  const xhrCallbacks: XHRCallbacks = {};
   const webSocketInterceptor = {
     setConnectCallback: jest.fn((callback?: WebSocketCallbacks['connect']) => {
       callbacks.connect = callback;
@@ -38,11 +59,21 @@ function loadNetworkCollector() {
     disableInterception: jest.fn(),
   };
   const xhrInterceptor = {
-    setOpenCallback: jest.fn((_callback?: (...args: unknown[]) => void) => undefined),
-    setRequestHeaderCallback: jest.fn((_callback?: (...args: unknown[]) => void) => undefined),
-    setSendCallback: jest.fn((_callback?: (...args: unknown[]) => void) => undefined),
-    setHeaderReceivedCallback: jest.fn((_callback?: (...args: unknown[]) => void) => undefined),
-    setResponseCallback: jest.fn((_callback?: (...args: unknown[]) => void) => undefined),
+    setOpenCallback: jest.fn((callback?: XHRCallbacks['open']) => {
+      xhrCallbacks.open = callback;
+    }),
+    setRequestHeaderCallback: jest.fn((callback?: XHRCallbacks['requestHeader']) => {
+      xhrCallbacks.requestHeader = callback;
+    }),
+    setSendCallback: jest.fn((callback?: XHRCallbacks['send']) => {
+      xhrCallbacks.send = callback;
+    }),
+    setHeaderReceivedCallback: jest.fn((callback?: XHRCallbacks['headerReceived']) => {
+      xhrCallbacks.headerReceived = callback;
+    }),
+    setResponseCallback: jest.fn((callback?: XHRCallbacks['response']) => {
+      xhrCallbacks.response = callback;
+    }),
     enableInterception: jest.fn(),
     disableInterception: jest.fn(),
   };
@@ -67,6 +98,8 @@ function loadNetworkCollector() {
   return {
     NetworkCollector,
     callbacks,
+    xhrCallbacks,
+    xhrInterceptor,
     webSocketInterceptor,
   };
 }
@@ -162,6 +195,51 @@ describe('NetworkCollector WebSocket lifecycle', () => {
       error: 'Socket failed',
       closeCode: 1006,
       closeReason: 'abnormal closure',
+    });
+    expect(latestEntry()?.endedAt).toEqual(expect.any(Number));
+  });
+
+  it('normalizes Android XHR raw response headers into a header map', () => {
+    const { NetworkCollector, xhrCallbacks, xhrInterceptor } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const latestEntry = () => entries[entries.length - 1];
+
+    collector.enable();
+
+    expect(xhrInterceptor.enableInterception).toHaveBeenCalledTimes(1);
+
+    const xhr: Record<string, unknown> = {};
+    xhrCallbacks.open?.('GET', 'https://example.com/items', xhr);
+    xhrCallbacks.requestHeader?.('accept', 'application/json', xhr);
+    xhrCallbacks.send?.(null, xhr);
+    xhrCallbacks.headerReceived?.(
+      'application/json',
+      19,
+      'content-type: application/json\r\nx-trace-id: abc123\r\nset-cookie: a=1\r\nset-cookie: b=2\r\n',
+      xhr
+    );
+    xhrCallbacks.response?.(200, 0, '{"ok":true}', 'https://example.com/items', 'text', xhr);
+
+    expect(latestEntry()).toMatchObject({
+      id: 'http_1',
+      kind: 'http',
+      state: 'success',
+      status: 200,
+      requestHeaders: {
+        accept: 'application/json',
+      },
+      responseHeaders: {
+        'content-type': 'application/json',
+        'x-trace-id': 'abc123',
+        'set-cookie': 'a=1, b=2',
+      },
+      responseBody: '{"ok":true}',
     });
     expect(latestEntry()?.endedAt).toEqual(expect.any(Number));
   });

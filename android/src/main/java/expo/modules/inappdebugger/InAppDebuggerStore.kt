@@ -46,6 +46,9 @@ object InAppDebuggerStore {
 
     synchronized(this) {
       val shouldFlushPendingNativeLogs = next.enabled && pendingNativeLogs.size > 0
+      if (config == next && !shouldFlushPendingNativeLogs) {
+        return
+      }
 
       config = next
       var logsChanged = logs.resize(next.maxLogs)
@@ -54,10 +57,9 @@ object InAppDebuggerStore {
       val networkChanged = network.resize(next.maxRequests)
 
       if (shouldFlushPendingNativeLogs) {
-        if (logs.appendAll(pendingNativeLogs.snapshot())) {
+        if (pendingNativeLogs.moveAllTo(logs)) {
           logsChanged = true
         }
-        pendingNativeLogs.clear()
       }
 
       if (logsChanged) {
@@ -79,7 +81,16 @@ object InAppDebuggerStore {
   }
 
   fun ingestBatch(batch: Map<String, Any?>) {
+    inAppDebuggerDiagnostic("Store") {
+      "ingestBatch raw logs=${describeBatchPayload(batch["logs"])} " +
+        "errors=${describeBatchPayload(batch["errors"])} " +
+        "network=${describeBatchPayload(batch["network"])}"
+    }
     val parsedBatch = parseBatch(batch)
+    inAppDebuggerDiagnostic("Store") {
+      "ingestBatch parsed logs=${parsedBatch.logs.size} " +
+        "errors=${parsedBatch.errors.size} network=${parsedBatch.network.size}"
+    }
     if (
       parsedBatch.logs.isEmpty() &&
       parsedBatch.errors.isEmpty() &&
@@ -239,6 +250,10 @@ object InAppDebuggerStore {
     }
 
     panelVisible = visible
+    inAppDebuggerDiagnostic("Store") {
+      "setPanelVisible visible=$visible activeFeed=$activeFeed " +
+        "dirty=logs:$logsDirty errors:$errorsDirty network:$networkDirty"
+    }
     if (!visible) {
       activeFeed = DebugPanelFeed.None
       cancelVisibleFeedPublishLocked()
@@ -258,6 +273,10 @@ object InAppDebuggerStore {
     }
 
     activeFeed = feed
+    inAppDebuggerDiagnostic("Store") {
+      "setActiveFeed feed=$feed panelVisible=$panelVisible " +
+        "dirty=logs:$logsDirty errors:$errorsDirty network:$networkDirty"
+    }
     if (feed == DebugPanelFeed.None) {
       cancelVisibleFeedPublishLocked()
       return
@@ -343,14 +362,11 @@ object InAppDebuggerStore {
   }
 
   private fun flushVisibleUiState() {
-    val logsState: DebugListWindowState<DebugLogEntry>?
-    val networkState: DebugListWindowState<DebugNetworkEntry>?
-    val errorsState: DebugListWindowState<DebugErrorEntry>?
+    var logsState: DebugListWindowState<DebugLogEntry>? = null
+    var networkState: DebugListWindowState<DebugNetworkEntry>? = null
+    var errorsState: DebugListWindowState<DebugErrorEntry>? = null
 
     synchronized(this) {
-      logsState = null
-      networkState = null
-      errorsState = null
       visibleUiPublishScheduled = false
       if (!panelVisible) {
         return
@@ -379,6 +395,14 @@ object InAppDebuggerStore {
     logsState?.let { _logsWindowState.value = it }
     networkState?.let { _networkWindowState.value = it }
     errorsState?.let { _errorsWindowState.value = it }
+    if (logsState != null || networkState != null || errorsState != null) {
+      inAppDebuggerDiagnostic("Store") {
+        "flushVisibleUiState activeFeed=$activeFeed " +
+          "logs=${logsState?.items?.size ?: -1}/${logsState?.totalSize ?: -1} " +
+          "network=${networkState?.items?.size ?: -1}/${networkState?.totalSize ?: -1} " +
+          "errors=${errorsState?.items?.size ?: -1}/${errorsState?.totalSize ?: -1}"
+      }
+    }
   }
 
   private fun createLogsWindowStateLocked(): DebugListWindowState<DebugLogEntry> {
@@ -586,6 +610,32 @@ private class RingBuffer<T>(initialCapacity: Int) {
     return changed
   }
 
+  fun moveAllTo(target: RingBuffer<T>): Boolean {
+    if (size == 0) {
+      return false
+    }
+
+    var targetChanged = false
+    var remaining = size
+    var slot = head
+    @Suppress("UNCHECKED_CAST")
+    while (remaining > 0) {
+      if (target.append(storage[slot] as T)) {
+        targetChanged = true
+      }
+      storage[slot] = null
+      slot += 1
+      if (slot == storage.size) {
+        slot = 0
+      }
+      remaining -= 1
+    }
+
+    head = 0
+    size = 0
+    return targetChanged
+  }
+
   fun snapshot(): List<T> {
     if (size == 0) {
       return emptyList()
@@ -623,11 +673,17 @@ private class RingBuffer<T>(initialCapacity: Int) {
       return false
     }
 
-    val preserved = if (normalizedCapacity == 0) emptyList() else snapshot().takeLast(normalizedCapacity)
-    storage = arrayOfNulls(normalizedCapacity)
+    val nextStorage = arrayOfNulls<Any?>(normalizedCapacity)
+    val nextSize = minOf(size, normalizedCapacity)
+    val startIndex = size - nextSize
+
+    for (index in 0 until nextSize) {
+      nextStorage[index] = elementAt(startIndex + index)
+    }
+
+    storage = nextStorage
     head = 0
-    size = 0
-    appendAll(preserved)
+    size = nextSize
     return true
   }
 
@@ -752,17 +808,39 @@ private fun List<Any?>.stringMap(index: Int): Map<String, String> {
 }
 
 private fun Any?.stringMapValue(): Map<String, String> {
-  val raw = this as? Map<*, *> ?: return emptyMap()
-  if (raw.isEmpty()) {
-    return emptyMap()
-  }
+  when (this) {
+    is Map<*, *> -> {
+      if (isEmpty()) {
+        return emptyMap()
+      }
 
-  val result = LinkedHashMap<String, String>(raw.size)
-  raw.forEach { (entryKey, entryValue) ->
-    val mapKey = entryKey as? String ?: return@forEach
-    result[mapKey] = entryValue?.toString() ?: ""
+      val result = LinkedHashMap<String, String>(size)
+      forEach { (entryKey, entryValue) ->
+        val mapKey = entryKey as? String ?: return@forEach
+        result[mapKey] = entryValue?.toString() ?: ""
+      }
+      return result
+    }
+
+    is List<*> -> {
+      if (isEmpty()) {
+        return emptyMap()
+      }
+
+      val result = LinkedHashMap<String, String>(size / 2)
+      var index = 0
+      while (index + 1 < size) {
+        val mapKey = get(index) as? String
+        if (mapKey != null) {
+          result[mapKey] = get(index + 1)?.toString() ?: ""
+        }
+        index += 2
+      }
+      return result
+    }
+
+    else -> return emptyMap()
   }
-  return result
 }
 
 private data class ParsedBatch(
@@ -775,7 +853,7 @@ private fun <T> parseBatchItems(
   raw: Any?,
   parser: (Any?) -> T?
 ): List<T> {
-  val items = raw as? List<*> ?: return emptyList()
+  val items = raw.batchItems() ?: return emptyList()
   if (items.isEmpty()) {
     return emptyList()
   }
@@ -785,4 +863,19 @@ private fun <T> parseBatchItems(
     parser(item)?.let(result::add)
   }
   return result
+}
+
+private fun Any?.batchItems(): List<Any?>? {
+  return when (this) {
+    is List<*> -> this
+    is Array<*> -> this.asList()
+    is Iterable<*> -> this.toList()
+    else -> null
+  }
+}
+
+private fun describeBatchPayload(raw: Any?): String {
+  val type = raw?.javaClass?.name ?: "null"
+  val size = raw.batchItems()?.size
+  return if (size != null) "$type(size=$size)" else type
 }
