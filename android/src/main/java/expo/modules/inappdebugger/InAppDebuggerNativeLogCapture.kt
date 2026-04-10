@@ -22,6 +22,7 @@ import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -32,6 +33,7 @@ private const val LOGCAT_CONTEXT = "logcat"
 private const val STDOUT_FD = 1
 private const val STDERR_FD = 2
 private const val MAX_CRASH_HISTORY = 6
+private const val LOGCAT_PID_OPTION_MIN_SDK = 24
 
 object InAppDebuggerNativeLogCapture {
   private val lock = Any()
@@ -519,10 +521,16 @@ object InAppDebuggerNativeLogCapture {
     mode: String,
     useRoot: Boolean,
     filterPid: Int?,
-    fallbackToAppScope: Boolean
+    fallbackToAppScope: Boolean,
+    preferPidOption: Boolean = true
   ): LogcatReaderHandle? {
     val context = appContextRef?.get()
-    val baseCommand = buildLogcatCommand(nativeConfig.buffers)
+    val usePidOption =
+      !useRoot &&
+        filterPid != null &&
+        preferPidOption &&
+        Build.VERSION.SDK_INT >= LOGCAT_PID_OPTION_MIN_SDK
+    val baseCommand = buildLogcatCommand(nativeConfig.buffers, filterPid, usePidOption)
     val command = if (useRoot) {
       listOf("su", "-c", shellCommand(baseCommand))
     } else {
@@ -558,6 +566,7 @@ object InAppDebuggerNativeLogCapture {
       mode = mode,
       useRoot = useRoot,
       filterPid = filterPid,
+      usedPidOption = usePidOption,
       fallbackToAppScope = fallbackToAppScope,
       detailsPrefix = buildLogcatDetailsPrefix(mode, useRoot),
       process = process
@@ -645,6 +654,33 @@ object InAppDebuggerNativeLogCapture {
             rootDetails = startupNoise.toString().trim().ifBlank {
               "Root logcat failed with exit code $exitCode."
             }
+          }
+
+          val shouldRetryWithoutPidOption =
+            handle.usedPidOption &&
+              handle.filterPid != null &&
+              shouldRetryLogcatWithoutPidOption(exitCode, startupNoise.toString())
+
+          if (shouldRetryWithoutPidOption && captureEnabled && nativeConfig.captureLogcat) {
+            appendStatusLocked(
+              type = "warn",
+              message = "Android logcat pid filter is unavailable. Falling back to in-process filtering.",
+              details = buildString {
+                appendLine("mode=${handle.mode}")
+                appendLine("pid=${handle.filterPid}")
+                appendLine("exitCode=$exitCode")
+                append(startupNoise.toString().trim())
+              }
+            )
+            appLogcatReader = startLogcatReaderLocked(
+              mode = handle.mode,
+              useRoot = false,
+              filterPid = handle.filterPid,
+              fallbackToAppScope = handle.fallbackToAppScope,
+              preferPidOption = false
+            )
+            publishRuntimeInfoLocked()
+            return@synchronized
           }
 
           appendStatusLocked(
@@ -836,10 +872,17 @@ object InAppDebuggerNativeLogCapture {
     )
   }
 
-  private fun buildLogcatCommand(buffers: List<String>): List<String> {
+  private fun buildLogcatCommand(
+    buffers: List<String>,
+    filterPid: Int?,
+    usePidOption: Boolean
+  ): List<String> {
     val command = mutableListOf("logcat")
     buffers.forEach { buffer ->
       command += listOf("-b", buffer)
+    }
+    if (usePidOption && filterPid != null) {
+      command += listOf("--pid", filterPid.toString())
     }
     command += listOf("-v", "threadtime", "-T", "1")
     return command
@@ -853,6 +896,20 @@ object InAppDebuggerNativeLogCapture {
         "'${argument.replace("'", "'\\''")}'"
       }
     }
+  }
+
+  private fun shouldRetryLogcatWithoutPidOption(exitCode: Int, startupNoise: String): Boolean {
+    if (exitCode == 0 || startupNoise.isBlank()) {
+      return false
+    }
+    val normalizedNoise = startupNoise.lowercase(Locale.ROOT)
+    if (!normalizedNoise.contains("pid")) {
+      return false
+    }
+    return normalizedNoise.contains("unknown option") ||
+      normalizedNoise.contains("invalid option") ||
+      normalizedNoise.contains("unrecognized option") ||
+      normalizedNoise.contains("unsupported")
   }
 
   private fun parseLogcatLine(line: String): ParsedLogcatLine? {
@@ -1226,6 +1283,7 @@ private data class LogcatReaderHandle(
   val mode: String,
   val useRoot: Boolean,
   val filterPid: Int?,
+  val usedPidOption: Boolean,
   val fallbackToAppScope: Boolean,
   val detailsPrefix: String,
   val process: java.lang.Process,

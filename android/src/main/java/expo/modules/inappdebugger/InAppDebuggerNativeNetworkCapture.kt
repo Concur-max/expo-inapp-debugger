@@ -48,8 +48,8 @@ object InAppDebuggerNativeNetworkCapture {
   private val interceptor = NativeOkHttpCaptureInterceptor()
 
   private var appContextRef: WeakReference<Context>? = null
-  private var enabled = false
-  private var hooksInstalled = false
+  @Volatile private var enabled = false
+  @Volatile private var hooksInstalled = false
   private val activeCalls = mutableMapOf<Call, NativeOkHttpCallState>()
 
   fun applyConfig(context: Context?, config: DebugConfig) {
@@ -59,7 +59,11 @@ object InAppDebuggerNativeNetworkCapture {
       }
       enabled = config.enabled && config.enableNetworkTab
       if (enabled) {
-        installHooksLocked()
+        if (!hooksInstalled) {
+          installHooksLocked()
+        }
+      } else {
+        activeCalls.clear()
       }
     }
   }
@@ -82,10 +86,8 @@ object InAppDebuggerNativeNetworkCapture {
   }
 
   internal fun shouldCapture(request: Request): Boolean {
-    synchronized(lock) {
-      if (!enabled) {
-        return false
-      }
+    if (!enabled) {
+      return false
     }
 
     val scheme = request.url.scheme
@@ -443,18 +445,15 @@ object InAppDebuggerNativeNetworkCapture {
     timestamp: Long,
     eventText: String
   ) {
-    if (state.events.size >= MAX_EVENT_LINES) {
+    if (state.eventCount >= MAX_EVENT_LINES) {
       if (!state.truncatedEvents) {
-        state.events += NativeNetworkEvent(timestamp, "...more events omitted...")
-        state.eventsChanged = true
+        appendSerializedNetworkEventLine(state, timestamp, "...more events omitted...")
         state.truncatedEvents = true
-        state.dirty = true
       }
       return
     }
-    state.events += NativeNetworkEvent(timestamp, eventText)
-    state.eventsChanged = true
-    state.dirty = true
+    appendSerializedNetworkEventLine(state, timestamp, eventText)
+    state.eventCount += 1
   }
 
   private fun webSocketMethod(url: String): String {
@@ -507,18 +506,20 @@ internal data class NativeOkHttpCallState(
   var durationMs: Long? = null,
   var requestBodyBytesObserved: Long? = null,
   var responseBodyBytesObserved: Long? = null,
-  val events: MutableList<NativeNetworkEvent> = ArrayList(16),
   var serializedEvents: String? = null,
+  var serializedEventsBuilder: StringBuilder? = null,
+  var eventCount: Int = 0,
+  var lastEventText: String = "",
   var startEmitted: Boolean = false,
   var dirty: Boolean = true,
-  var eventsChanged: Boolean = true,
+  var eventsChanged: Boolean = false,
   var redirectsRecorded: Boolean = false,
   var truncatedEvents: Boolean = false
 ) {
   fun toEntryLocked(): DebugNetworkEntry {
     dirty = false
     if (eventsChanged) {
-      serializedEvents = serializeNativeNetworkEvents(events)
+      serializedEvents = serializedEventsBuilder?.toString()
       eventsChanged = false
     }
     return DebugNetworkEntry(
@@ -548,30 +549,25 @@ internal data class NativeOkHttpCallState(
   }
 }
 
-private data class NativeNetworkEvent(
-  val timestampMillis: Long,
-  val text: String
-)
-
-private fun serializeNativeNetworkEvents(events: List<NativeNetworkEvent>): String? {
-  if (events.isEmpty()) {
-    return null
+private fun appendSerializedNetworkEventLine(
+  state: NativeOkHttpCallState,
+  timestamp: Long,
+  eventText: String
+) {
+  val builder = state.serializedEventsBuilder ?: StringBuilder(256).also {
+    state.serializedEventsBuilder = it
   }
-
-  return buildString(events.size * 40) {
-    events.forEachIndexed { index, event ->
-      if (index > 0) {
-        append('\n')
-      }
-      append('[')
-      append(formatNativeNetworkClock(event.timestampMillis))
-      append("] ")
-      append(event.text)
-    }
+  if (builder.isNotEmpty()) {
+    builder.append('\n')
   }
+  builder.append('[')
+  builder.append(formatNativeNetworkClock(timestamp))
+  builder.append("] ")
+  builder.append(eventText)
+  state.lastEventText = eventText
+  state.eventsChanged = true
+  state.dirty = true
 }
-
-private fun List<NativeNetworkEvent>.lastTextOrEmpty(): String = lastOrNull()?.text.orEmpty()
 
 private class NativeOkHttpCaptureInterceptor : Interceptor {
   override fun intercept(chain: Interceptor.Chain): Response {
@@ -602,7 +598,11 @@ private fun instrumentRequestBody(request: Request, call: Call): Request {
     return request
   }
 
-  val contentTypeHeader = request.header("Content-Type")
+  val contentTypeHeader = request.header("Content-Type") ?: body.contentType()?.toString()
+  if (!shouldCaptureBodyPreview(contentTypeHeader, body.contentLengthOrNull())) {
+    return request
+  }
+
   return request.newBuilder()
     .method(
       request.method,
@@ -705,8 +705,9 @@ private fun instrumentResponseBody(response: Response, call: Call): Response {
     return response
   }
 
+  val contentTypeHeader = response.header("Content-Type") ?: body.contentType()?.toString()
   val contentLength = body.contentLengthOrNull()
-  if (contentLength == 0L) {
+  if (!shouldCaptureBodyPreview(contentTypeHeader, contentLength)) {
     return response
   }
 
@@ -714,7 +715,7 @@ private fun instrumentResponseBody(response: Response, call: Call): Response {
     .body(
       PreviewingResponseBody(
         delegate = body,
-        contentTypeHeader = response.header("Content-Type")
+        contentTypeHeader = contentTypeHeader
       ) { preview ->
         InAppDebuggerNativeNetworkCapture.captureResponseBodyPreview(
           call = call,
@@ -1209,10 +1210,8 @@ private class NativeOkHttpEventListener(
       error = error ?: "Canceled"
       endedAt = endedAt ?: timestamp
       durationMs = durationMs ?: max(0L, timestamp - startedAt)
-      if (!events.lastTextOrEmpty().contains("canceled")) {
-        events += NativeNetworkEvent(timestamp, "canceled")
-        eventsChanged = true
-        dirty = true
+      if (!lastEventText.contains("canceled")) {
+        appendSerializedNetworkEventLine(this, timestamp, "canceled")
       }
     }
   }
@@ -1227,10 +1226,8 @@ private class NativeOkHttpEventListener(
       if (kind == "http" && state == "pending") {
         state = if ((status ?: 0) >= 400) "error" else "success"
       }
-      if (events.lastTextOrEmpty().contains("call end").not()) {
-        events += NativeNetworkEvent(timestamp, "call end")
-        eventsChanged = true
-        dirty = true
+      if (lastEventText.contains("call end").not()) {
+        appendSerializedNetworkEventLine(this, timestamp, "call end")
       }
     }
   }
@@ -1242,10 +1239,8 @@ private class NativeOkHttpEventListener(
       error = error ?: ioe.message ?: ioe.javaClass.simpleName
       endedAt = endedAt ?: timestamp
       durationMs = durationMs ?: max(0L, timestamp - startedAt)
-      if (events.lastTextOrEmpty().contains("call failed").not()) {
-        events += NativeNetworkEvent(timestamp, "call failed ${error ?: "Request failed"}")
-        eventsChanged = true
-        dirty = true
+      if (lastEventText.contains("call failed").not()) {
+        appendSerializedNetworkEventLine(this, timestamp, "call failed ${error ?: "Request failed"}")
       }
     }
   }
@@ -1426,6 +1421,17 @@ private fun formatNativeNetworkClock(timestampMillis: Long): String {
 private fun ResponseBody?.contentLengthOrNull(): Long? {
   val body = this ?: return null
   return runCatching { body.contentLength() }.getOrDefault(-1L).takeIf { it >= 0L }
+}
+
+private fun RequestBody.contentLengthOrNull(): Long? {
+  return runCatching { contentLength() }.getOrDefault(-1L).takeIf { it >= 0L }
+}
+
+private fun shouldCaptureBodyPreview(contentType: String?, declaredLength: Long?): Boolean {
+  if (declaredLength == 0L) {
+    return false
+  }
+  return !isLikelyBinaryContentType(contentType?.lowercase(Locale.ROOT).orEmpty())
 }
 
 private fun ByteArray.isProbablyUtf8(): Boolean {

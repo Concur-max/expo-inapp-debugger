@@ -41,65 +41,81 @@ object InAppDebuggerStore {
   private val _networkWindowState = MutableStateFlow(DebugListWindowState<DebugNetworkEntry>())
   val networkWindowState = _networkWindowState.asStateFlow()
 
-  @Synchronized
   fun updateConfig(next: DebugConfig) {
-    val shouldFlushPendingNativeLogs = next.enabled && pendingNativeLogs.size > 0
+    var nextChromeState: DebugPanelChromeState? = null
 
-    config = next
-    logs.resize(next.maxLogs)
-    pendingNativeLogs.resize(next.maxLogs)
-    errors.resize(next.maxErrors)
-    network.resize(next.maxRequests)
+    synchronized(this) {
+      val shouldFlushPendingNativeLogs = next.enabled && pendingNativeLogs.size > 0
 
-    if (shouldFlushPendingNativeLogs) {
-      logs.appendAll(pendingNativeLogs.snapshot())
-      pendingNativeLogs.clear()
+      config = next
+      var logsChanged = logs.resize(next.maxLogs)
+      pendingNativeLogs.resize(next.maxLogs)
+      val errorsChanged = errors.resize(next.maxErrors)
+      val networkChanged = network.resize(next.maxRequests)
+
+      if (shouldFlushPendingNativeLogs) {
+        if (logs.appendAll(pendingNativeLogs.snapshot())) {
+          logsChanged = true
+        }
+        pendingNativeLogs.clear()
+      }
+
+      if (logsChanged) {
+        markLogsDirtyLocked()
+      }
+      if (errorsChanged) {
+        markErrorsDirtyLocked()
+      }
+      if (networkChanged) {
+        markNetworkDirtyLocked()
+      }
+      nextChromeState = buildChromeStateLocked()
+      if (logsChanged || errorsChanged || networkChanged) {
+        publishVisibleFeedNowLocked()
+      }
     }
 
-    markLogsDirtyLocked()
-    markErrorsDirtyLocked()
-    markNetworkDirtyLocked()
-    publishChromeLocked()
-    publishVisibleFeedNowLocked()
+    nextChromeState?.let(::publishChromeState)
   }
 
-  @Synchronized
   fun ingestBatch(batch: Map<String, Any?>) {
-    var logsChanged = false
-    var errorsChanged = false
-    var networkChanged = false
+    val parsedBatch = parseBatch(batch)
+    if (
+      parsedBatch.logs.isEmpty() &&
+      parsedBatch.errors.isEmpty() &&
+      parsedBatch.network.isEmpty()
+    ) {
+      return
+    }
 
-    batch.forEachBatchItem("logs") { item ->
-      val entry = parseLog(item)
-      if (entry != null && appendLog(entry)) {
+    synchronized(this) {
+      var logsChanged = false
+      var errorsChanged = false
+      var networkChanged = false
+
+      if (parsedBatch.logs.isNotEmpty() && logs.appendAll(parsedBatch.logs)) {
         logsChanged = true
       }
-    }
-
-    batch.forEachBatchItem("errors") { item ->
-      val entry = parseError(item)
-      if (entry != null && appendError(entry)) {
+      if (parsedBatch.errors.isNotEmpty() && errors.appendAll(parsedBatch.errors)) {
         errorsChanged = true
       }
-    }
-
-    batch.forEachBatchItem("network") { item ->
-      val entry = parseNetwork(item)
-      if (entry != null && upsertNetwork(entry)) {
+      if (parsedBatch.network.isNotEmpty() && network.upsertAll(parsedBatch.network)) {
         networkChanged = true
       }
-    }
 
-    if (logsChanged) {
-      markLogsDirtyLocked()
+      if (logsChanged) {
+        markLogsDirtyLocked()
+      }
+      if (errorsChanged) {
+        markErrorsDirtyLocked()
+      }
+      if (networkChanged) {
+        markNetworkDirtyLocked()
+      }
+      if (logsChanged || errorsChanged || networkChanged) {
+        scheduleVisibleFeedPublishLocked()
+      }
     }
-    if (errorsChanged) {
-      markErrorsDirtyLocked()
-    }
-    if (networkChanged) {
-      markNetworkDirtyLocked()
-    }
-    scheduleVisibleFeedPublishLocked()
   }
 
   @Synchronized
@@ -134,16 +150,29 @@ object InAppDebuggerStore {
     if (networkChanged) {
       markNetworkDirtyLocked()
     }
-    publishVisibleFeedNowLocked()
+    if (logsChanged || errorsChanged || networkChanged) {
+      publishVisibleFeedNowLocked()
+    }
   }
 
-  @Synchronized
-  fun exportSnapshot(): Map<String, Any?> = mapOf(
-    "logs" to logs.snapshot().map(DebugLogEntry::toMap),
-    "errors" to errors.snapshot().map(DebugErrorEntry::toMap),
-    "network" to network.snapshot().map(DebugNetworkEntry::toMap),
-    "exportTime" to java.time.Instant.now().toString()
-  )
+  fun exportSnapshot(): Map<String, Any?> {
+    val logsSnapshot: List<DebugLogEntry>
+    val errorsSnapshot: List<DebugErrorEntry>
+    val networkSnapshot: List<DebugNetworkEntry>
+
+    synchronized(this) {
+      logsSnapshot = logs.snapshot()
+      errorsSnapshot = errors.snapshot()
+      networkSnapshot = network.snapshot()
+    }
+
+    return mapOf(
+      "logs" to logsSnapshot.map(DebugLogEntry::toMap),
+      "errors" to errorsSnapshot.map(DebugErrorEntry::toMap),
+      "network" to networkSnapshot.map(DebugNetworkEntry::toMap),
+      "exportTime" to java.time.Instant.now().toString()
+    )
+  }
 
   @Synchronized
   fun currentConfig(): DebugConfig = config
@@ -153,7 +182,7 @@ object InAppDebuggerStore {
 
   @Synchronized
   fun upsertNetworkEntry(entry: DebugNetworkEntry) {
-    if (upsertNetwork(entry)) {
+    if (network.upsert(entry)) {
       markNetworkDirtyLocked()
       scheduleVisibleFeedPublishLocked()
     }
@@ -173,23 +202,34 @@ object InAppDebuggerStore {
       return
     }
 
-    var changed = false
-    entries.forEach { entry ->
-      if (appendNativeLogLocked(entry)) {
-        changed = true
+    val changed =
+      if (config.enabled) {
+        logs.appendAll(entries)
+      } else {
+        pendingNativeLogs.appendAll(entries)
+        false
       }
+
+    if (!changed) {
+      return
     }
 
-    if (changed) {
-      markLogsDirtyLocked()
-      scheduleVisibleFeedPublishLocked()
-    }
+    markLogsDirtyLocked()
+    scheduleVisibleFeedPublishLocked()
   }
 
-  @Synchronized
   fun updateRuntimeInfo(next: DebugRuntimeInfo) {
-    runtimeInfo = next
-    publishChromeLocked()
+    var nextChromeState: DebugPanelChromeState? = null
+
+    synchronized(this) {
+      if (runtimeInfo == next) {
+        return
+      }
+      runtimeInfo = next
+      nextChromeState = buildChromeStateLocked()
+    }
+
+    nextChromeState?.let(::publishChromeState)
   }
 
   @Synchronized
@@ -228,17 +268,17 @@ object InAppDebuggerStore {
     }
   }
 
-  private fun appendLog(entry: DebugLogEntry): Boolean = logs.append(entry)
-
-  private fun appendError(entry: DebugErrorEntry): Boolean = errors.append(entry)
-
-  private fun upsertNetwork(entry: DebugNetworkEntry): Boolean = network.upsert(entry)
-
-  private fun publishChromeLocked() {
-    _chromeState.value = DebugPanelChromeState(
+  private fun buildChromeStateLocked(): DebugPanelChromeState {
+    return DebugPanelChromeState(
       config = config,
       runtimeInfo = runtimeInfo
     )
+  }
+
+  private fun publishChromeState(nextState: DebugPanelChromeState) {
+    if (_chromeState.value != nextState) {
+      _chromeState.value = nextState
+    }
   }
 
   private fun markLogsDirtyLocked() {
@@ -303,7 +343,14 @@ object InAppDebuggerStore {
   }
 
   private fun flushVisibleUiState() {
+    val logsState: DebugListWindowState<DebugLogEntry>?
+    val networkState: DebugListWindowState<DebugNetworkEntry>?
+    val errorsState: DebugListWindowState<DebugErrorEntry>?
+
     synchronized(this) {
+      logsState = null
+      networkState = null
+      errorsState = null
       visibleUiPublishScheduled = false
       if (!panelVisible) {
         return
@@ -312,45 +359,49 @@ object InAppDebuggerStore {
       when (activeFeed) {
         DebugPanelFeed.Logs -> {
           if (logsDirty) {
-            publishLogsWindowLocked()
+            logsState = createLogsWindowStateLocked()
           }
         }
         DebugPanelFeed.Network -> {
           if (networkDirty) {
-            publishNetworkWindowLocked()
+            networkState = createNetworkWindowStateLocked()
           }
         }
         DebugPanelFeed.AppInfo -> {
           if (errorsDirty) {
-            publishErrorsWindowLocked()
+            errorsState = createErrorsWindowStateLocked()
           }
         }
         DebugPanelFeed.None -> Unit
       }
     }
+
+    logsState?.let { _logsWindowState.value = it }
+    networkState?.let { _networkWindowState.value = it }
+    errorsState?.let { _errorsWindowState.value = it }
   }
 
-  private fun publishLogsWindowLocked() {
+  private fun createLogsWindowStateLocked(): DebugListWindowState<DebugLogEntry> {
     logsDirty = false
-    _logsWindowState.value = DebugListWindowState(
+    return DebugListWindowState(
       version = logsVersion,
       totalSize = logs.size,
       items = logs.snapshot()
     )
   }
 
-  private fun publishErrorsWindowLocked() {
+  private fun createErrorsWindowStateLocked(): DebugListWindowState<DebugErrorEntry> {
     errorsDirty = false
-    _errorsWindowState.value = DebugListWindowState(
+    return DebugListWindowState(
       version = errorsVersion,
       totalSize = errors.size,
       items = errors.snapshot()
     )
   }
 
-  private fun publishNetworkWindowLocked() {
+  private fun createNetworkWindowStateLocked(): DebugListWindowState<DebugNetworkEntry> {
     networkDirty = false
-    _networkWindowState.value = DebugListWindowState(
+    return DebugListWindowState(
       version = networkVersion,
       totalSize = network.size,
       items = network.snapshot()
@@ -492,6 +543,14 @@ object InAppDebuggerStore {
       messages = list.string(31)
     )
   }
+
+  private fun parseBatch(batch: Map<String, Any?>): ParsedBatch {
+    return ParsedBatch(
+      logs = parseBatchItems(batch["logs"], ::parseLog),
+      errors = parseBatchItems(batch["errors"], ::parseError),
+      network = parseBatchItems(batch["network"], ::parseNetwork)
+    )
+  }
 }
 
 private class RingBuffer<T>(initialCapacity: Int) {
@@ -605,6 +664,16 @@ private class KeyedRingBuffer<K, T>(
     return items[key]
   }
 
+  fun upsertAll(values: Iterable<T>): Boolean {
+    var changed = false
+    values.forEach { value ->
+      if (upsert(value)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
   fun snapshot(): List<T> {
     if (items.isEmpty()) {
       return emptyList()
@@ -654,14 +723,6 @@ private class KeyedRingBuffer<K, T>(
 
 private fun Map<String, Any?>.string(key: String): String? = this[key] as? String
 
-private inline fun Map<String, Any?>.forEachBatchItem(
-  key: String,
-  block: (Any?) -> Unit
-) {
-  val raw = this[key] as? List<*> ?: return
-  raw.forEach(block)
-}
-
 @Suppress("UNCHECKED_CAST")
 private fun Any?.typedMap(): Map<String, Any?>? = this as? Map<String, Any?>
 
@@ -700,6 +761,28 @@ private fun Any?.stringMapValue(): Map<String, String> {
   raw.forEach { (entryKey, entryValue) ->
     val mapKey = entryKey as? String ?: return@forEach
     result[mapKey] = entryValue?.toString() ?: ""
+  }
+  return result
+}
+
+private data class ParsedBatch(
+  val logs: List<DebugLogEntry>,
+  val errors: List<DebugErrorEntry>,
+  val network: List<DebugNetworkEntry>
+)
+
+private fun <T> parseBatchItems(
+  raw: Any?,
+  parser: (Any?) -> T?
+): List<T> {
+  val items = raw as? List<*> ?: return emptyList()
+  if (items.isEmpty()) {
+    return emptyList()
+  }
+
+  val result = ArrayList<T>(items.size)
+  items.forEach { item ->
+    parser(item)?.let(result::add)
   }
   return result
 }

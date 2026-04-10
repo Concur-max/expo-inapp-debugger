@@ -1,6 +1,5 @@
 package expo.modules.inappdebugger
 
-import android.util.Log
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -36,13 +35,12 @@ class InAppDebuggerModule : Module() {
           key to (entry.value?.toString() ?: "")
         }?.toMap() ?: emptyMap()
       )
-      Log.d(
-        "InAppDebuggerModule",
+      inAppDebuggerTrace("InAppDebuggerModule") {
         "configure enabled=${config.enabled} initialVisible=${config.initialVisible} " +
           "currentActivity=${appContext.currentActivity?.javaClass?.name} " +
           "nativeLogs=${config.androidNativeLogs.enabled}/${config.androidNativeLogs.logcatScope}/" +
           "${config.androidNativeLogs.rootMode}"
-      )
+      }
       InAppDebuggerOverlayManager.applyConfig(appContext, config)
       InAppDebuggerNativeLogCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
       InAppDebuggerNativeNetworkCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
@@ -57,18 +55,16 @@ class InAppDebuggerModule : Module() {
     }
 
     AsyncFunction("show") {
-      Log.d(
-        "InAppDebuggerModule",
+      inAppDebuggerTrace("InAppDebuggerModule") {
         "show currentActivity=${appContext.currentActivity?.javaClass?.name}"
-      )
+      }
       InAppDebuggerOverlayManager.show(appContext)
     }
 
     AsyncFunction("hide") {
-      Log.d(
-        "InAppDebuggerModule",
+      inAppDebuggerTrace("InAppDebuggerModule") {
         "hide currentActivity=${appContext.currentActivity?.javaClass?.name}"
-      )
+      }
       InAppDebuggerOverlayManager.hide(appContext)
     }
 

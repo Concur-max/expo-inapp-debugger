@@ -1434,7 +1434,7 @@ private fun filterLogs(
   }
 
   if (trimmedQuery.isEmpty() && allFiltersSelected) {
-    return if (sortOrder == SortOrder.Asc) source else copyReversed(source)
+    return if (sortOrder == SortOrder.Asc) source else ReversedListView(source)
   }
 
   val result = ArrayList<DebugLogEntry>(source.size)
@@ -1479,7 +1479,7 @@ private fun filterNetwork(
   }
 
   if (trimmedQuery.isEmpty() && allFiltersSelected) {
-    return if (sortOrder == SortOrder.Asc) source else copyReversed(source)
+    return if (sortOrder == SortOrder.Asc) source else ReversedListView(source)
   }
 
   val result = ArrayList<DebugNetworkEntry>(source.size)
@@ -3093,16 +3093,15 @@ private fun Set<String>.toggle(value: String): Set<String> {
   return next
 }
 
-private fun <T> copyReversed(source: List<T>): List<T> {
-  if (source.isEmpty()) {
-    return emptyList()
-  }
+private class ReversedListView<T>(
+  private val source: List<T>
+) : AbstractList<T>() {
+  override val size: Int
+    get() = source.size
 
-  val result = ArrayList<T>(source.size)
-  for (index in source.indices.reversed()) {
-    result.add(source[index])
+  override fun get(index: Int): T {
+    return source[source.lastIndex - index]
   }
-  return result
 }
 
 private fun copyToClipboard(text: String, successMessage: String, context: Context?) {
