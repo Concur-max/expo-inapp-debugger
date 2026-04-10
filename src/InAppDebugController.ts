@@ -1,26 +1,26 @@
 import type { AndroidNativeLogsConfig, DebugSnapshot } from './types';
-import { debugRuntime } from './internal/singleton';
+import { disableDebugRuntime, enableDebugRuntime, getDebugRuntime } from './internal/singleton';
 
 export const InAppDebugController = {
   show() {
-    return debugRuntime.show();
+    return getDebugRuntime().show();
   },
   hide() {
-    return debugRuntime.hide();
+    return getDebugRuntime().hide();
   },
   enable() {
-    return debugRuntime.enable();
+    return enableDebugRuntime();
   },
   disable() {
-    return debugRuntime.disable();
+    return disableDebugRuntime();
   },
   clear(kind: 'logs' | 'errors' | 'network' | 'all' = 'all') {
-    return debugRuntime.clear(kind);
+    return getDebugRuntime().clear(kind);
   },
   exportSnapshot(): Promise<DebugSnapshot> {
-    return debugRuntime.exportSnapshot();
+    return getDebugRuntime().exportSnapshot();
   },
   configureAndroidNativeLogs(options: Partial<AndroidNativeLogsConfig>) {
-    return debugRuntime.configureAndroidNativeLogs(options);
+    return getDebugRuntime().configureAndroidNativeLogs(options);
   },
 };

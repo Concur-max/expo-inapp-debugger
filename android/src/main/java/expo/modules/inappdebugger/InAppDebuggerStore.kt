@@ -8,8 +8,8 @@ import kotlinx.coroutines.flow.asStateFlow
 object InAppDebuggerStore {
   private const val UI_REFRESH_INTERVAL_MS = 150L
 
-  private val visibleUiHandlerThread = HandlerThread("InAppDebugger-visible-feed").apply { start() }
-  private val uiHandler = Handler(visibleUiHandlerThread.looper)
+  private var visibleUiHandlerThread: HandlerThread? = null
+  private var uiHandler: Handler? = null
   private val publishVisibleUiRunnable = Runnable { flushVisibleUiState() }
 
   private var config = DebugConfig()
@@ -189,6 +189,32 @@ object InAppDebuggerStore {
   fun currentConfig(): DebugConfig = config
 
   @Synchronized
+  fun shutdown() {
+    cancelVisibleFeedPublishLocked()
+    config = DebugConfig()
+    logs.clear()
+    pendingNativeLogs.clear()
+    errors.clear()
+    network.clear()
+    runtimeInfo = DebugRuntimeInfo()
+    panelVisible = false
+    activeFeed = DebugPanelFeed.None
+    logsVersion = 0L
+    errorsVersion = 0L
+    networkVersion = 0L
+    logsDirty = false
+    errorsDirty = false
+    networkDirty = false
+    _chromeState.value = DebugPanelChromeState()
+    _logsWindowState.value = DebugListWindowState()
+    _errorsWindowState.value = DebugListWindowState()
+    _networkWindowState.value = DebugListWindowState()
+    visibleUiHandlerThread?.quitSafely()
+    visibleUiHandlerThread = null
+    uiHandler = null
+  }
+
+  @Synchronized
   fun networkEntry(id: String): DebugNetworkEntry? = network.get(id)
 
   @Synchronized
@@ -333,12 +359,12 @@ object InAppDebuggerStore {
     }
 
     visibleUiPublishScheduled = true
-    uiHandler.postDelayed(publishVisibleUiRunnable, UI_REFRESH_INTERVAL_MS)
+    uiHandlerLocked().postDelayed(publishVisibleUiRunnable, UI_REFRESH_INTERVAL_MS)
   }
 
   private fun cancelVisibleFeedPublishLocked() {
     visibleUiPublishScheduled = false
-    uiHandler.removeCallbacks(publishVisibleUiRunnable)
+    uiHandler?.removeCallbacks(publishVisibleUiRunnable)
   }
 
   private fun publishVisibleFeedNowLocked() {
@@ -357,8 +383,21 @@ object InAppDebuggerStore {
 
     if (shouldPublish) {
       visibleUiPublishScheduled = true
-      uiHandler.post(publishVisibleUiRunnable)
+      uiHandlerLocked().post(publishVisibleUiRunnable)
     }
+  }
+
+  private fun uiHandlerLocked(): Handler {
+    val existing = uiHandler
+    if (existing != null) {
+      return existing
+    }
+
+    val thread = HandlerThread("InAppDebugger-visible-feed").apply { start() }
+    val handler = Handler(thread.looper)
+    visibleUiHandlerThread = thread
+    uiHandler = handler
+    return handler
   }
 
   private fun flushVisibleUiState() {

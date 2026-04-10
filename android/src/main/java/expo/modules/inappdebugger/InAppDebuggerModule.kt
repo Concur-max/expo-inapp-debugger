@@ -5,6 +5,9 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
 class InAppDebuggerModule : Module() {
+  @Volatile
+  private var nativeRuntimeActive = false
+
   override fun definition() = ModuleDefinition {
     Name("InAppDebugger")
 
@@ -42,12 +45,25 @@ class InAppDebuggerModule : Module() {
           "nativeLogs=${config.androidNativeLogs.enabled}/${config.androidNativeLogs.logcatScope}/" +
           "${config.androidNativeLogs.rootMode}"
       }
+      if (!config.enabled && !nativeRuntimeActive) {
+        return@AsyncFunction
+      }
+      if (config.enabled) {
+        nativeRuntimeActive = true
+      }
       InAppDebuggerOverlayManager.applyConfig(appContext, config)
       InAppDebuggerNativeLogCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
       InAppDebuggerNativeNetworkCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
+      if (!config.enabled) {
+        InAppDebuggerStore.shutdown()
+        nativeRuntimeActive = false
+      }
     }
 
     AsyncFunction("ingestBatch") { logs: ReadableArray?, errors: ReadableArray?, network: ReadableArray? ->
+      if (!nativeRuntimeActive) {
+        return@AsyncFunction
+      }
       inAppDebuggerDiagnostic("NativeModule") {
         "ingestBatch logsType=${logs?.javaClass?.name ?: "null"} " +
           "errorsType=${errors?.javaClass?.name ?: "null"} " +
@@ -64,32 +80,57 @@ class InAppDebuggerModule : Module() {
     }
 
     AsyncFunction("emitDiagnostic") { source: String, message: String ->
+      if (!nativeRuntimeActive) {
+        return@AsyncFunction
+      }
       inAppDebuggerDiagnostic(source) { message }
     }
 
     AsyncFunction("clear") { kind: String ->
+      if (!nativeRuntimeActive) {
+        return@AsyncFunction
+      }
       InAppDebuggerStore.clear(kind)
     }
 
     AsyncFunction("show") {
+      if (!nativeRuntimeActive) {
+        return@AsyncFunction null
+      }
       inAppDebuggerTrace("InAppDebuggerModule") {
         "show currentActivity=${appContext.currentActivity?.javaClass?.name}"
       }
       InAppDebuggerOverlayManager.show(appContext)
+      return@AsyncFunction null
     }
 
     AsyncFunction("hide") {
+      if (!nativeRuntimeActive) {
+        return@AsyncFunction null
+      }
       inAppDebuggerTrace("InAppDebuggerModule") {
         "hide currentActivity=${appContext.currentActivity?.javaClass?.name}"
       }
       InAppDebuggerOverlayManager.hide(appContext)
+      return@AsyncFunction null
     }
 
     AsyncFunction("exportSnapshot") {
+      if (!nativeRuntimeActive) {
+        return@AsyncFunction mapOf(
+          "logs" to emptyList<Map<String, Any?>>(),
+          "errors" to emptyList<Map<String, Any?>>(),
+          "network" to emptyList<Map<String, Any?>>(),
+          "exportTime" to java.time.Instant.now().toString()
+        )
+      }
       return@AsyncFunction InAppDebuggerStore.exportSnapshot()
     }
 
     OnActivityEntersForeground {
+      if (!nativeRuntimeActive) {
+        return@OnActivityEntersForeground
+      }
       InAppDebuggerNativeLogCapture.updateContext(appContext.currentActivity?.applicationContext)
       InAppDebuggerNativeNetworkCapture.applyConfig(
         appContext.currentActivity?.applicationContext,
@@ -99,13 +140,21 @@ class InAppDebuggerModule : Module() {
     }
 
     OnActivityDestroys {
+      if (!nativeRuntimeActive) {
+        return@OnActivityDestroys
+      }
       InAppDebuggerOverlayManager.onActivityDestroyed()
     }
 
     OnDestroy {
+      if (!nativeRuntimeActive) {
+        return@OnDestroy
+      }
       InAppDebuggerNativeLogCapture.shutdown()
       InAppDebuggerNativeNetworkCapture.shutdown()
       InAppDebuggerOverlayManager.hide(appContext)
+      InAppDebuggerStore.shutdown()
+      nativeRuntimeActive = false
     }
   }
 }

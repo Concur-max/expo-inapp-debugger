@@ -52,7 +52,20 @@ export default function Root() {
 }
 ```
 
-`InAppDebugProvider` 默认是关闭的。只有传入 `enabled={true}`，或运行时调用 `InAppDebugController.enable()` 后，库才会安装 JS / native 采集 hook。
+`InAppDebugProvider` 默认是关闭的。只有传入 `enabled={true}`，或运行时调用 `InAppDebugController.enable()` 后，库才会创建运行时并安装 JS / native 采集 hook。
+
+## 关闭状态对宿主的影响
+
+如果明确传入 `enabled={false}`，并且没有再调用 `InAppDebugController.enable()` / `show()` / `exportSnapshot()` 这类运行时 API，调试器会保持休眠：
+
+- 不 patch `console`、全局错误处理、Promise rejection 或 JS 网络拦截器。
+- 不显示原生浮动按钮或调试面板。
+- iOS 不开启 native log / URLProtocol / URLSession / WebSocket 采集。
+- Android 不开启 logcat / stdout / stderr / uncaught exception / OkHttp 采集，也不会启动面板刷新用的后台线程。
+
+这里的“关闭”指运行期不介入宿主逻辑。只要依赖仍然安装并被原生工程链接，它仍然会带来不可避免的包体、编译产物和 Expo module 注册成本。生产环境如果要求完全零体积、零注册成本，建议用 dev-only 入口或构建变体让生产包不安装 / 不导入这个库。
+
+如果曾经启用过再调用 `disable()`，库会停止采集并隐藏 UI；已经安装过的底层网络 hook 会进入快速跳过路径，但这和“进程启动后从未启用”不是同一个零介入状态。
 
 ## 面板说明
 

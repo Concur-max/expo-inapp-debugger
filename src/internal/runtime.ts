@@ -284,6 +284,11 @@ export class DebugRuntime {
       });
   }
 
+  primeProviderConfig(config: ResolvedInAppDebugConfig) {
+    this.providerConfig = config;
+    this.networkCollector.updateOptions({ maxRequests: config.maxRequests });
+  }
+
   async registerProvider(config: ResolvedInAppDebugConfig) {
     this.providerConfig = config;
     this.emitDiagnostic(

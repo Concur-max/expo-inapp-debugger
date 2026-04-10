@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { InAppDebugProviderProps } from './types';
-import { debugRuntime } from './internal/singleton';
+import { registerProviderConfig, unregisterProviderConfig } from './internal/singleton';
 import { resolveProviderConfig } from './internal/runtime';
 import { InAppDebugStringsContext } from './internal/strings';
 
@@ -43,9 +43,9 @@ export function InAppDebugProvider({
   );
 
   React.useEffect(() => {
-    void debugRuntime.registerProvider(config);
+    void registerProviderConfig(config);
     return () => {
-      void debugRuntime.unregisterProvider();
+      void unregisterProviderConfig();
     };
   }, [config]);
 
