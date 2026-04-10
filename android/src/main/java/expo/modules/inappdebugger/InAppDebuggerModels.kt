@@ -3,7 +3,7 @@ package expo.modules.inappdebugger
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 data class AndroidNativeLogsConfig(
   val enabled: Boolean = true,
@@ -141,6 +141,14 @@ data class DebugListWindowState<T>(
 
 private val nativeLogClockFormatter: DateTimeFormatter =
   DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
+private val nativeIsoInstantFormatter: DateTimeFormatter = DateTimeFormatter.ISO_INSTANT
+private val nativeEntryIdCounter = AtomicLong(0)
+
+fun formatNativeLogClock(timestampMillis: Long): String {
+  return formatNativeLogClock(Instant.ofEpochMilli(timestampMillis))
+}
+
+private fun formatNativeLogClock(instant: Instant): String = nativeLogClockFormatter.format(instant)
 
 fun createNativeDebugLogEntry(
   type: String,
@@ -151,14 +159,14 @@ fun createNativeDebugLogEntry(
 ): DebugLogEntry {
   val instant = Instant.ofEpochMilli(timestampMillis)
   return DebugLogEntry(
-    id = "native_${timestampMillis}_${UUID.randomUUID()}",
+    id = "native_${timestampMillis}_${nativeEntryIdCounter.incrementAndGet()}",
     type = type,
     origin = "native",
     context = context,
     details = details,
     message = message,
-    timestamp = nativeLogClockFormatter.format(instant),
-    fullTimestamp = instant.toString()
+    timestamp = formatNativeLogClock(instant),
+    fullTimestamp = nativeIsoInstantFormatter.format(instant)
   )
 }
 

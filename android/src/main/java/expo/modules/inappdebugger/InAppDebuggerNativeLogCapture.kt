@@ -21,7 +21,6 @@ import java.io.StringWriter
 import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
-import java.time.MonthDay
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -560,6 +559,7 @@ object InAppDebuggerNativeLogCapture {
       useRoot = useRoot,
       filterPid = filterPid,
       fallbackToAppScope = fallbackToAppScope,
+      detailsPrefix = buildLogcatDetailsPrefix(mode, useRoot),
       process = process
     )
     activeLogcatMode = mode
@@ -595,18 +595,14 @@ object InAppDebuggerNativeLogCapture {
             continue
           }
 
-          batch += createNativeDebugLogEntry(
+          batch.add(
+            createNativeDebugLogEntry(
             type = levelForPriority(parsed.priority),
             message = parsed.message,
             context = parsed.tag.ifBlank { LOGCAT_CONTEXT },
-            details = buildString {
-              appendLine("source=${if (handle.useRoot) "root-logcat" else "logcat"}")
-              appendLine("mode=${handle.mode}")
-              appendLine("priority=${parsed.priority}")
-              appendLine("pid=${parsed.pid}")
-              append("tid=${parsed.tid}")
-            },
+            details = buildLogcatDetails(handle.detailsPrefix, parsed.priority, parsed.pid, parsed.tid),
             timestampMillis = parsed.timestampMillis
+            )
           )
 
           if (batch.size >= 32) {
@@ -785,25 +781,37 @@ object InAppDebuggerNativeLogCapture {
     context: String,
     detailsBuilder: (String) -> String?
   ): List<DebugLogEntry> {
+    if (chunk.isEmpty()) {
+      return emptyList()
+    }
+
     val entries = ArrayList<DebugLogEntry>()
-    partial.append(chunk)
-    while (true) {
-      val newlineIndex = partial.indexOf("\n")
+    var segmentStart = 0
+    while (segmentStart < chunk.length) {
+      val newlineIndex = chunk.indexOf('\n', segmentStart)
       if (newlineIndex < 0) {
+        partial.append(chunk, segmentStart, chunk.length)
         break
       }
 
-      val line = partial.substring(0, newlineIndex).trimEnd('\r')
-      partial.delete(0, newlineIndex + 1)
-      if (line.isBlank()) {
+      val lineEnd = if (newlineIndex > segmentStart && chunk[newlineIndex - 1] == '\r') {
+        newlineIndex - 1
+      } else {
+        newlineIndex
+      }
+      val line = materializeChunkLine(partial, chunk, segmentStart, lineEnd)
+      segmentStart = newlineIndex + 1
+      if (line == null) {
         continue
       }
 
-      entries += createNativeDebugLogEntry(
+      entries.add(
+        createNativeDebugLogEntry(
           type = defaultLevel,
           message = line,
           context = context,
           details = detailsBuilder(line)
+        )
       )
     }
     return entries
@@ -848,37 +856,99 @@ object InAppDebuggerNativeLogCapture {
   }
 
   private fun parseLogcatLine(line: String): ParsedLogcatLine? {
-    val match = LOGCAT_THREADTIME_REGEX.matchEntire(line) ?: return null
-    val monthDay = MonthDay.parse("--${match.groupValues[1]}")
-    val timePart = match.groupValues[2]
-    val pid = match.groupValues[3].toIntOrNull() ?: return null
-    val tid = match.groupValues[4].toIntOrNull() ?: return null
-    val priority = match.groupValues[5]
-    val tag = match.groupValues[6].trim()
-    val message = match.groupValues[7]
+    if (line.length < 24 ||
+      !line.hasDigitPairAt(0) ||
+      line.getOrNull(2) != '-' ||
+      !line.hasDigitPairAt(3) ||
+      line.getOrNull(5) != ' ' ||
+      !line.hasDigitPairAt(6) ||
+      line.getOrNull(8) != ':' ||
+      !line.hasDigitPairAt(9) ||
+      line.getOrNull(11) != ':' ||
+      !line.hasDigitPairAt(12) ||
+      line.getOrNull(14) != '.' ||
+      !line.hasDigitTripleAt(15)
+    ) {
+      return null
+    }
 
-    val timestampMillis = resolveLogcatTimestamp(monthDay, timePart)
+    val month = line.parseTwoDigits(0) ?: return null
+    val day = line.parseTwoDigits(3) ?: return null
+    val hour = line.parseTwoDigits(6) ?: return null
+    val minute = line.parseTwoDigits(9) ?: return null
+    val second = line.parseTwoDigits(12) ?: return null
+    val millisecond = line.parseThreeDigits(15) ?: return null
+    if (month !in 1..12 ||
+      day !in 1..31 ||
+      hour !in 0..23 ||
+      minute !in 0..59 ||
+      second !in 0..59 ||
+      millisecond !in 0..999
+    ) {
+      return null
+    }
+    var cursor = 18
+    if (line.getOrNull(cursor)?.isWhitespace() != true) {
+      return null
+    }
+    cursor = line.skipWhitespace(cursor)
+    val pidEnd = line.findTokenEnd(cursor)
+    val pid = line.parsePositiveInt(cursor, pidEnd) ?: return null
+    cursor = line.skipWhitespace(pidEnd)
+    val tidEnd = line.findTokenEnd(cursor)
+    val tid = line.parsePositiveInt(cursor, tidEnd) ?: return null
+    cursor = line.skipWhitespace(tidEnd)
+    val priorityChar = line.getOrNull(cursor) ?: return null
+    if (priorityChar !in LOGCAT_PRIORITIES) {
+      return null
+    }
+    cursor += 1
+    if (line.getOrNull(cursor)?.isWhitespace() != true) {
+      return null
+    }
+    cursor = line.skipWhitespace(cursor)
+    val separatorIndex = line.indexOf(": ", startIndex = cursor)
+    if (separatorIndex <= cursor) {
+      return null
+    }
+
+    val tag = line.substring(cursor, separatorIndex).trim()
+    val message = line.substring(separatorIndex + 2)
+    val timestampMillis = resolveLogcatTimestamp(
+      month = month,
+      day = day,
+      hour = hour,
+      minute = minute,
+      second = second,
+      millisecond = millisecond
+    )
     return ParsedLogcatLine(
       timestampMillis = timestampMillis,
       pid = pid,
       tid = tid,
-      priority = priority,
+      priority = priorityChar.toString(),
       tag = tag,
       message = message
     )
   }
 
-  private fun resolveLogcatTimestamp(monthDay: MonthDay, timePart: String): Long {
+  private fun resolveLogcatTimestamp(
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int
+  ): Long {
     val now = LocalDateTime.now()
-    val milliseconds = timePart.substring(9).padEnd(3, '0').take(3).toInt()
     var candidate = LocalDateTime.of(
       now.year,
-      monthDay.monthValue,
-      monthDay.dayOfMonth,
-      timePart.substring(0, 2).toInt(),
-      timePart.substring(3, 5).toInt(),
-      timePart.substring(6, 8).toInt(),
-      milliseconds * 1_000_000
+      month,
+      day,
+      hour,
+      minute,
+      second,
+      millisecond * 1_000_000
     )
 
     if (candidate.isAfter(now.plusDays(1))) {
@@ -941,7 +1011,7 @@ object InAppDebuggerNativeLogCapture {
     exceptionClass: String,
     message: String
   ): String {
-    val fingerprint = listOf(threadName, exceptionClass, message).joinToString("|").hashCode()
+    val fingerprint = "$threadName|$exceptionClass|$message".hashCode()
     return "crash_${timestampMillis}_$fingerprint"
   }
 
@@ -1037,11 +1107,108 @@ object InAppDebuggerNativeLogCapture {
       // Ignore close failures during shutdown.
     }
   }
-
-  private val LOGCAT_THREADTIME_REGEX = Regex(
-    "^(\\d\\d-\\d\\d) (\\d\\d:\\d\\d:\\d\\d\\.\\d{3})\\s+(\\d+)\\s+(\\d+)\\s+([VDIWEFA])\\s+(.+?): (.*)$"
-  )
 }
+
+private fun buildLogcatDetailsPrefix(mode: String, useRoot: Boolean): String {
+  return buildString(mode.length + 32) {
+    append("source=")
+    append(if (useRoot) "root-logcat" else "logcat")
+    append('\n')
+    append("mode=")
+    append(mode)
+    append('\n')
+    append("priority=")
+  }
+}
+
+private fun buildLogcatDetails(prefix: String, priority: String, pid: Int, tid: Int): String {
+  return buildString(prefix.length + 24) {
+    append(prefix)
+    append(priority)
+    append('\n')
+    append("pid=")
+    append(pid)
+    append('\n')
+    append("tid=")
+    append(tid)
+  }
+}
+
+private fun materializeChunkLine(
+  partial: StringBuilder,
+  chunk: String,
+  start: Int,
+  end: Int
+): String? {
+  if (partial.isEmpty()) {
+    return if (chunk.isBlankRange(start, end)) {
+      null
+    } else {
+      chunk.substring(start, end)
+    }
+  }
+
+  partial.append(chunk, start, end)
+  val line = partial.toString()
+  partial.setLength(0)
+  return if (line.isBlank()) null else line
+}
+
+private fun String.skipWhitespace(startIndex: Int): Int {
+  var cursor = startIndex
+  while (cursor < length && this[cursor].isWhitespace()) {
+    cursor += 1
+  }
+  return cursor
+}
+
+private fun String.findTokenEnd(startIndex: Int): Int {
+  var cursor = startIndex
+  while (cursor < length && !this[cursor].isWhitespace()) {
+    cursor += 1
+  }
+  return cursor
+}
+
+private fun String.parsePositiveInt(startIndex: Int, endIndex: Int): Int? {
+  if (startIndex >= endIndex || endIndex > length) {
+    return null
+  }
+  var result = 0
+  for (index in startIndex until endIndex) {
+    val digit = this[index] - '0'
+    if (digit !in 0..9) {
+      return null
+    }
+    result = result * 10 + digit
+  }
+  return result
+}
+
+private fun String.parseTwoDigits(startIndex: Int): Int? = parsePositiveInt(startIndex, startIndex + 2)
+
+private fun String.parseThreeDigits(startIndex: Int): Int? = parsePositiveInt(startIndex, startIndex + 3)
+
+private fun String.hasDigitPairAt(startIndex: Int): Boolean {
+  return getOrNull(startIndex)?.isDigit() == true && getOrNull(startIndex + 1)?.isDigit() == true
+}
+
+private fun String.hasDigitTripleAt(startIndex: Int): Boolean {
+  return getOrNull(startIndex)?.isDigit() == true &&
+    getOrNull(startIndex + 1)?.isDigit() == true &&
+    getOrNull(startIndex + 2)?.isDigit() == true
+}
+
+private fun String.isBlankRange(startIndex: Int, endIndex: Int): Boolean {
+  for (index in startIndex until endIndex) {
+    if (!this[index].isWhitespace()) {
+      return false
+    }
+  }
+  return true
+}
+
+private val LOGCAT_PRIORITIES = charArrayOf('V', 'D', 'I', 'W', 'E', 'F', 'A')
 
 private data class StreamCaptureHandle(
   val streamName: String,
@@ -1060,6 +1227,7 @@ private data class LogcatReaderHandle(
   val useRoot: Boolean,
   val filterPid: Int?,
   val fallbackToAppScope: Boolean,
+  val detailsPrefix: String,
   val process: java.lang.Process,
   @Volatile var running: Boolean = true,
   @Volatile var readerThread: Thread? = null

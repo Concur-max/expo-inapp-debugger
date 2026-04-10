@@ -13,18 +13,26 @@ import java.net.Proxy
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
+import kotlin.math.roundToLong
 import okhttp3.Call
 import okhttp3.Connection
 import okhttp3.EventListener
 import okhttp3.Handshake
 import okhttp3.Headers
 import okhttp3.Interceptor
+import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okio.Buffer
+import okio.BufferedSource
+import okio.BufferedSink
+import okio.ForwardingSink
+import okio.ForwardingSource
+import okio.buffer
 
 private const val NATIVE_HTTP_ID_PREFIX = "native_http_"
 private const val NATIVE_WS_ID_PREFIX = "native_ws_"
@@ -32,6 +40,7 @@ private const val MAX_BODY_PREVIEW_BYTES = 32_000L
 private const val MAX_BINARY_PREVIEW_BYTES = 48
 private const val MAX_EVENT_REDIRECTS = 8
 private const val MAX_EVENT_LINES = 48
+private val HEX_DIGITS = "0123456789ABCDEF".toCharArray()
 
 object InAppDebuggerNativeNetworkCapture {
   private val lock = Any()
@@ -79,8 +88,13 @@ object InAppDebuggerNativeNetworkCapture {
       }
     }
 
-    val scheme = request.url.scheme.lowercase(Locale.ROOT)
-    if (scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss") {
+    val scheme = request.url.scheme
+    if (
+      !scheme.equals("http", ignoreCase = true) &&
+      !scheme.equals("https", ignoreCase = true) &&
+      !scheme.equals("ws", ignoreCase = true) &&
+      !scheme.equals("wss", ignoreCase = true)
+    ) {
       return false
     }
 
@@ -114,10 +128,38 @@ object InAppDebuggerNativeNetworkCapture {
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
 
+  internal fun captureRequestBodyPreview(
+    call: Call,
+    preview: String?,
+    observedByteCount: Long
+  ) {
+    val entry = synchronized(lock) {
+      val state = activeCalls[call] ?: return@synchronized null
+      if (observedByteCount > 0L) {
+        state.requestBodyBytesObserved = max(state.requestBodyBytesObserved ?: 0L, observedByteCount)
+      }
+
+      var changed = false
+      if (preview != null && preview != state.requestBody) {
+        state.requestBody = preview
+        state.dirty = true
+        changed = true
+      }
+
+      if (!changed || !state.startEmitted || state.state != "pending") {
+        return@synchronized null
+      }
+
+      state.toEntryLocked()
+    }
+    entry?.let(InAppDebuggerStore::upsertNetworkEntry)
+  }
+
   internal fun emitResponse(call: Call, request: Request, response: Response) {
     val entry = synchronized(lock) {
       val state = activeCalls.getOrPut(call) { createCallStateLocked(request) }
       val timestamp = System.currentTimeMillis()
+      val responseContentLength = response.body.contentLengthOrNull()
 
       appendRedirectEventsLocked(state, response, timestamp)
       state.updatedAt = timestamp
@@ -135,18 +177,59 @@ object InAppDebuggerNativeNetworkCapture {
           state.error = "WebSocket handshake failed with HTTP ${response.code}"
         }
       } else {
-        val preview = response.previewResponseBody()
         state.protocol = normalizeProtocol(response.protocol)
-        state.responseBody = preview.preview
         state.responseType = normalizedResponseType(state.responseContentType)
         state.responseSize =
-          preview.size
+          responseContentLength?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
             ?: state.responseBodyBytesObserved?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
         state.state = if (response.code >= 400) "error" else "success"
-        state.endedAt = timestamp
-        state.durationMs = max(0L, timestamp - state.startedAt)
+        if (response.body == null || responseContentLength == 0L) {
+          state.endedAt = timestamp
+          state.durationMs = max(0L, timestamp - state.startedAt)
+        }
       }
 
+      state.toEntryLocked()
+    }
+    entry?.let(InAppDebuggerStore::upsertNetworkEntry)
+  }
+
+  internal fun captureResponseBodyPreview(
+    call: Call,
+    preview: String?,
+    observedByteCount: Long,
+    declaredByteCount: Long?
+  ) {
+    val entry = synchronized(lock) {
+      val state = activeCalls[call] ?: return@synchronized null
+
+      var changed = false
+      if (observedByteCount > 0L) {
+        val nextObserved = max(state.responseBodyBytesObserved ?: 0L, observedByteCount)
+        if (nextObserved != state.responseBodyBytesObserved) {
+          state.responseBodyBytesObserved = nextObserved
+          changed = true
+        }
+      }
+
+      val normalizedSize =
+        declaredByteCount?.takeIf { it >= 0L }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
+          ?: state.responseBodyBytesObserved?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
+      if (normalizedSize != null && normalizedSize != state.responseSize) {
+        state.responseSize = normalizedSize
+        changed = true
+      }
+
+      if (preview != null && preview != state.responseBody) {
+        state.responseBody = preview
+        changed = true
+      }
+
+      if (!changed || !state.startEmitted) {
+        return@synchronized null
+      }
+
+      state.dirty = true
       state.toEntryLocked()
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
@@ -362,20 +445,23 @@ object InAppDebuggerNativeNetworkCapture {
   ) {
     if (state.events.size >= MAX_EVENT_LINES) {
       if (!state.truncatedEvents) {
-        state.events += "[${formatNativeNetworkClock(timestamp)}] ...more events omitted..."
+        state.events += NativeNetworkEvent(timestamp, "...more events omitted...")
+        state.eventsChanged = true
         state.truncatedEvents = true
         state.dirty = true
       }
       return
     }
-    state.events += "[${formatNativeNetworkClock(timestamp)}] $eventText"
+    state.events += NativeNetworkEvent(timestamp, eventText)
+    state.eventsChanged = true
     state.dirty = true
   }
 
   private fun webSocketMethod(url: String): String {
-    return when (runCatching { Request.Builder().url(url).build().url.scheme }.getOrNull()?.lowercase(Locale.ROOT)) {
-      "wss", "https" -> "WSS"
-      else -> "WS"
+    return if (url.startsWith("wss:", ignoreCase = true) || url.startsWith("https:", ignoreCase = true)) {
+      "WSS"
+    } else {
+      "WS"
     }
   }
 
@@ -421,14 +507,20 @@ internal data class NativeOkHttpCallState(
   var durationMs: Long? = null,
   var requestBodyBytesObserved: Long? = null,
   var responseBodyBytesObserved: Long? = null,
-  val events: MutableList<String> = ArrayList(16),
+  val events: MutableList<NativeNetworkEvent> = ArrayList(16),
+  var serializedEvents: String? = null,
   var startEmitted: Boolean = false,
   var dirty: Boolean = true,
+  var eventsChanged: Boolean = true,
   var redirectsRecorded: Boolean = false,
   var truncatedEvents: Boolean = false
 ) {
   fun toEntryLocked(): DebugNetworkEntry {
     dirty = false
+    if (eventsChanged) {
+      serializedEvents = serializeNativeNetworkEvents(events)
+      eventsChanged = false
+    }
     return DebugNetworkEntry(
       id = requestId,
       kind = kind,
@@ -451,30 +543,50 @@ internal data class NativeOkHttpCallState(
       error = error,
       protocol = protocol,
       requestedProtocols = requestedProtocols,
-      events = events.joinToString("\n")
+      events = serializedEvents
     )
   }
 }
 
+private data class NativeNetworkEvent(
+  val timestampMillis: Long,
+  val text: String
+)
+
+private fun serializeNativeNetworkEvents(events: List<NativeNetworkEvent>): String? {
+  if (events.isEmpty()) {
+    return null
+  }
+
+  return buildString(events.size * 40) {
+    events.forEachIndexed { index, event ->
+      if (index > 0) {
+        append('\n')
+      }
+      append('[')
+      append(formatNativeNetworkClock(event.timestampMillis))
+      append("] ")
+      append(event.text)
+    }
+  }
+}
+
+private fun List<NativeNetworkEvent>.lastTextOrEmpty(): String = lastOrNull()?.text.orEmpty()
+
 private class NativeOkHttpCaptureInterceptor : Interceptor {
   override fun intercept(chain: Interceptor.Chain): Response {
-    val request = chain.request()
-    if (!InAppDebuggerNativeNetworkCapture.shouldCapture(request)) {
-      return chain.proceed(request)
+    val originalRequest = chain.request()
+    if (!InAppDebuggerNativeNetworkCapture.shouldCapture(originalRequest)) {
+      return chain.proceed(originalRequest)
     }
 
     val call = chain.call()
+    val request = instrumentRequestBody(originalRequest, call)
     InAppDebuggerNativeNetworkCapture.ensureCallState(call, request)
-    val requestBody =
-      if (isWebSocketUpgrade(request)) {
-        null
-      } else {
-        request.body.previewRequestBody(request.header("Content-Type"))
-      }
-    InAppDebuggerNativeNetworkCapture.emitPending(call, request, requestBody)
+    InAppDebuggerNativeNetworkCapture.emitPending(call, request, null)
 
     return try {
-      val response = chain.proceed(request)
+      val response = instrumentResponseBody(chain.proceed(request), call)
       InAppDebuggerNativeNetworkCapture.emitResponse(call, request, response)
       response
     } catch (throwable: Throwable) {
@@ -483,6 +595,260 @@ private class NativeOkHttpCaptureInterceptor : Interceptor {
     }
   }
 }
+
+private fun instrumentRequestBody(request: Request, call: Call): Request {
+  val body = request.body ?: return request
+  if (body is PreviewingRequestBody || isWebSocketUpgrade(request)) {
+    return request
+  }
+
+  val contentTypeHeader = request.header("Content-Type")
+  return request.newBuilder()
+    .method(
+      request.method,
+      PreviewingRequestBody(body, contentTypeHeader) { preview ->
+        InAppDebuggerNativeNetworkCapture.captureRequestBodyPreview(
+          call = call,
+          preview = preview.preview,
+          observedByteCount = preview.observedByteCount
+        )
+      }
+    )
+    .build()
+}
+
+private class PreviewingRequestBody(
+  private val delegate: RequestBody,
+  private val contentTypeHeader: String?,
+  private val onPreviewCaptured: (RequestBodyPreviewCapture) -> Unit
+) : RequestBody() {
+  override fun contentType() = delegate.contentType()
+
+  override fun contentLength(): Long = delegate.contentLength()
+
+  override fun isDuplex(): Boolean = delegate.isDuplex()
+
+  override fun isOneShot(): Boolean = delegate.isOneShot()
+
+  override fun writeTo(sink: BufferedSink) {
+    val capture = RequestBodyPreviewRecorder(contentTypeHeader ?: delegate.contentType()?.toString())
+    val forwardingSink =
+      object : ForwardingSink(sink) {
+        override fun write(source: Buffer, byteCount: Long) {
+          capture.record(source, byteCount)
+          super.write(source, byteCount)
+        }
+      }
+    val bufferedSink = forwardingSink.buffer()
+    var published = false
+
+    fun publishCapture() {
+      if (!published) {
+        published = true
+        onPreviewCaptured(capture.build())
+      }
+    }
+
+    try {
+      delegate.writeTo(bufferedSink)
+      bufferedSink.flush()
+      publishCapture()
+    } catch (error: Throwable) {
+      publishCapture()
+      throw error
+    }
+  }
+}
+
+private class RequestBodyPreviewRecorder(
+  private val contentType: String?
+) {
+  private val previewBuffer = Buffer()
+  private var observedByteCount = 0L
+
+  fun record(source: Buffer, byteCount: Long) {
+    if (byteCount <= 0L) {
+      return
+    }
+
+    observedByteCount += byteCount
+    val remainingPreviewBytes = MAX_BODY_PREVIEW_BYTES - previewBuffer.size
+    if (remainingPreviewBytes <= 0L) {
+      return
+    }
+
+    source.copyTo(previewBuffer, 0L, minOf(byteCount, remainingPreviewBytes))
+  }
+
+  fun build(): RequestBodyPreviewCapture {
+    val bytes = previewBuffer.readByteArray()
+    return RequestBodyPreviewCapture(
+      preview =
+        decodeBodyPreview(
+          data = bytes,
+          contentType = contentType,
+          declaredLength = observedByteCount
+        ),
+      observedByteCount = observedByteCount
+    )
+  }
+}
+
+private data class RequestBodyPreviewCapture(
+  val preview: String?,
+  val observedByteCount: Long
+)
+
+private fun instrumentResponseBody(response: Response, call: Call): Response {
+  val body = response.body ?: return response
+  if (body is PreviewingResponseBody || isWebSocketUpgrade(response.request)) {
+    return response
+  }
+
+  val contentLength = body.contentLengthOrNull()
+  if (contentLength == 0L) {
+    return response
+  }
+
+  return response.newBuilder()
+    .body(
+      PreviewingResponseBody(
+        delegate = body,
+        contentTypeHeader = response.header("Content-Type")
+      ) { preview ->
+        InAppDebuggerNativeNetworkCapture.captureResponseBodyPreview(
+          call = call,
+          preview = preview.preview,
+          observedByteCount = preview.observedByteCount,
+          declaredByteCount = preview.declaredByteCount
+        )
+      }
+    )
+    .build()
+}
+
+private class PreviewingResponseBody(
+  private val delegate: ResponseBody,
+  private val contentTypeHeader: String?,
+  private val onPreviewCaptured: (ResponseBodyPreviewCapture) -> Unit
+) : ResponseBody() {
+  private val declaredContentLength = delegate.contentLengthOrNull()
+  private val recorder = ResponseBodyPreviewRecorder(
+    contentType = contentTypeHeader ?: delegate.contentType()?.toString(),
+    declaredContentLength = declaredContentLength
+  )
+  private val upstreamSource by lazy(LazyThreadSafetyMode.NONE) { delegate.source() }
+  private var wrappedSource: BufferedSource? = null
+  private var published = false
+
+  override fun contentType(): MediaType? = delegate.contentType()
+
+  override fun contentLength(): Long = declaredContentLength ?: -1L
+
+  override fun source(): BufferedSource {
+    wrappedSource?.let { return it }
+
+    val observingSource =
+      object : ForwardingSource(upstreamSource) {
+        override fun read(sink: Buffer, byteCount: Long): Long {
+          return try {
+            val read = super.read(sink, byteCount)
+            when {
+              read > 0L -> recorder.recordRead(sink, read)
+              read == -1L -> publishPreview()
+            }
+            read
+          } catch (error: Throwable) {
+            publishPreview()
+            throw error
+          }
+        }
+
+        override fun close() {
+          publishPreview()
+          super.close()
+        }
+      }
+
+    return observingSource.buffer().also {
+      wrappedSource = it
+    }
+  }
+
+  private fun publishPreview() {
+    if (published) {
+      return
+    }
+    published = true
+    recorder.captureUnreadPrefix(upstreamSource)
+    onPreviewCaptured(recorder.build())
+  }
+}
+
+private class ResponseBodyPreviewRecorder(
+  private val contentType: String?,
+  private val declaredContentLength: Long?
+) {
+  private val previewBuffer = Buffer()
+  private var observedByteCount = 0L
+
+  fun recordRead(sink: Buffer, byteCount: Long) {
+    if (byteCount <= 0L) {
+      return
+    }
+
+    observedByteCount += byteCount
+    val remainingPreviewBytes = MAX_BODY_PREVIEW_BYTES - previewBuffer.size
+    if (remainingPreviewBytes <= 0L) {
+      return
+    }
+
+    val startOffset = sink.size - byteCount
+    sink.copyTo(previewBuffer, startOffset, minOf(byteCount, remainingPreviewBytes))
+  }
+
+  fun captureUnreadPrefix(source: BufferedSource) {
+    val remainingPreviewBytes = MAX_BODY_PREVIEW_BYTES - previewBuffer.size
+    if (remainingPreviewBytes <= 0L) {
+      return
+    }
+
+    runCatching {
+      val peekSource = source.peek()
+      while (previewBuffer.size < MAX_BODY_PREVIEW_BYTES) {
+        val read = peekSource.read(previewBuffer, MAX_BODY_PREVIEW_BYTES - previewBuffer.size)
+        if (read <= 0L) {
+          break
+        }
+      }
+    }
+  }
+
+  fun build(): ResponseBodyPreviewCapture {
+    val previewByteCount = previewBuffer.size
+    val bytes = previewBuffer.readByteArray()
+    val effectiveDeclaredLength =
+      declaredContentLength?.takeIf { it >= 0L }
+        ?: max(observedByteCount, previewByteCount)
+
+    return ResponseBodyPreviewCapture(
+      preview =
+        decodeBodyPreview(
+          data = bytes,
+          contentType = contentType,
+          declaredLength = effectiveDeclaredLength
+        ),
+      observedByteCount = observedByteCount,
+      declaredByteCount = declaredContentLength?.takeIf { it >= 0L } ?: effectiveDeclaredLength
+    )
+  }
+}
+
+private data class ResponseBodyPreviewCapture(
+  val preview: String?,
+  val observedByteCount: Long,
+  val declaredByteCount: Long?
+)
 
 private class InstrumentedEventListenerFactory(
   private val delegate: EventListener.Factory?
@@ -676,7 +1042,7 @@ private class NativeOkHttpEventListener(
   override fun proxySelectEnd(call: Call, url: okhttp3.HttpUrl, proxies: List<Proxy>) {
     InAppDebuggerNativeNetworkCapture.appendEvent(
       call,
-      eventText = "proxy resolved ${proxies.joinToString { it.type().name }}"
+      eventText = "proxy resolved ${formatProxyTypes(proxies)}"
     )
   }
 
@@ -843,8 +1209,9 @@ private class NativeOkHttpEventListener(
       error = error ?: "Canceled"
       endedAt = endedAt ?: timestamp
       durationMs = durationMs ?: max(0L, timestamp - startedAt)
-      if (!events.lastOrNull().orEmpty().contains("canceled")) {
-        events += "[${formatNativeNetworkClock(timestamp)}] canceled"
+      if (!events.lastTextOrEmpty().contains("canceled")) {
+        events += NativeNetworkEvent(timestamp, "canceled")
+        eventsChanged = true
         dirty = true
       }
     }
@@ -860,8 +1227,9 @@ private class NativeOkHttpEventListener(
       if (kind == "http" && state == "pending") {
         state = if ((status ?: 0) >= 400) "error" else "success"
       }
-      if (events.lastOrNull().orEmpty().contains("call end").not()) {
-        events += "[${formatNativeNetworkClock(timestamp)}] call end"
+      if (events.lastTextOrEmpty().contains("call end").not()) {
+        events += NativeNetworkEvent(timestamp, "call end")
+        eventsChanged = true
         dirty = true
       }
     }
@@ -874,22 +1242,18 @@ private class NativeOkHttpEventListener(
       error = error ?: ioe.message ?: ioe.javaClass.simpleName
       endedAt = endedAt ?: timestamp
       durationMs = durationMs ?: max(0L, timestamp - startedAt)
-      if (events.lastOrNull().orEmpty().contains("call failed").not()) {
-        events += "[${formatNativeNetworkClock(timestamp)}] call failed ${error ?: "Request failed"}"
+      if (events.lastTextOrEmpty().contains("call failed").not()) {
+        events += NativeNetworkEvent(timestamp, "call failed ${error ?: "Request failed"}")
+        eventsChanged = true
         dirty = true
       }
     }
   }
 }
 
-private data class ResponseBodyPreview(
-  val preview: String?,
-  val size: Int?
-)
-
 private fun isWebSocketUpgrade(request: Request): Boolean {
-  val upgrade = request.header("Upgrade")?.lowercase(Locale.ROOT)
-  return upgrade == "websocket" || request.header("Sec-WebSocket-Key") != null
+  return request.header("Upgrade")?.equals("websocket", ignoreCase = true) == true ||
+    request.header("Sec-WebSocket-Key") != null
 }
 
 private inline fun <reified T> Class<*>.readObjectField(name: String, receiver: Any): T? {
@@ -916,75 +1280,22 @@ private fun Headers.toDebugHeaderMap(): Map<String, String> {
   if (size == 0) {
     return emptyMap()
   }
-  return names()
-    .sortedBy { it.lowercase(Locale.ROOT) }
-    .associateWith { name -> values(name).joinToString(", ") }
-}
-
-private fun RequestBody?.previewRequestBody(contentTypeHeader: String?): String? {
-  val body = this ?: return null
-  val contentLength = runCatching { body.contentLength() }.getOrDefault(-1L)
-  val contentType = contentTypeHeader ?: body.contentType()?.toString()
-
-  if (body.isDuplex()) {
-    return "[duplex body]"
-  }
-  if (body.isOneShot()) {
-    return omittedBodyPreview("one-shot body", contentType, contentLength)
-  }
-  if (contentLength < 0L) {
-    return omittedBodyPreview("streamed body", contentType, contentLength)
-  }
-  if (contentLength > MAX_BODY_PREVIEW_BYTES) {
-    return omittedBodyPreview("body omitted", contentType, contentLength)
+  if (size == 1) {
+    return mapOf(name(0) to value(0))
   }
 
-  return runCatching {
-    val buffer = Buffer()
-    body.writeTo(buffer)
-    decodeBodyPreview(
-      data = buffer.readByteArray(),
-      contentType = contentType,
-      declaredLength = contentLength
-    )
-  }.getOrElse { error ->
-    "[request body unavailable: ${error.message ?: error.javaClass.simpleName}]"
+  val result = LinkedHashMap<String, String>(size)
+  for (index in 0 until size) {
+    val name = name(index)
+    val existing = result[name]
+    result[name] =
+      if (existing == null) {
+        value(index)
+      } else {
+        "$existing, ${value(index)}"
+      }
   }
-}
-
-private fun Response.previewResponseBody(): ResponseBodyPreview {
-  val body = body ?: return ResponseBodyPreview(preview = null, size = null)
-  val contentLength = runCatching { body.contentLength() }.getOrDefault(-1L)
-  val contentType = header("Content-Type") ?: body.contentType()?.toString()
-
-  return runCatching {
-    val peeked = peekBody(MAX_BODY_PREVIEW_BYTES)
-    val bytes = peeked.bytes()
-    val normalizedSize = contentLength.takeIf { it >= 0L }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
-    ResponseBodyPreview(
-      preview = decodeBodyPreview(bytes, contentType, contentLength),
-      size = normalizedSize ?: bytes.size
-    )
-  }.getOrElse { error ->
-    ResponseBodyPreview(
-      preview = "[response body unavailable: ${error.message ?: error.javaClass.simpleName}]",
-      size = contentLength.takeIf { it >= 0L }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
-    )
-  }
-}
-
-private fun omittedBodyPreview(label: String, contentType: String?, contentLength: Long): String {
-  val suffix = buildList {
-    contentType?.takeIf { it.isNotBlank() }?.let { add("content-type=$it") }
-    if (contentLength >= 0L) {
-      add("size=${formatPreviewByteCount(contentLength)}")
-    }
-  }.joinToString(", ")
-  return if (suffix.isBlank()) {
-    "[$label]"
-  } else {
-    "[$label: $suffix]"
-  }
+  return result
 }
 
 private fun buildRedirectChain(response: Response): List<Response> {
@@ -1012,8 +1323,7 @@ private fun decodeBodyPreview(
     return binaryPreview(data, declaredLength)
   }
 
-  val buffer = Buffer().write(data)
-  if (!buffer.isProbablyUtf8()) {
+  if (!data.isProbablyUtf8()) {
     return binaryPreview(data, declaredLength)
   }
 
@@ -1031,9 +1341,16 @@ private fun decodeBodyPreview(
 }
 
 private fun binaryPreview(data: ByteArray, declaredLength: Long): String {
-  val previewBytes = data
-    .take(MAX_BINARY_PREVIEW_BYTES)
-    .joinToString(" ") { byte -> "%02X".format(Locale.ROOT, byte.toInt() and 0xFF) }
+  val previewLength = minOf(data.size, MAX_BINARY_PREVIEW_BYTES)
+  val previewBytes = StringBuilder(previewLength * 3)
+  for (index in 0 until previewLength) {
+    if (index > 0) {
+      previewBytes.append(' ')
+    }
+    val value = data[index].toInt() and 0xFF
+    previewBytes.append(HEX_DIGITS[value ushr 4])
+    previewBytes.append(HEX_DIGITS[value and 0x0F])
+  }
   val truncatedSuffix =
     if (declaredLength > data.size.toLong()) {
       " ..."
@@ -1090,41 +1407,129 @@ private fun normalizeProtocol(protocol: Protocol?): String? {
 }
 
 private fun formatPreviewByteCount(byteCount: Long): String {
-  if (byteCount < 1024L) {
-    return "${max(0L, byteCount)} B"
+  val normalized = max(0L, byteCount)
+  if (normalized < 1024L) {
+    return "$normalized B"
   }
-  val kilobytes = byteCount / 1024.0
-  if (kilobytes < 1024.0) {
-    return String.format(Locale.ROOT, "%.1f KB", kilobytes)
+  val kilobyteTenths = ((normalized * 10.0) / 1024.0).roundToLong()
+  if (kilobyteTenths < 10_240L) {
+    return formatTenths(kilobyteTenths, "KB")
   }
-  val megabytes = kilobytes / 1024.0
-  return String.format(Locale.ROOT, "%.1f MB", megabytes)
+  val megabyteTenths = ((normalized * 10.0) / (1024.0 * 1024.0)).roundToLong()
+  return formatTenths(megabyteTenths, "MB")
 }
 
 private fun formatNativeNetworkClock(timestampMillis: Long): String {
-  return createNativeDebugLogEntry(
-    type = "debug",
-    message = "",
-    timestampMillis = timestampMillis
-  ).timestamp
+  return formatNativeLogClock(timestampMillis)
 }
 
-private fun Buffer.isProbablyUtf8(): Boolean {
-  return try {
-    val prefix = Buffer()
-    val byteCount = minOf(size, 64L)
-    copyTo(prefix, 0, byteCount)
-    repeat(16) {
-      if (prefix.exhausted()) {
-        return true
+private fun ResponseBody?.contentLengthOrNull(): Long? {
+  val body = this ?: return null
+  return runCatching { body.contentLength() }.getOrDefault(-1L).takeIf { it >= 0L }
+}
+
+private fun ByteArray.isProbablyUtf8(): Boolean {
+  val limit = minOf(size, 64)
+  var index = 0
+  var inspectedCodePoints = 0
+
+  while (index < limit && inspectedCodePoints < 16) {
+    val firstByte = this[index].toInt() and 0xFF
+    val codePoint: Int
+    val byteCount: Int
+
+    when {
+      firstByte and 0x80 == 0 -> {
+        codePoint = firstByte
+        byteCount = 1
       }
-      val codePoint = prefix.readUtf8CodePoint()
-      if (Character.isISOControl(codePoint) && !Character.isWhitespace(codePoint)) {
-        return false
+      firstByte and 0xE0 == 0xC0 -> {
+        byteCount = 2
+        if (index + byteCount > limit) {
+          return true
+        }
+        val secondByte = this[index + 1].toInt() and 0xFF
+        if (secondByte and 0xC0 != 0x80) {
+          return false
+        }
+        codePoint = ((firstByte and 0x1F) shl 6) or (secondByte and 0x3F)
+        if (codePoint < 0x80) {
+          return false
+        }
       }
+      firstByte and 0xF0 == 0xE0 -> {
+        byteCount = 3
+        if (index + byteCount > limit) {
+          return true
+        }
+        val secondByte = this[index + 1].toInt() and 0xFF
+        val thirdByte = this[index + 2].toInt() and 0xFF
+        if (secondByte and 0xC0 != 0x80 || thirdByte and 0xC0 != 0x80) {
+          return false
+        }
+        codePoint =
+          ((firstByte and 0x0F) shl 12) or
+            ((secondByte and 0x3F) shl 6) or
+            (thirdByte and 0x3F)
+        if (codePoint < 0x800) {
+          return false
+        }
+      }
+      firstByte and 0xF8 == 0xF0 -> {
+        byteCount = 4
+        if (index + byteCount > limit) {
+          return true
+        }
+        val secondByte = this[index + 1].toInt() and 0xFF
+        val thirdByte = this[index + 2].toInt() and 0xFF
+        val fourthByte = this[index + 3].toInt() and 0xFF
+        if (
+          secondByte and 0xC0 != 0x80 ||
+            thirdByte and 0xC0 != 0x80 ||
+            fourthByte and 0xC0 != 0x80
+        ) {
+          return false
+        }
+        codePoint =
+          ((firstByte and 0x07) shl 18) or
+            ((secondByte and 0x3F) shl 12) or
+            ((thirdByte and 0x3F) shl 6) or
+            (fourthByte and 0x3F)
+        if (codePoint !in 0x10000..0x10FFFF) {
+          return false
+        }
+      }
+      else -> return false
     }
-    true
-  } catch (_: Throwable) {
-    false
+
+    if (Character.isISOControl(codePoint) && !Character.isWhitespace(codePoint)) {
+      return false
+    }
+
+    index += byteCount
+    inspectedCodePoints += 1
+  }
+
+  return true
+}
+
+private fun formatTenths(valueTenths: Long, unit: String): String {
+  val whole = valueTenths / 10
+  val fraction = valueTenths % 10
+  return "$whole.$fraction $unit"
+}
+
+private fun formatProxyTypes(proxies: List<Proxy>): String {
+  if (proxies.isEmpty()) {
+    return "none"
+  }
+
+  return buildString(proxies.size * 8) {
+    proxies.forEachIndexed { index, proxy ->
+      if (index > 0) {
+        append(", ")
+      }
+      append(proxy.type().name)
+    }
   }
 }

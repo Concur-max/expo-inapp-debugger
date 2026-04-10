@@ -48,7 +48,7 @@ class InAppDebuggerModule : Module() {
       InAppDebuggerNativeNetworkCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
     }
 
-    AsyncFunction("ingestBatch") { batch: List<Map<String, Any?>> ->
+    AsyncFunction("ingestBatch") { batch: Map<String, Any?> ->
       InAppDebuggerStore.ingestBatch(batch)
     }
 

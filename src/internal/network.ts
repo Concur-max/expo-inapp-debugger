@@ -53,7 +53,7 @@ function safeStringify(value: unknown) {
     return '';
   }
   try {
-    return JSON.stringify(value, null, 2);
+    return JSON.stringify(value);
   } catch {
     return String(value);
   }
@@ -185,10 +185,9 @@ export class NetworkCollector {
       const entry = this.getXHRRequest(xhr);
       if (!entry) return;
       const timestamp = now();
-      entry.requestHeaders = {
-        ...(entry.requestHeaders ?? {}),
-        [header]: value,
-      };
+      const requestHeaders = (entry.requestHeaders ?? {}) as HeaderMap;
+      requestHeaders[header] = value;
+      entry.requestHeaders = requestHeaders;
       entry.updatedAt = timestamp;
       this.emit(entry);
     });
@@ -347,9 +346,11 @@ export class NetworkCollector {
     messagesList.push(message);
     if (messagesList.length > 100) {
       messagesList.splice(0, messagesList.length - 100);
+      entry.messages = messagesList.join('\n');
+    } else {
+      entry.messages = entry.messages ? `${entry.messages}\n${message}` : message;
     }
     entry.messagesList = messagesList;
-    entry.messages = entry.messagesList.join('\n');
     entry.updatedAt = now();
     this.emit(entry);
   }
@@ -367,11 +368,10 @@ export class NetworkCollector {
   }
 
   private emit(entry: MutableNetworkEntry) {
-    this.trim();
-    const { messagesList: _messagesList, ...safeEntry } = entry;
-    this.options.onEntry({
-      ...safeEntry,
-    });
+    if (this.requests.size > this.options.maxRequests) {
+      this.trim();
+    }
+    this.options.onEntry(entry);
   }
 
   private trim() {

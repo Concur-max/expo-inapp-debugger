@@ -72,6 +72,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -308,6 +309,14 @@ private object PanelPreferences {
     return origins.size < allOrigins.size || kinds.size < allNetworkKinds.size
   }
 
+  fun isAllLogFiltersSelected(levels: Set<String>, origins: Set<String>): Boolean {
+    return levels.size == allLevels.size && origins.size == allOrigins.size
+  }
+
+  fun isAllNetworkFiltersSelected(origins: Set<String>, kinds: Set<String>): Boolean {
+    return origins.size == allOrigins.size && kinds.size == allNetworkKinds.size
+  }
+
   private fun loadSet(
     context: Context,
     key: String,
@@ -462,13 +471,22 @@ private fun AppInfoTab(
     InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
   }
 
-  val sections = remember(runtimeInfo, config, errorsWindowState.version, locale) {
-    buildDebuggerInfoSections(
-      runtimeInfo = runtimeInfo,
-      config = config,
-      appErrors = errorsWindowState.items,
-      locale = locale
-    )
+  val sections by produceState(
+    initialValue = emptyList<DetailItem>(),
+    runtimeInfo,
+    config,
+    errorsWindowState.version,
+    locale
+  ) {
+    value =
+      withContext(Dispatchers.Default) {
+        buildDebuggerInfoSections(
+          runtimeInfo = runtimeInfo,
+          config = config,
+          appErrors = errorsWindowState.items,
+          locale = locale
+        )
+      }
   }
 
   LazyColumn(
@@ -594,15 +612,25 @@ private fun LogsTab(
     PanelPreferences.hasActiveLogFilters(selectedLevels, selectedOrigins)
   }
 
-  val visibleLogs =
-    remember(logsWindowState.version, searchQuery, sortOrder, selectedLevels, selectedOrigins) {
-    filterLogs(
-      source = logsWindowState.items,
-      query = searchQuery,
-      sortOrder = sortOrder,
-      selectedLevels = selectedLevels,
-      selectedOrigins = selectedOrigins
-    )
+  val visibleLogs by produceState(
+    initialValue = emptyList<DebugLogEntry>(),
+    logsWindowState.version,
+    searchQuery,
+    sortOrder,
+    selectedLevels,
+    selectedOrigins
+  ) {
+    value =
+      withContext(Dispatchers.Default) {
+        filterLogs(
+          source = logsWindowState.items,
+          query = searchQuery,
+          sortOrder = sortOrder,
+          selectedLevels = selectedLevels,
+          selectedOrigins = selectedOrigins,
+          allFiltersSelected = PanelPreferences.isAllLogFiltersSelected(selectedLevels, selectedOrigins)
+        )
+      }
   }
 
   Column(modifier = Modifier.fillMaxSize()) {
@@ -707,7 +735,8 @@ private fun NetworkTab(
     PanelPreferences.hasActiveNetworkFilters(selectedOrigins, selectedKinds)
   }
 
-  val visibleEntries = remember(
+  val visibleEntries by produceState(
+    initialValue = emptyList<DebugNetworkEntry>(),
     networkWindowState.version,
     searchQuery,
     sortOrder,
@@ -715,14 +744,18 @@ private fun NetworkTab(
     selectedKinds,
     locale
   ) {
-    filterNetwork(
-      source = networkWindowState.items,
-      query = searchQuery,
-      sortOrder = sortOrder,
-      selectedOrigins = selectedOrigins,
-      selectedKinds = selectedKinds,
-      locale = locale
-    )
+    value =
+      withContext(Dispatchers.Default) {
+        filterNetwork(
+          source = networkWindowState.items,
+          query = searchQuery,
+          sortOrder = sortOrder,
+          selectedOrigins = selectedOrigins,
+          selectedKinds = selectedKinds,
+          locale = locale,
+          allFiltersSelected = PanelPreferences.isAllNetworkFiltersSelected(selectedOrigins, selectedKinds)
+        )
+      }
   }
 
   Column(modifier = Modifier.fillMaxSize()) {
@@ -832,7 +865,7 @@ private fun NetworkDetailScreen(
   val networkWindowState by InAppDebuggerStore.networkWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
   val entry = remember(entryId, networkWindowState.version) {
-    networkWindowState.items.firstOrNull { it.id == entryId } ?: InAppDebuggerStore.networkEntry(entryId)
+    InAppDebuggerStore.networkEntry(entryId)
   }
 
   LaunchedEffect(entryId, networkWindowState.version) {
@@ -842,12 +875,20 @@ private fun NetworkDetailScreen(
   }
 
   val resolvedEntry = entry ?: return
-  val sections = remember(resolvedEntry, strings, locale) {
-    if (isWebSocketKind(resolvedEntry.kind)) {
-      buildWebSocketSections(resolvedEntry, strings, locale, context)
-    } else {
-      buildHttpSections(resolvedEntry, strings, locale, context)
-    }
+  val sections by produceState(
+    initialValue = emptyList<DetailItem>(),
+    resolvedEntry,
+    strings,
+    locale
+  ) {
+    value =
+      withContext(Dispatchers.Default) {
+        if (isWebSocketKind(resolvedEntry.kind)) {
+          buildWebSocketSections(resolvedEntry, strings, locale, context)
+        } else {
+          buildHttpSections(resolvedEntry, strings, locale, context)
+        }
+      }
   }
 
   Scaffold(
@@ -1067,11 +1108,10 @@ private fun LogCard(
   var detailsOverflow by remember(log.id) { mutableStateOf(false) }
   var messageOverflow by remember(log.id) { mutableStateOf(false) }
   val context = LocalContext.current
-  val tone = toneForLogLevel(log.type)
-  val details = listOfNotNull(
-    log.context?.takeIf { it.isNotBlank() },
-    log.details?.takeIf { it.isNotBlank() }
-  ).joinToString("\n")
+  val tone = remember(log.type) { toneForLogLevel(log.type) }
+  val details = remember(log.context, log.details) {
+    combinedLogCardDetails(log.context, log.details)
+  }
   val canExpand = expanded || detailsOverflow || messageOverflow
 
   Card(
@@ -1184,8 +1224,19 @@ private fun NetworkCard(
   strings: Map<String, String>,
   onClick: () -> Unit
 ) {
-  val tone = toneForNetwork(entry)
-  val trailingBadgeText = networkTrailingBadgeTitle(entry)
+  val durationLabel = strings["duration"] ?: "耗时"
+  val tone = remember(entry.state, entry.status) { toneForNetwork(entry) }
+  val trailingBadgeText = remember(entry.kind, entry.status) { networkTrailingBadgeTitle(entry) }
+  val durationSummary = remember(
+    entry.kind,
+    entry.durationMs,
+    entry.messageCountIn,
+    entry.messageCountOut,
+    entry.messages,
+    durationLabel
+  ) {
+    buildNetworkDurationSummary(entry, durationLabel)
+  }
   Card(
     modifier = Modifier.fillMaxWidth(),
     colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
@@ -1241,7 +1292,7 @@ private fun NetworkCard(
         )
 
         Text(
-          text = buildNetworkDurationSummary(entry, strings),
+          text = durationSummary,
           style = MaterialTheme.typography.labelMedium,
           color = PanelColors.MutedText,
           modifier = Modifier.padding(top = 6.dp)
@@ -1249,6 +1300,21 @@ private fun NetworkCard(
       }
     }
   }
+}
+
+private fun combinedLogCardDetails(context: String?, details: String?): String {
+  val hasContext = !context.isNullOrBlank()
+  val hasDetails = !details.isNullOrBlank()
+  if (!hasContext && !hasDetails) {
+    return ""
+  }
+  if (!hasContext) {
+    return details.orEmpty()
+  }
+  if (!hasDetails) {
+    return context.orEmpty()
+  }
+  return context + "\n" + details
 }
 
 @Composable
@@ -1359,24 +1425,43 @@ private fun filterLogs(
   query: String,
   sortOrder: SortOrder,
   selectedLevels: Set<String>,
-  selectedOrigins: Set<String>
+  selectedOrigins: Set<String>,
+  allFiltersSelected: Boolean = false
 ): List<DebugLogEntry> {
   val trimmedQuery = query.trim()
-  return source
-    .asSequence()
-    .filter { entry -> entry.type in selectedLevels && entry.origin in selectedOrigins }
-    .filter { entry ->
-      trimmedQuery.isEmpty() ||
-        entry.message.contains(trimmedQuery, ignoreCase = true) ||
-        entry.type.contains(trimmedQuery, ignoreCase = true) ||
-        entry.origin.contains(trimmedQuery, ignoreCase = true) ||
-        (entry.context?.contains(trimmedQuery, ignoreCase = true) == true) ||
-        (entry.details?.contains(trimmedQuery, ignoreCase = true) == true)
+  if (source.isEmpty() || selectedLevels.isEmpty() || selectedOrigins.isEmpty()) {
+    return emptyList()
+  }
+
+  if (trimmedQuery.isEmpty() && allFiltersSelected) {
+    return if (sortOrder == SortOrder.Asc) source else copyReversed(source)
+  }
+
+  val result = ArrayList<DebugLogEntry>(source.size)
+  if (sortOrder == SortOrder.Desc) {
+    for (index in source.indices.reversed()) {
+      val entry = source[index]
+      if (entry.type !in selectedLevels || entry.origin !in selectedOrigins) {
+        continue
+      }
+      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery)) {
+        continue
+      }
+      result.add(entry)
     }
-    .sortedWith { lhs, rhs ->
-      compareLogs(lhs, rhs, sortOrder)
+  } else {
+    for (entry in source) {
+      if (entry.type !in selectedLevels || entry.origin !in selectedOrigins) {
+        continue
+      }
+      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery)) {
+        continue
+      }
+      result.add(entry)
     }
-    .toList()
+  }
+
+  return result
 }
 
 private fun filterNetwork(
@@ -1385,61 +1470,73 @@ private fun filterNetwork(
   sortOrder: SortOrder,
   selectedOrigins: Set<String>,
   selectedKinds: Set<String>,
-  locale: String
+  locale: String,
+  allFiltersSelected: Boolean = false
 ): List<DebugNetworkEntry> {
   val trimmedQuery = query.trim()
-  return source
-    .asSequence()
-    .filter { entry ->
-      entry.origin in selectedOrigins && normalizedNetworkKind(entry.kind).rawValue in selectedKinds
+  if (source.isEmpty() || selectedOrigins.isEmpty() || selectedKinds.isEmpty()) {
+    return emptyList()
+  }
+
+  if (trimmedQuery.isEmpty() && allFiltersSelected) {
+    return if (sortOrder == SortOrder.Asc) source else copyReversed(source)
+  }
+
+  val result = ArrayList<DebugNetworkEntry>(source.size)
+  if (sortOrder == SortOrder.Desc) {
+    for (index in source.indices.reversed()) {
+      val entry = source[index]
+      val kind = normalizedNetworkKind(entry.kind)
+      if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
+        continue
+      }
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind)) {
+        continue
+      }
+      result.add(entry)
     }
-    .filter { entry ->
-      val kindTitle = localizedNetworkKindTitle(entry.kind, locale)
-      trimmedQuery.isEmpty() ||
-        entry.url.contains(trimmedQuery, ignoreCase = true) ||
-        entry.origin.contains(trimmedQuery, ignoreCase = true) ||
-        entry.kind.contains(trimmedQuery, ignoreCase = true) ||
-        kindTitle.contains(trimmedQuery, ignoreCase = true) ||
-        entry.method.contains(trimmedQuery, ignoreCase = true) ||
-        entry.state.contains(trimmedQuery, ignoreCase = true) ||
-        (entry.protocol?.contains(trimmedQuery, ignoreCase = true) == true) ||
-        (entry.requestedProtocols?.contains(trimmedQuery, ignoreCase = true) == true) ||
-        (entry.closeReason?.contains(trimmedQuery, ignoreCase = true) == true) ||
-        (entry.error?.contains(trimmedQuery, ignoreCase = true) == true) ||
-        (entry.events?.contains(trimmedQuery, ignoreCase = true) == true) ||
-        (entry.messages?.contains(trimmedQuery, ignoreCase = true) == true)
+  } else {
+    for (entry in source) {
+      val kind = normalizedNetworkKind(entry.kind)
+      if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
+        continue
+      }
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind)) {
+        continue
+      }
+      result.add(entry)
     }
-    .sortedWith { lhs, rhs ->
-      compareNetwork(lhs, rhs, sortOrder)
-    }
-    .toList()
+  }
+  return result
 }
 
-private fun compareLogs(lhs: DebugLogEntry, rhs: DebugLogEntry, sortOrder: SortOrder): Int {
-  val lhsKey = lhs.fullTimestamp.ifBlank { lhs.timestamp }
-  val rhsKey = rhs.fullTimestamp.ifBlank { rhs.timestamp }
-  if (lhsKey != rhsKey) {
-    return if (sortOrder == SortOrder.Asc) lhsKey.compareTo(rhsKey) else rhsKey.compareTo(lhsKey)
-  }
-  return if (sortOrder == SortOrder.Asc) lhs.id.compareTo(rhs.id) else rhs.id.compareTo(lhs.id)
+private fun matchesLogQuery(entry: DebugLogEntry, query: String): Boolean {
+  return entry.message.contains(query, ignoreCase = true) ||
+    entry.type.contains(query, ignoreCase = true) ||
+    entry.origin.contains(query, ignoreCase = true) ||
+    (entry.context?.contains(query, ignoreCase = true) == true) ||
+    (entry.details?.contains(query, ignoreCase = true) == true)
 }
 
-private fun compareNetwork(lhs: DebugNetworkEntry, rhs: DebugNetworkEntry, sortOrder: SortOrder): Int {
-  if (lhs.updatedAt != rhs.updatedAt) {
-    return if (sortOrder == SortOrder.Asc) {
-      lhs.updatedAt.compareTo(rhs.updatedAt)
-    } else {
-      rhs.updatedAt.compareTo(lhs.updatedAt)
-    }
-  }
-  if (lhs.startedAt != rhs.startedAt) {
-    return if (sortOrder == SortOrder.Asc) {
-      lhs.startedAt.compareTo(rhs.startedAt)
-    } else {
-      rhs.startedAt.compareTo(lhs.startedAt)
-    }
-  }
-  return if (sortOrder == SortOrder.Asc) lhs.id.compareTo(rhs.id) else rhs.id.compareTo(lhs.id)
+private fun matchesNetworkQuery(
+  entry: DebugNetworkEntry,
+  query: String,
+  locale: String,
+  kind: NetworkKindFilter = normalizedNetworkKind(entry.kind)
+): Boolean {
+  val kindTitle = localizedNetworkKindFilterTitle(kind, locale)
+  return entry.url.contains(query, ignoreCase = true) ||
+    entry.origin.contains(query, ignoreCase = true) ||
+    entry.kind.contains(query, ignoreCase = true) ||
+    kindTitle.contains(query, ignoreCase = true) ||
+    entry.method.contains(query, ignoreCase = true) ||
+    entry.state.contains(query, ignoreCase = true) ||
+    (entry.protocol?.contains(query, ignoreCase = true) == true) ||
+    (entry.requestedProtocols?.contains(query, ignoreCase = true) == true) ||
+    (entry.closeReason?.contains(query, ignoreCase = true) == true) ||
+    (entry.error?.contains(query, ignoreCase = true) == true) ||
+    (entry.events?.contains(query, ignoreCase = true) == true) ||
+    (entry.messages?.contains(query, ignoreCase = true) == true)
 }
 
 private fun buildHttpSections(
@@ -1618,9 +1715,13 @@ private fun buildFatalErrorSections(
   appErrors: List<DebugErrorEntry>,
   locale: String
 ): List<DetailItem> {
-  val fatalErrors = appErrors.filter { error ->
-    error.source in setOf("global", "react") || error.message.contains("[FATAL]")
-  }.sortedByDescending(DebugErrorEntry::fullTimestamp)
+  val fatalErrors = ArrayList<DebugErrorEntry>(appErrors.size)
+  for (index in appErrors.indices.reversed()) {
+    val error = appErrors[index]
+    if (error.source in setOf("global", "react") || error.message.contains("[FATAL]")) {
+      fatalErrors.add(error)
+    }
+  }
 
   if (fatalErrors.isEmpty()) {
     return listOf(
@@ -1659,7 +1760,7 @@ private fun buildCrashRecordSections(
   runtimeInfo: DebugRuntimeInfo,
   locale: String
 ): List<DetailItem> {
-  val records = runtimeInfo.crashRecords.sortedByDescending(DebugCrashRecord::timestampMillis)
+  val records = runtimeInfo.crashRecords
   if (records.isEmpty()) {
     return listOf(
       DetailItem(
@@ -2788,9 +2889,16 @@ private fun headerText(headers: Map<String, String>): String {
   if (headers.isEmpty()) {
     return "-"
   }
-  return headers.entries
-    .sortedBy { it.key.lowercase(Locale.ROOT) }
-    .joinToString("\n") { "${it.key}: ${it.value}" }
+  return buildString(headers.size * 32) {
+    headers.entries.forEachIndexed { index, entry ->
+      if (index > 0) {
+        append('\n')
+      }
+      append(entry.key)
+      append(": ")
+      append(entry.value)
+    }
+  }
 }
 
 private fun formattedMessagesText(raw: String?, fallback: String): String {
@@ -2804,27 +2912,29 @@ private fun formattedStructuredContent(raw: String?, fallback: String): String {
 
 private fun formattedWebSocketMessagesText(raw: String?, fallback: String): String {
   val source = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return fallback
-  val renderedBlocks = mutableListOf<String>()
+  val rendered = StringBuilder(source.length + 32)
   var currentPrefix: String? = null
-  val currentPayloadLines = mutableListOf<String>()
+  val currentPayload = StringBuilder()
 
   fun flushCurrentBlock() {
-    if (currentPrefix == null && currentPayloadLines.isEmpty()) {
+    if (currentPrefix == null && currentPayload.isEmpty()) {
       return
     }
 
-    val payload = currentPayloadLines.joinToString("\n").trimEnd()
-    val renderedBlock =
-      currentPrefix?.let { prefix ->
-        formatDirectionalMessageBlock(prefix, payload)
-      } ?: prettyJsonOrOriginal(payload)
+    val payload = currentPayload.toString().trimEnd()
+    val renderedBlock = currentPrefix?.let { prefix ->
+      formatDirectionalMessageBlock(prefix, payload)
+    } ?: prettyJsonOrOriginal(payload)
 
     if (renderedBlock.isNotBlank()) {
-      renderedBlocks += renderedBlock
+      if (rendered.isNotEmpty()) {
+        rendered.append('\n')
+      }
+      rendered.append(renderedBlock)
     }
 
     currentPrefix = null
-    currentPayloadLines.clear()
+    currentPayload.setLength(0)
   }
 
   source.lineSequence().forEach { line ->
@@ -2832,14 +2942,17 @@ private fun formattedWebSocketMessagesText(raw: String?, fallback: String): Stri
     if (prefix != null) {
       flushCurrentBlock()
       currentPrefix = prefix
-      currentPayloadLines += extractDirectionalMessagePayload(line, prefix)
+      currentPayload.append(extractDirectionalMessagePayload(line, prefix))
     } else {
-      currentPayloadLines += line
+      if (currentPayload.isNotEmpty()) {
+        currentPayload.append('\n')
+      }
+      currentPayload.append(line)
     }
   }
 
   flushCurrentBlock()
-  return renderedBlocks.joinToString("\n")
+  return rendered.toString()
 }
 
 private fun formatDirectionalMessageBlock(prefix: String, payload: String): String {
@@ -2848,16 +2961,24 @@ private fun formatDirectionalMessageBlock(prefix: String, payload: String): Stri
     return prefix
   }
 
-  val lines = formattedPayload.lines()
   val continuationIndent = " ".repeat(prefix.length + 1)
   return buildString {
     append(prefix)
     append(' ')
-    append(lines.first())
-    lines.drop(1).forEach { line ->
-      append('\n')
-      append(continuationIndent)
-      append(line)
+    var startIndex = 0
+    var firstLine = true
+    while (startIndex <= formattedPayload.length) {
+      val lineEnd = formattedPayload.indexOf('\n', startIndex).takeIf { it >= 0 } ?: formattedPayload.length
+      if (!firstLine) {
+        append('\n')
+        append(continuationIndent)
+      }
+      append(formattedPayload, startIndex, lineEnd)
+      if (lineEnd == formattedPayload.length) {
+        break
+      }
+      startIndex = lineEnd + 1
+      firstLine = false
     }
   }
 }
@@ -2912,9 +3033,9 @@ private fun countMessages(messages: String?, directionPrefix: String): Int {
 
 private fun buildNetworkDurationSummary(
   entry: DebugNetworkEntry,
-  strings: Map<String, String>
+  durationLabel: String
 ): String {
-  val durationText = "${strings["duration"] ?: "耗时"} ${entry.durationMs?.let { "${it}ms" } ?: "-"}"
+  val durationText = "$durationLabel ${entry.durationMs?.let { "${it}ms" } ?: "-"}"
   if (!isWebSocketKind(entry.kind)) {
     return durationText
   }
@@ -2970,6 +3091,18 @@ private fun Set<String>.toggle(value: String): Set<String> {
     next.add(value)
   }
   return next
+}
+
+private fun <T> copyReversed(source: List<T>): List<T> {
+  if (source.isEmpty()) {
+    return emptyList()
+  }
+
+  val result = ArrayList<T>(source.size)
+  for (index in source.indices.reversed()) {
+    result.add(source[index])
+  }
+  return result
 }
 
 private fun copyToClipboard(text: String, successMessage: String, context: Context?) {

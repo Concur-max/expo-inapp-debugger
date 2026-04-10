@@ -1,4 +1,10 @@
-import type { NativeConfig, NativeBatchEntry } from '../InAppDebugModule';
+import type {
+  NativeBatchPayload,
+  NativeConfig,
+  NativeErrorWireEntry,
+  NativeLogWireEntry,
+  NativeNetworkWireEntry,
+} from '../InAppDebugModule';
 import type {
   AndroidLogcatBuffer,
   AndroidNativeLogsConfig,
@@ -35,7 +41,7 @@ type RuntimeGlobal = typeof globalThis & {
 
 type RuntimeNativeModule = {
   configure(config: NativeConfig): Promise<void>;
-  ingestBatch(batch: NativeBatchEntry[]): Promise<void>;
+  ingestBatch(batch: NativeBatchPayload): Promise<void>;
   clear(kind: 'logs' | 'errors' | 'network' | 'all'): Promise<void>;
   show(): Promise<void>;
   hide(): Promise<void>;
@@ -52,6 +58,9 @@ const VALID_ANDROID_LOGCAT_BUFFERS = new Set<AndroidLogcatBuffer>([
   'events',
   'radio',
 ]);
+let runtimeEntryCounter = 0;
+let cachedTimestampSecond = -1;
+let cachedTimestampPrefix = '';
 
 export type DebugRuntimeDependencies = {
   nativeModule: RuntimeNativeModule;
@@ -67,35 +76,48 @@ export type DebugRuntimeDependencies = {
 };
 
 function createId(nowValue: number) {
-  return `${nowValue}_${Math.random().toString(36).slice(2, 10)}`;
+  runtimeEntryCounter += 1;
+  return `${nowValue}_${runtimeEntryCounter.toString(36)}`;
+}
+
+function stringifyValue(value: unknown) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'object' && value != null) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
 }
 
 export function formatMessage(args: unknown[]) {
-  return args
-    .map((arg) => {
-      if (typeof arg === 'string') {
-        return arg;
-      }
-      if (typeof arg === 'object' && arg != null) {
-        try {
-          return JSON.stringify(arg, null, 2);
-        } catch {
-          return String(arg);
-        }
-      }
-      return String(arg);
-    })
-    .join(' ');
+  let result = '';
+  for (let index = 0; index < args.length; index += 1) {
+    if (index > 0) {
+      result += ' ';
+    }
+    result += stringifyValue(args[index]);
+  }
+  return result;
 }
 
 function formatTimestamps(nowValue: number) {
   const date = new Date(nowValue);
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
+  const secondBucket = Math.floor(nowValue / 1000);
+  if (secondBucket !== cachedTimestampSecond) {
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    cachedTimestampPrefix = `${hours}:${minutes}:${seconds}.`;
+    cachedTimestampSecond = secondBucket;
+  }
   const milliseconds = String(date.getMilliseconds()).padStart(3, '0');
   return {
-    timestamp: `${hours}:${minutes}:${seconds}.${milliseconds}`,
+    timestamp: `${cachedTimestampPrefix}${milliseconds}`,
     fullTimestamp: date.toISOString(),
   };
 }
@@ -218,8 +240,12 @@ export class DebugRuntime {
   };
   private androidNativeLogsOverride: Partial<ResolvedAndroidNativeLogsConfig> | null = null;
   private manualEnabledOverride: boolean | null = null;
-  private queue: NativeBatchEntry[] = [];
+  private logQueue: NativeLogWireEntry[] = [];
+  private errorQueue: NativeErrorWireEntry[] = [];
+  private networkQueue: NativeNetworkWireEntry[] = [];
+  private queuedNetworkEntryIndexes = new Map<string, number>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushInFlight: Promise<void> | null = null;
   private configured = false;
   private consolePatched = false;
   private originalGlobalHandler: ErrorUtilsHandler | null = null;
@@ -309,10 +335,7 @@ export class DebugRuntime {
       message: formatMessage(args),
       ...formatTimestamps(nowValue),
     };
-    this.enqueue({
-      category: 'log',
-      entry,
-    });
+    this.enqueueLog(entry);
     if (level === 'error') {
       this.captureError('console', args);
     }
@@ -326,17 +349,11 @@ export class DebugRuntime {
       message: formatMessage(args),
       ...formatTimestamps(nowValue),
     };
-    this.enqueue({
-      category: 'error',
-      entry,
-    });
+    this.enqueueError(entry);
   }
 
   captureNetwork(entry: DebugNetworkEntry) {
-    this.enqueue({
-      category: 'network',
-      entry,
-    });
+    this.enqueueNetwork(entry);
   }
 
   private async applyConfig() {
@@ -425,7 +442,10 @@ export class DebugRuntime {
       this.clearTimeoutFn(this.flushTimer);
       this.flushTimer = null;
     }
-    this.queue = [];
+    this.logQueue = [];
+    this.errorQueue = [];
+    this.networkQueue = [];
+    this.queuedNetworkEntryIndexes.clear();
   }
 
   private installGlobalErrorHandler() {
@@ -461,37 +481,110 @@ export class DebugRuntime {
     globalScope.addEventListener('unhandledrejection', this.unhandledRejectionHandler);
   }
 
-  private enqueue(entry: NativeBatchEntry) {
+  private enqueueLog(entry: DebugLogEntry) {
     if (!this.configured || !(this.manualEnabledOverride ?? this.providerConfig.enabled)) {
       return;
     }
-    this.queue.push(entry);
-    if (this.queue.length >= MAX_BUFFERED_BATCH_SIZE) {
-      if (this.flushTimer) {
-        this.clearTimeoutFn(this.flushTimer);
-        this.flushTimer = null;
-      }
-      void this.flush();
+    this.logQueue.push(encodeLogEntry(entry))
+    this.scheduleFlushIfNeeded()
+  }
+
+  private enqueueError(entry: DebugErrorEntry) {
+    if (!this.configured || !(this.manualEnabledOverride ?? this.providerConfig.enabled)) {
       return;
     }
-    if (this.flushTimer) {
+    this.errorQueue.push(encodeErrorEntry(entry))
+    this.scheduleFlushIfNeeded()
+  }
+
+  private enqueueNetwork(entry: DebugNetworkEntry) {
+    if (!this.configured || !(this.manualEnabledOverride ?? this.providerConfig.enabled)) {
+      return;
+    }
+
+    const encodedEntry = encodeNetworkEntry(entry)
+    const entryId = encodedEntry[0]
+    const existingIndex = this.queuedNetworkEntryIndexes.get(entryId)
+    if (existingIndex != null) {
+      this.networkQueue[existingIndex] = encodedEntry
+    } else {
+      this.queuedNetworkEntryIndexes.set(entryId, this.networkQueue.length)
+      this.networkQueue.push(encodedEntry)
+    }
+    this.scheduleFlushIfNeeded()
+  }
+
+  private scheduleFlushIfNeeded() {
+    if (this.pendingEntryCount() >= MAX_BUFFERED_BATCH_SIZE) {
+      this.cancelScheduledFlush();
+      this.requestFlush();
+      return;
+    }
+    if (this.flushTimer || this.flushInFlight) {
       return;
     }
     this.flushTimer = this.setTimeoutFn(() => {
       this.flushTimer = null;
-      void this.flush();
+      this.requestFlush();
     }, FLUSH_DELAY_MS);
   }
 
-  private async flush() {
-    if (this.queue.length === 0) {
+  private pendingEntryCount(): number {
+    return this.logQueue.length + this.errorQueue.length + this.networkQueue.length
+  }
+
+  private cancelScheduledFlush() {
+    if (this.flushTimer) {
+      this.clearTimeoutFn(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  private requestFlush() {
+    if (this.flushInFlight) {
       return;
     }
-    const batch = this.queue.splice(0, this.queue.length);
+    void this.flush();
+  }
+
+  private async flush() {
+    if (this.flushInFlight) {
+      return this.flushInFlight;
+    }
+    if (this.pendingEntryCount() === 0) {
+      return;
+    }
+    const batch: NativeBatchPayload = {}
+    if (this.logQueue.length > 0) {
+      batch.logs = this.logQueue
+    }
+    if (this.errorQueue.length > 0) {
+      batch.errors = this.errorQueue
+    }
+    if (this.networkQueue.length > 0) {
+      batch.network = this.networkQueue
+    }
+    this.logQueue = [];
+    this.errorQueue = [];
+    this.networkQueue = [];
+    this.queuedNetworkEntryIndexes.clear();
+    const flushPromise = (async () => {
+      try {
+        await this.dependencies.nativeModule.ingestBatch(batch);
+      } catch (error) {
+        this.internalWarn('Failed to ingest debug batch', error);
+      }
+    })();
+    this.flushInFlight = flushPromise;
     try {
-      await this.dependencies.nativeModule.ingestBatch(batch);
-    } catch (error) {
-      this.internalWarn('Failed to ingest debug batch', error);
+      await flushPromise;
+    } finally {
+      if (this.flushInFlight === flushPromise) {
+        this.flushInFlight = null;
+      }
+      if (this.pendingEntryCount() > 0) {
+        this.requestFlush();
+      }
     }
   }
 
@@ -514,4 +607,64 @@ export class DebugRuntime {
       },
     };
   }
+}
+
+function encodeLogEntry(entry: DebugLogEntry): NativeLogWireEntry {
+  return [
+    entry.id,
+    entry.type,
+    entry.origin,
+    entry.context ?? null,
+    entry.details ?? null,
+    entry.message,
+    entry.timestamp,
+    entry.fullTimestamp,
+  ]
+}
+
+function encodeErrorEntry(entry: DebugErrorEntry): NativeErrorWireEntry {
+  return [
+    entry.id,
+    entry.source,
+    entry.message,
+    entry.timestamp,
+    entry.fullTimestamp,
+  ]
+}
+
+function encodeNetworkEntry(entry: DebugNetworkEntry): NativeNetworkWireEntry {
+  return [
+    entry.id,
+    entry.kind,
+    entry.method,
+    entry.url,
+    entry.origin,
+    entry.state,
+    entry.startedAt,
+    entry.updatedAt,
+    entry.endedAt ?? null,
+    entry.durationMs ?? null,
+    entry.status ?? null,
+    entry.requestHeaders ?? null,
+    entry.responseHeaders ?? null,
+    entry.requestBody ?? null,
+    entry.responseBody ?? null,
+    entry.responseType ?? null,
+    entry.responseContentType ?? null,
+    entry.responseSize ?? null,
+    entry.error ?? null,
+    entry.protocol ?? null,
+    entry.requestedProtocols ?? null,
+    entry.closeReason ?? null,
+    entry.closeCode ?? null,
+    entry.requestedCloseCode ?? null,
+    entry.requestedCloseReason ?? null,
+    entry.cleanClose ?? null,
+    entry.messageCountIn ?? null,
+    entry.messageCountOut ?? null,
+    entry.bytesIn ?? null,
+    entry.bytesOut ?? null,
+    entry.events ?? null,
+    entry.messages ?? null,
+  ]
 }
