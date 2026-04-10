@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 buildscript {
   def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
   if (expoModulesCorePlugin.exists()) {
@@ -28,13 +30,17 @@ buildscript {
   }
 }
 
+def packageJsonFile = new File(projectDir.parentFile, "package.json")
+def packageJson = packageJsonFile.exists() ? new JsonSlurper().parse(packageJsonFile) : null
+def packageVersion = packageJson?.version ?: "0.0.0"
+
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 apply plugin: 'maven-publish'
 
 group = 'expo.modules.inappdebugger'
-version = '0.1.0'
+version = packageVersion
 
 afterEvaluate {
   publishing {
@@ -59,7 +65,7 @@ android {
     minSdk safeExtGet("minSdkVersion", 24)
     targetSdk safeExtGet("targetSdkVersion", 34)
     versionCode 1
-    versionName "0.1.0"
+    versionName packageVersion
     consumerProguardFiles "consumer-rules.pro"
   }
 

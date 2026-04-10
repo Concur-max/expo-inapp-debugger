@@ -23,8 +23,8 @@ public final class InAppDebuggerModule: Module {
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
 
-    AsyncFunction("ingestBatch") { (batch: [[String: Any]]) in
-      InAppDebuggerStore.shared.ingest(batch: batch)
+    AsyncFunction("ingestBatch") { (logs: [[Any]]?, errors: [[Any]]?, network: [[Any]]?) in
+      InAppDebuggerStore.shared.ingestBatch(logs: logs, errors: errors, network: network)
     }
 
     AsyncFunction("clear") { (kind: String) in

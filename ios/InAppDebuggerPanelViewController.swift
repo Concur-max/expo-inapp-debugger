@@ -1,3 +1,4 @@
+import Darwin
 import UIKit
 
 private enum PanelSection {
@@ -7,7 +8,14 @@ private enum PanelSection {
 private enum ActiveTab: Int {
   case logs
   case network
+  case appInfo
 }
+
+private let panelTitle = "Debugging panel"
+private let panelSearchPlaceholder = "Please enter"
+private let logsTabTitle = "log"
+private let networkTabTitle = "network"
+private let appInfoTabTitle = "app Info"
 
 private enum ToolbarButtonStyle {
   case primary
@@ -27,6 +35,18 @@ private enum PanelColors {
 private struct PanelTone {
   let foreground: UIColor
   let background: UIColor
+}
+
+private struct PanelDetailItem {
+  let title: String
+  let content: String
+  let monospace: Bool
+
+  init(title: String, content: String, monospace: Bool = false) {
+    self.title = title
+    self.content = content
+    self.monospace = monospace
+  }
 }
 
 private enum NetworkKindFilter: String, CaseIterable {
@@ -105,6 +125,16 @@ private func networkKindBadgeTitle(_ rawKind: String) -> String {
     let trimmedKind = rawKind.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmedKind.isEmpty ? "OTHER" : trimmedKind.uppercased()
   }
+}
+
+private func networkTrailingBadgeTitle(_ entry: DebugNetworkEntry) -> String? {
+  if let status = entry.status {
+    return String(status)
+  }
+  if isWebSocketKind(entry.kind) {
+    return nil
+  }
+  return networkKindBadgeTitle(entry.kind)
 }
 
 private func toneForLogLevel(_ level: String) -> PanelTone {
@@ -265,6 +295,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var scheduledReloadWorkItem: DispatchWorkItem?
   private var scheduledSearchWorkItem: DispatchWorkItem?
   private var isSuspendingLiveUpdatesForScroll = false
+  private var renderedAppInfoSignature = ""
 
   private lazy var closeButton: UIButton = {
     let button = UIButton(type: .close)
@@ -278,7 +309,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }()
 
   private lazy var segmentedControl: UISegmentedControl = {
-    let control = UISegmentedControl(items: ["日志", "网络"])
+    let control = UISegmentedControl(items: [logsTabTitle, networkTabTitle, appInfoTabTitle])
     control.selectedSegmentIndex = 0
     control.backgroundColor = PanelColors.controlBackground
     control.selectedSegmentTintColor = PanelColors.card
@@ -334,6 +365,14 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return button
   }()
 
+  private lazy var actionRow: UIStackView = {
+    let stack = UIStackView(arrangedSubviews: [searchField, filterButton, sortToggleButton, clearButton])
+    stack.axis = .horizontal
+    stack.alignment = .fill
+    stack.spacing = 8
+    return stack
+  }()
+
   private lazy var tableView: UITableView = {
     let table = UITableView(frame: .zero, style: .plain)
     table.backgroundColor = PanelColors.background
@@ -348,6 +387,22 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return table
   }()
 
+  private lazy var appInfoScrollView: UIScrollView = {
+    let scrollView = UIScrollView()
+    scrollView.backgroundColor = PanelColors.background
+    scrollView.alwaysBounceVertical = true
+    scrollView.keyboardDismissMode = .onDrag
+    scrollView.isHidden = true
+    return scrollView
+  }()
+
+  private lazy var appInfoStackView: UIStackView = {
+    let stack = UIStackView()
+    stack.axis = .vertical
+    stack.spacing = 10
+    return stack
+  }()
+
   private let emptyStateView = InAppDebuggerEmptyStateView()
 
   private lazy var dataSource = UITableViewDiffableDataSource<PanelSection, String>(
@@ -355,7 +410,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   ) { [weak self] tableView, indexPath, identifier in
     guard let self else { return nil }
 
-    if self.activeTab == .logs {
+    switch self.activeTab {
+    case .logs:
       guard let entry = self.displayedLogLookup[identifier] else {
         return UITableViewCell()
       }
@@ -367,17 +423,19 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         self?.copy(text: entry.message, successKey: "copySingleSuccess")
       }
       return cell
-    }
-
-    guard let entry = self.displayedNetworkLookup[identifier] else {
+    case .network:
+      guard let entry = self.displayedNetworkLookup[identifier] else {
+        return UITableViewCell()
+      }
+      let cell = tableView.dequeueReusableCell(
+        withIdentifier: InAppDebuggerNetworkCell.reuseIdentifier,
+        for: indexPath
+      ) as? InAppDebuggerNetworkCell
+      cell?.configure(entry: entry, strings: self.strings)
+      return cell
+    case .appInfo:
       return UITableViewCell()
     }
-    let cell = tableView.dequeueReusableCell(
-      withIdentifier: InAppDebuggerNetworkCell.reuseIdentifier,
-      for: indexPath
-    ) as? InAppDebuggerNetworkCell
-    cell?.configure(entry: entry, strings: self.strings)
-    return cell
   }
 
   private var strings: [String: String] {
@@ -445,7 +503,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func configureNavigationBar() {
-    title = strings["title"] ?? "调试面板"
+    title = panelTitle
     closeButton.accessibilityLabel = strings["close"] ?? "关闭"
     navigationItem.rightBarButtonItem = UIBarButtonItem(customView: closeButton)
 
@@ -468,20 +526,19 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func layoutUI() {
-    let actionRow = UIStackView(arrangedSubviews: [searchField, filterButton, sortToggleButton, clearButton])
-    actionRow.axis = .horizontal
-    actionRow.alignment = .fill
-    actionRow.spacing = 8
-
     let topStack = UIStackView(arrangedSubviews: [segmentedControl, actionRow])
     topStack.axis = .vertical
     topStack.spacing = 12
     
     view.addSubview(topStack)
     view.addSubview(tableView)
+    view.addSubview(appInfoScrollView)
+    appInfoScrollView.addSubview(appInfoStackView)
     
     topStack.translatesAutoresizingMaskIntoConstraints = false
     tableView.translatesAutoresizingMaskIntoConstraints = false
+    appInfoScrollView.translatesAutoresizingMaskIntoConstraints = false
+    appInfoStackView.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
       topStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
@@ -492,6 +549,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
       tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
       tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+      appInfoScrollView.topAnchor.constraint(equalTo: topStack.bottomAnchor, constant: 10),
+      appInfoScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      appInfoScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      appInfoScrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+      appInfoStackView.topAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.topAnchor, constant: 4),
+      appInfoStackView.leadingAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.leadingAnchor, constant: 14),
+      appInfoStackView.trailingAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.trailingAnchor, constant: -14),
+      appInfoStackView.bottomAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.bottomAnchor, constant: -18),
+      appInfoStackView.widthAnchor.constraint(equalTo: appInfoScrollView.frameLayoutGuide.widthAnchor, constant: -28),
 
       segmentedControl.heightAnchor.constraint(equalToConstant: 36),
       searchField.heightAnchor.constraint(equalToConstant: 36),
@@ -541,6 +609,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateFilterMenu() {
+    guard activeTab != .appInfo else {
+      filterButton.menu = nil
+      filterButton.configuration = toolbarButtonConfiguration(
+        systemName: "line.3.horizontal.decrease",
+        foregroundColor: PanelColors.primary,
+        style: .neutral
+      )
+      return
+    }
+
     let selectedOrigins = activeTab == .logs ? selectedLogOrigins : selectedNetworkOrigins
     let originOptions = ["js", "native"].map { origin -> UIAction in
       let title = localizedOriginTitle(origin, strings: strings)
@@ -622,6 +700,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         selectedNetworkOrigins.insert(origin)
       }
       PanelFilterPreferences.saveNetworkOrigins(selectedNetworkOrigins)
+    case .appInfo:
+      return
     }
     updateFilterMenu()
     syncNativeCaptureStates()
@@ -675,6 +755,10 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func applySnapshot(reconfiguring identifiers: [String] = []) {
+    guard activeTab != .appInfo else {
+      return
+    }
+
     var snapshot = NSDiffableDataSourceSnapshot<PanelSection, String>()
     snapshot.appendSections([.main])
     if activeTab == .logs {
@@ -710,20 +794,24 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
       configureNavigationBar()
       segmentedControl.selectedSegmentIndex = activeTab.rawValue
-      segmentedControl.setTitle(currentConfig.strings["logsTab"] ?? "日志", forSegmentAt: 0)
-      segmentedControl.setTitle(currentConfig.strings["networkTab"] ?? "网络", forSegmentAt: 1)
+      segmentedControl.setTitle(logsTabTitle, forSegmentAt: 0)
+      segmentedControl.setTitle(networkTabTitle, forSegmentAt: 1)
+      segmentedControl.setTitle(appInfoTabTitle, forSegmentAt: 2)
       segmentedControl.setEnabled(currentConfig.enableNetworkTab, forSegmentAt: 1)
 
-      searchField.placeholder = activeTab == .logs
-        ? currentConfig.strings["searchPlaceholder"] ?? "搜索日志..."
-        : localizedNetworkSearchPlaceholder()
-      filterButton.isHidden = false
+      searchField.placeholder = panelSearchPlaceholder
+      updateContentVisibility()
       updateToolbarTitles()
       updateFilterMenu()
       updateSortButton()
       if view.window != nil {
         syncNativeCaptureStates()
       }
+    }
+
+    if activeTab == .appInfo {
+      renderAppInfo(logs: state.1, errors: state.2)
+      return
     }
 
     if activeTab == .logs {
@@ -873,6 +961,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     filterButton.accessibilityLabel = strings["filter"] ?? "筛选"
   }
 
+  private func updateContentVisibility() {
+    let showingAppInfo = activeTab == .appInfo
+    actionRow.isHidden = showingAppInfo
+    tableView.isHidden = showingAppInfo
+    appInfoScrollView.isHidden = !showingAppInfo
+    if showingAppInfo {
+      tableView.backgroundView = nil
+    }
+  }
+
   private func updateSortButton() {
     sortToggleButton.configuration = toolbarButtonConfiguration(
       systemName: sortAscending ? "arrow.up" : "arrow.down",
@@ -883,6 +981,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateEmptyState() {
+    guard activeTab != .appInfo else {
+      tableView.backgroundView = nil
+      return
+    }
+
     let isEmpty = activeTab == .logs ? displayedLogs.isEmpty : displayedNetwork.isEmpty
     guard isEmpty else {
       tableView.backgroundView = nil
@@ -1082,6 +1185,256 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return metadataLines.joined(separator: "\n") + "\n\n" + entry.message
   }
 
+  private func renderAppInfo(logs: [DebugLogEntry], errors: [DebugErrorEntry]) {
+    let sections = buildAppInfoSections(logs: logs, errors: errors)
+    let signature = sections
+      .map { "\($0.title)\n\($0.content)\n\($0.monospace)" }
+      .joined(separator: "\n---\n")
+    guard signature != renderedAppInfoSignature else {
+      return
+    }
+    renderedAppInfoSignature = signature
+
+    appInfoStackView.arrangedSubviews.forEach { view in
+      appInfoStackView.removeArrangedSubview(view)
+      view.removeFromSuperview()
+    }
+
+    sections.forEach { section in
+      let sectionView = InAppDebuggerDetailSectionView()
+      sectionView.configure(title: section.title, body: section.content, monospace: section.monospace)
+      appInfoStackView.addArrangedSubview(sectionView)
+    }
+  }
+
+  private func buildAppInfoSections(logs: [DebugLogEntry], errors: [DebugErrorEntry]) -> [PanelDetailItem] {
+    [
+      PanelDetailItem(title: "宿主运行环境", content: buildHostRuntimeInfo(), monospace: true),
+      PanelDetailItem(title: "调试器能力", content: buildDebuggerCapabilityInfo()),
+      PanelDetailItem(title: "采集状态", content: buildCaptureStatusInfo(), monospace: true),
+      buildNativeCrashInfo(logs: logs),
+      buildFatalErrorInfo(errors: errors),
+      PanelDetailItem(title: "限制说明", content: buildLimitationsInfo()),
+    ]
+  }
+
+  private func buildHostRuntimeInfo() -> String {
+    let bundle = Bundle.main
+    let processInfo = ProcessInfo.processInfo
+    let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+    let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+    let versionSummary = version.isEmpty && build.isEmpty
+      ? "-"
+      : "\(version.isEmpty ? "-" : version) (\(build.isEmpty ? "-" : build))"
+    let device = UIDevice.current
+
+    return [
+      "应用名称: \(appDisplayName())",
+      "Bundle ID: \(bundle.bundleIdentifier ?? "-")",
+      "版本: \(versionSummary)",
+      "进程: \(processInfo.processName)",
+      "PID: \(processInfo.processIdentifier)",
+      "系统: \(device.systemName) \(device.systemVersion)",
+      "设备: \(device.model) / \(deviceMachineIdentifier())",
+      "语言环境: \(Locale.current.identifier)",
+      "应用状态: \(applicationStateTitle(UIApplication.shared.applicationState))",
+      "后台刷新: \(backgroundRefreshStatusTitle(UIApplication.shared.backgroundRefreshStatus))",
+      "低电量模式: \(processInfo.isLowPowerModeEnabled ? "是" : "否")",
+      "温度状态: \(thermalStateTitle(processInfo.thermalState))",
+    ].joined(separator: "\n")
+  }
+
+  private func buildDebuggerCapabilityInfo() -> String {
+    var lines = [
+      "JS console 日志、React 错误、全局错误与未处理 Promise rejection。",
+      "iOS 原生日志：stdout、stderr、log/native 页面激活时的 OSLog 轮询、未捕获 NSException，以及 fatal signal 崩溃标记。",
+    ]
+
+    if currentConfig.enableNetworkTab {
+      lines.append("network 面板：JS fetch/XHR、WebSocket，以及 network/native 页面激活时的 native URLSession 请求。")
+    } else {
+      lines.append("当前配置已关闭 network 面板。")
+    }
+
+    return lines.map { "- \($0)" }.joined(separator: "\n")
+  }
+
+  private func buildCaptureStatusInfo() -> String {
+    [
+      "调试器已启用: \(currentConfig.enabled ? "是" : "否")",
+      "network 面板已启用: \(currentConfig.enableNetworkTab ? "是" : "否")",
+      "原生崩溃持久化: 已启用",
+      "原生 stream 采集: 仅在选择 log/native 时激活",
+      "原生网络预览: 仅在选择 network/native 时激活",
+      "最大日志数: \(currentConfig.maxLogs)",
+      "最大错误数: \(currentConfig.maxErrors)",
+      "最大请求数: \(currentConfig.maxRequests)",
+      "Fatal signals: \(fatalSignalSummary())",
+    ].joined(separator: "\n")
+  }
+
+  private func buildNativeCrashInfo(logs: [DebugLogEntry]) -> PanelDetailItem {
+    let crashLogs = logs
+      .reversed()
+      .filter { entry in
+        guard entry.origin == "native" else {
+          return false
+        }
+        let context = entry.context ?? ""
+        let details = entry.details ?? ""
+        return context == "previous-launch crash report" ||
+          context == "uncaught-exception" ||
+          entry.message.localizedCaseInsensitiveContains("fatal signal") ||
+          details.localizedCaseInsensitiveContains("fatal signal")
+      }
+      .prefix(5)
+
+    guard !crashLogs.isEmpty else {
+      return PanelDetailItem(
+        title: "最近原生崩溃记录",
+        content: "暂无原生崩溃记录。"
+      )
+    }
+
+    let body = crashLogs.enumerated().map { index, entry in
+      let context = entry.context ?? ""
+      let details = entry.details ?? "-"
+      return [
+        "#\(index + 1)",
+        "时间: \(entry.fullTimestamp.isEmpty ? entry.timestamp : entry.fullTimestamp)",
+        "上下文: \(context.isEmpty ? "-" : context)",
+        "消息: \(entry.message.isEmpty ? "-" : entry.message)",
+        "详情:\n\(trimForPanel(details, limit: 2_000))",
+      ].joined(separator: "\n")
+    }.joined(separator: "\n\n")
+
+    return PanelDetailItem(
+      title: "最近原生崩溃记录",
+      content: body,
+      monospace: true
+    )
+  }
+
+  private func buildFatalErrorInfo(errors: [DebugErrorEntry]) -> PanelDetailItem {
+    let fatalErrors = errors
+      .reversed()
+      .filter { error in
+        error.source == "global" ||
+          error.source == "react" ||
+          error.message.localizedCaseInsensitiveContains("[FATAL]")
+      }
+      .prefix(5)
+
+    guard !fatalErrors.isEmpty else {
+      return PanelDetailItem(
+        title: "最近严重错误",
+        content: "暂无 JS / runtime 严重错误记录。"
+      )
+    }
+
+    let body = fatalErrors.enumerated().map { index, error in
+      [
+        "#\(index + 1)",
+        "时间: \(error.fullTimestamp.isEmpty ? error.timestamp : error.fullTimestamp)",
+        "来源: \(error.source.isEmpty ? "-" : error.source)",
+        "消息:\n\(trimForPanel(error.message, limit: 2_000))",
+      ].joined(separator: "\n")
+    }.joined(separator: "\n\n")
+
+    return PanelDetailItem(
+      title: "最近严重错误",
+      content: body,
+      monospace: true
+    )
+  }
+
+  private func buildLimitationsInfo() -> String {
+    var lines = [
+      "为了降低宿主应用开销，native stream 与 OSLog 采集只会在 log/native 页面激活。",
+      "iOS 无法完整回放调试器挂钩启动之前产生的任意日志，但会尽力保留已持久化的未捕获崩溃报告。",
+      "network 面板未激活时会尽量减少 payload preview 处理，以保护运行时性能。",
+    ]
+
+    if !currentConfig.enableNetworkTab {
+      lines.append("当前配置已关闭 network 面板，因此不会采集用于展示的网络事件。")
+    }
+
+    return lines.map { "- \($0)" }.joined(separator: "\n")
+  }
+
+  private func appDisplayName() -> String {
+    let bundle = Bundle.main
+    let displayName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+    let bundleName = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+    return displayName?.isEmpty == false ? displayName ?? "-" : (bundleName?.isEmpty == false ? bundleName ?? "-" : "-")
+  }
+
+  private func deviceMachineIdentifier() -> String {
+    var systemInfo = utsname()
+    uname(&systemInfo)
+    let mirror = Mirror(reflecting: systemInfo.machine)
+    let identifier = mirror.children.reduce(into: "") { result, child in
+      guard let value = child.value as? Int8, value != 0 else {
+        return
+      }
+      result.append(String(UnicodeScalar(UInt8(value))))
+    }
+    return identifier.isEmpty ? "-" : identifier
+  }
+
+  private func applicationStateTitle(_ state: UIApplication.State) -> String {
+    switch state {
+    case .active:
+      return "前台活跃"
+    case .inactive:
+      return "非活跃"
+    case .background:
+      return "后台"
+    @unknown default:
+      return "未知"
+    }
+  }
+
+  private func backgroundRefreshStatusTitle(_ status: UIBackgroundRefreshStatus) -> String {
+    switch status {
+    case .available:
+      return "可用"
+    case .denied:
+      return "已拒绝"
+    case .restricted:
+      return "受限"
+    @unknown default:
+      return "未知"
+    }
+  }
+
+  private func thermalStateTitle(_ state: ProcessInfo.ThermalState) -> String {
+    switch state {
+    case .nominal:
+      return "正常"
+    case .fair:
+      return "偏高"
+    case .serious:
+      return "严重"
+    case .critical:
+      return "危急"
+    @unknown default:
+      return "未知"
+    }
+  }
+
+  private func fatalSignalSummary() -> String {
+    "SIGABRT(6), SIGBUS(10), SIGFPE(8), SIGILL(4), SIGSEGV(11), SIGTERM(15), SIGTRAP(5)"
+  }
+
+  private func trimForPanel(_ value: String, limit: Int) -> String {
+    guard value.count > limit else {
+      return value
+    }
+    let endIndex = value.index(value.startIndex, offsetBy: limit)
+    return "\(value[..<endIndex])\n...已截断"
+  }
+
   @objc private func closeTapped() {
     dismiss(animated: true)
   }
@@ -1105,13 +1458,18 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   @objc private func clearTapped() {
-    InAppDebuggerStore.shared.clear(kind: activeTab == .logs ? "logs" : "network")
-    if activeTab == .network {
+    switch activeTab {
+    case .logs:
+      InAppDebuggerStore.shared.clear(kind: "logs")
+    case .network:
+      InAppDebuggerStore.shared.clear(kind: "network")
       InAppDebuggerNativeNetworkCapture.shared.refreshVisibleEntries()
       if selectedNetworkOrigins.contains("js") &&
         selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue) {
         InAppDebuggerNativeWebSocketCapture.shared.refreshVisibleEntries()
       }
+    case .appInfo:
+      return
     }
   }
 
@@ -1123,7 +1481,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
-    if activeTab == .logs {
+    switch activeTab {
+    case .logs:
       guard displayedLogs.indices.contains(indexPath.row) else {
         return
       }
@@ -1133,7 +1492,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         bodyText: logDetailBody(for: entry)
       )
       navigationController?.pushViewController(detail, animated: true)
-    } else {
+    case .network:
       guard displayedNetwork.indices.contains(indexPath.row) else {
         return
       }
@@ -1144,6 +1503,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         locale: currentConfig.locale
       )
       navigationController?.pushViewController(detail, animated: true)
+    case .appInfo:
+      return
     }
   }
 
@@ -1334,7 +1695,8 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     methodLabel.text = entry.method.uppercased()
     methodLabel.textColor = PanelColors.primary
     methodLabel.backgroundColor = UIColor(red: 0.89, green: 0.96, blue: 0.94, alpha: 1)
-    statusLabel.text = entry.status.map(String.init) ?? networkKindBadgeTitle(entry.kind)
+    statusLabel.text = networkTrailingBadgeTitle(entry)
+    statusLabel.isHidden = statusLabel.text == nil
     statusLabel.textColor = tone.foreground
     statusLabel.backgroundColor = tone.background
     stateLabel.text = entry.state.uppercased()
@@ -1421,6 +1783,67 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
 
       chevronView.widthAnchor.constraint(equalToConstant: 10),
       chevronView.heightAnchor.constraint(equalToConstant: 16),
+    ])
+  }
+}
+
+private final class InAppDebuggerDetailSectionView: UIView {
+  private let cardView = UIView()
+  private let titleLabel = UILabel()
+  private let bodyLabel = UILabel()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(title: String, body: String, monospace: Bool) {
+    titleLabel.text = title
+    bodyLabel.text = body
+    bodyLabel.font = monospace
+      ? .monospacedSystemFont(ofSize: 12, weight: .regular)
+      : .systemFont(ofSize: 13, weight: .regular)
+  }
+
+  private func buildUI() {
+    backgroundColor = .clear
+
+    cardView.backgroundColor = PanelColors.card
+    cardView.layer.cornerRadius = 8
+    cardView.layer.borderWidth = 1
+    cardView.layer.borderColor = PanelColors.border.cgColor
+    addSubview(cardView)
+
+    titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
+    titleLabel.textColor = PanelColors.text
+    titleLabel.numberOfLines = 1
+
+    bodyLabel.textColor = PanelColors.text
+    bodyLabel.numberOfLines = 0
+    bodyLabel.lineBreakMode = .byWordWrapping
+
+    let stack = UIStackView(arrangedSubviews: [titleLabel, bodyLabel])
+    stack.axis = .vertical
+    stack.spacing = 8
+    cardView.addSubview(stack)
+
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    stack.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      cardView.topAnchor.constraint(equalTo: topAnchor),
+      cardView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      cardView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      cardView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+      stack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+      stack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+      stack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+      stack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
     ])
   }
 }

@@ -131,7 +131,9 @@ final class InAppDebuggerNativeLogCapture {
   func setEnabled(_ enabled: Bool) {
     queue.sync {
       captureEnabled = enabled
-      if !enabled {
+      if enabled {
+        prepareLocked()
+      } else {
         panelActive = false
       }
       refreshCaptureStateLocked()
@@ -1352,68 +1354,76 @@ final class InAppDebuggerNativeWebSocketCapture {
   }
 
   fileprivate func recordSendString(_ socket: AnyObject, text: String) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
       let byteCount = text.lengthOfBytes(using: .utf8)
       tracked.state = tracked.state == "connecting" ? "open" : tracked.state
       tracked.updatedAt = timestamp
       tracked.messageCountOut += 1
       tracked.bytesOut += byteCount
-      appendMessage(
-        direction: ">>",
-        kind: "text",
-        payload: storedMessageText(text),
-        byteCount: byteCount,
-        to: tracked,
-        at: timestamp
-      )
+      if isPanelActive {
+        appendMessage(
+          direction: ">>",
+          kind: "text",
+          payload: storedMessageText(text),
+          byteCount: byteCount,
+          to: tracked,
+          at: timestamp
+        )
+      }
       return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordSendData(_ socket: AnyObject, data: Data?) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
       let payload = data ?? Data()
       tracked.state = tracked.state == "connecting" ? "open" : tracked.state
       tracked.updatedAt = timestamp
       tracked.messageCountOut += 1
       tracked.bytesOut += payload.count
-      appendMessage(
-        direction: ">>",
-        kind: "binary",
-        payload: hexPreview(for: payload),
-        byteCount: payload.count,
-        to: tracked,
-        at: timestamp
-      )
+      if isPanelActive {
+        appendMessage(
+          direction: ">>",
+          kind: "binary",
+          payload: hexPreview(for: payload),
+          byteCount: payload.count,
+          to: tracked,
+          at: timestamp
+        )
+      }
       return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordPing(_ socket: AnyObject, data: Data?) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
       tracked.updatedAt = timestamp
-      appendEvent("ping \(formatByteCount(data?.count ?? 0))", to: tracked, at: timestamp)
+      if isPanelActive {
+        appendEvent("ping \(formatByteCount(data?.count ?? 0))", to: tracked, at: timestamp)
+      }
       return .emitVisibleThrottled
     }
   }
 
   fileprivate func recordReceivedMessage(_ socket: AnyObject, message: Any?) {
-    mutateSocket(socket, defaultState: "open") { tracked, timestamp, _ in
+    mutateSocket(socket, defaultState: "open") { tracked, timestamp, isPanelActive in
       tracked.state = tracked.state == "connecting" ? "open" : tracked.state
       tracked.updatedAt = timestamp
 
-      let payload = describeMessagePayload(message)
+      let payload = describeMessagePayload(message, includeBody: isPanelActive)
       tracked.messageCountIn += 1
       tracked.bytesIn += payload.byteCount
 
-      appendMessage(
-        direction: "<<",
-        kind: payload.kind,
-        payload: payload.body,
-        byteCount: payload.byteCount,
-        to: tracked,
-        at: timestamp
-      )
+      if isPanelActive {
+        appendMessage(
+          direction: "<<",
+          kind: payload.kind,
+          payload: payload.body,
+          byteCount: payload.byteCount,
+          to: tracked,
+          at: timestamp
+        )
+      }
       return .emitVisibleThrottled
     }
   }
@@ -1648,23 +1658,26 @@ private extension InAppDebuggerNativeWebSocketCapture {
     return (value as String).nilIfEmpty
   }
 
-  func describeMessagePayload(_ message: Any?) -> (kind: String, body: String?, byteCount: Int) {
+  func describeMessagePayload(
+    _ message: Any?,
+    includeBody: Bool = true
+  ) -> (kind: String, body: String?, byteCount: Int) {
     if let text = message as? String {
-      return ("text", storedMessageText(text), text.lengthOfBytes(using: .utf8))
+      return ("text", includeBody ? storedMessageText(text) : nil, text.lengthOfBytes(using: .utf8))
     }
     if let string = message as? NSString {
       let value = string as String
-      return ("text", storedMessageText(value), value.lengthOfBytes(using: .utf8))
+      return ("text", includeBody ? storedMessageText(value) : nil, value.lengthOfBytes(using: .utf8))
     }
     if let data = message as? Data {
-      return ("binary", hexPreview(for: data), data.count)
+      return ("binary", includeBody ? hexPreview(for: data) : nil, data.count)
     }
     if let data = message as? NSData {
       let value = data as Data
-      return ("binary", hexPreview(for: value), value.count)
+      return ("binary", includeBody ? hexPreview(for: value) : nil, value.count)
     }
     let fallback = message.map { String(describing: $0) } ?? ""
-    return ("unknown", storedMessageText(fallback), fallback.lengthOfBytes(using: .utf8))
+    return ("unknown", includeBody ? storedMessageText(fallback) : nil, fallback.lengthOfBytes(using: .utf8))
   }
 
   func storedMessageText(_ text: String, limit: Int = 32_000) -> String? {

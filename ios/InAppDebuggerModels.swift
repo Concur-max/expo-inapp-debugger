@@ -35,6 +35,20 @@ struct DebugLogEntry: Equatable {
     self.fullTimestamp = map.string("fullTimestamp") ?? ""
   }
 
+  init?(wire: [Any]) {
+    guard let id = wire.string(at: 0) else {
+      return nil
+    }
+    self.id = id
+    self.type = wire.string(at: 1) ?? "log"
+    self.origin = wire.string(at: 2) ?? "js"
+    self.context = wire.string(at: 3)
+    self.details = wire.string(at: 4)
+    self.message = wire.string(at: 5) ?? ""
+    self.timestamp = wire.string(at: 6) ?? ""
+    self.fullTimestamp = wire.string(at: 7) ?? ""
+  }
+
   init(
     id: String,
     type: String,
@@ -85,6 +99,17 @@ struct DebugErrorEntry: Equatable {
     self.message = map.string("message") ?? ""
     self.timestamp = map.string("timestamp") ?? ""
     self.fullTimestamp = map.string("fullTimestamp") ?? ""
+  }
+
+  init?(wire: [Any]) {
+    guard let id = wire.string(at: 0) else {
+      return nil
+    }
+    self.id = id
+    self.source = wire.string(at: 1) ?? "console"
+    self.message = wire.string(at: 2) ?? ""
+    self.timestamp = wire.string(at: 3) ?? ""
+    self.fullTimestamp = wire.string(at: 4) ?? ""
   }
 
   func asDictionary() -> [String: Any] {
@@ -238,6 +263,46 @@ struct DebugNetworkEntry: Equatable {
     self.messages = map.string("messages")
   }
 
+  init?(wire: [Any]) {
+    guard let id = wire.string(at: 0) else {
+      return nil
+    }
+    let startedAt = wire.int(at: 6) ?? 0
+
+    self.id = id
+    self.kind = wire.string(at: 1) ?? "http"
+    self.method = wire.string(at: 2) ?? "GET"
+    self.url = wire.string(at: 3) ?? ""
+    self.origin = wire.string(at: 4) ?? "js"
+    self.state = wire.string(at: 5) ?? "pending"
+    self.startedAt = startedAt
+    self.updatedAt = wire.int(at: 7) ?? startedAt
+    self.endedAt = wire.int(at: 8)
+    self.durationMs = wire.int(at: 9)
+    self.status = wire.int(at: 10)
+    self.requestHeaders = wire.stringDictionary(at: 11)
+    self.responseHeaders = wire.stringDictionary(at: 12)
+    self.requestBody = wire.string(at: 13)
+    self.responseBody = wire.string(at: 14)
+    self.responseType = wire.string(at: 15)
+    self.responseContentType = wire.string(at: 16)
+    self.responseSize = wire.int(at: 17)
+    self.error = wire.string(at: 18)
+    self.protocol = wire.string(at: 19)
+    self.requestedProtocols = wire.string(at: 20)
+    self.closeReason = wire.string(at: 21)
+    self.closeCode = wire.int(at: 22)
+    self.requestedCloseCode = wire.int(at: 23)
+    self.requestedCloseReason = wire.string(at: 24)
+    self.cleanClose = wire.bool(at: 25)
+    self.messageCountIn = wire.int(at: 26)
+    self.messageCountOut = wire.int(at: 27)
+    self.bytesIn = wire.int(at: 28)
+    self.bytesOut = wire.int(at: 29)
+    self.events = wire.string(at: 30)
+    self.messages = wire.string(at: 31)
+  }
+
   func asDictionary() -> [String: Any] {
     [
       "id": id,
@@ -296,5 +361,97 @@ extension Dictionary where Key == String, Value == Any {
     return raw.reduce(into: [:]) { partialResult, item in
       partialResult[item.key] = item.value as? String ?? "\(item.value)"
     }
+  }
+}
+
+private extension Array where Element == Any {
+  func string(at index: Int) -> String? {
+    wireString(value(at: index))
+  }
+
+  func int(at index: Int) -> Int? {
+    wireInt(value(at: index))
+  }
+
+  func bool(at index: Int) -> Bool? {
+    wireBool(value(at: index))
+  }
+
+  func stringDictionary(at index: Int) -> [String: String] {
+    wireStringDictionary(value(at: index))
+  }
+
+  private func value(at index: Int) -> Any? {
+    indices.contains(index) ? self[index] : nil
+  }
+}
+
+private func wireString(_ value: Any?) -> String? {
+  switch value {
+  case nil, is NSNull:
+    return nil
+  case let value as String:
+    return value
+  default:
+    return nil
+  }
+}
+
+private func wireInt(_ value: Any?) -> Int? {
+  switch value {
+  case nil, is NSNull:
+    return nil
+  case let value as NSNumber:
+    return value.intValue
+  case let value as Int:
+    return value
+  case let value as Double:
+    return Int(value)
+  default:
+    return nil
+  }
+}
+
+private func wireBool(_ value: Any?) -> Bool? {
+  switch value {
+  case nil, is NSNull:
+    return nil
+  case let value as Bool:
+    return value
+  case let value as NSNumber:
+    return value.boolValue
+  default:
+    return nil
+  }
+}
+
+private func wireStringDictionary(_ value: Any?) -> [String: String] {
+  switch value {
+  case nil, is NSNull:
+    return [:]
+  case let value as [String: String]:
+    return value
+  case let value as [String: Any]:
+    return value.reduce(into: [:]) { partialResult, item in
+      guard !(item.value is NSNull) else {
+        return
+      }
+      partialResult[item.key] = item.value as? String ?? "\(item.value)"
+    }
+  case let value as [Any]:
+    var result: [String: String] = [:]
+    var index = 0
+    while index + 1 < value.count {
+      if let key = wireString(value[index]) {
+        let rawValue = value[index + 1]
+        if !(rawValue is NSNull) {
+          result[key] = rawValue as? String ?? "\(rawValue)"
+        }
+      }
+      index += 2
+    }
+    return result
+  default:
+    return [:]
   }
 }

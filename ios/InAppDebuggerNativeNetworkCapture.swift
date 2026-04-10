@@ -4,6 +4,7 @@ import ObjectiveC.runtime
 private let inAppDebuggerNativeRequestHandledKey = "expo.inappdebugger.native-network.handled"
 private let inAppDebuggerNativeRequestOriginKey = "expo.inappdebugger.native-network.origin"
 private let inAppDebuggerNativeJSOriginValue = "js"
+private let inAppDebuggerNativeResponsePreviewLimit = 32_000
 
 private final class InAppDebuggerNativeHTTPState {
   let id: String
@@ -340,6 +341,7 @@ final class InAppDebuggerNativeNetworkCapture {
 
     let timestamp = currentTimestamp()
     let requestID = "native_http_\(UUID().uuidString)"
+    let shouldCaptureBodyPreview = lock.withLock { panelActive }
     var entry: DebugNetworkEntry?
     let state = InAppDebuggerNativeHTTPState(
       id: requestID,
@@ -348,7 +350,7 @@ final class InAppDebuggerNativeNetworkCapture {
       url: request.url?.absoluteString ?? "",
       startedAt: timestamp,
       requestHeaders: request.allHTTPHeaderFields ?? [:],
-      requestBody: requestBodyPreview(for: request)
+      requestBody: shouldCaptureBodyPreview ? requestBodyPreview(for: request) : nil
     )
 
     lock.withLock {
@@ -395,14 +397,16 @@ final class InAppDebuggerNativeNetworkCapture {
       }
       state.updatedAt = currentTimestamp()
       state.responseBytesReceived += data.count
-      let combinedData = appendPreviewData(
-        existing: state.responsePreviewData,
-        incoming: data,
-        contentType: state.responseContentType
-      )
-      state.responsePreviewData = combinedData.previewData
-      state.responseBody = combinedData.previewText
       state.responseSize = state.responseBytesReceived
+      if panelActive, state.responsePreviewData.count < inAppDebuggerNativeResponsePreviewLimit {
+        let combinedData = appendPreviewData(
+          existing: state.responsePreviewData,
+          incoming: data,
+          contentType: state.responseContentType
+        )
+        state.responsePreviewData = combinedData.previewData
+        state.responseBody = combinedData.previewText
+      }
       entry = preparedHTTPEntryLocked(state, timestamp: state.updatedAt, policy: .visibleThrottled)
     }
 
@@ -518,10 +522,12 @@ final class InAppDebuggerNativeNetworkCapture {
     mutateNativeWebSocket(task, policy: .visibleThrottled) { state in
       hydrateNativeWebSocketHandshake(for: task, state: state)
       openNativeWebSocketIfNeeded(state)
-      let payload = describeWebSocketMessage(message)
+      let payload = describeWebSocketMessage(message, includeBody: panelActive)
       state.messageCountOut += 1
       state.bytesOut += payload.byteCount
-      appendMessage(direction: ">>", payload: payload, to: state)
+      if panelActive {
+        appendMessage(direction: ">>", payload: payload, to: state)
+      }
     }
   }
 
@@ -532,10 +538,12 @@ final class InAppDebuggerNativeNetworkCapture {
     mutateNativeWebSocket(task, policy: .visibleThrottled) { state in
       hydrateNativeWebSocketHandshake(for: task, state: state)
       openNativeWebSocketIfNeeded(state)
-      let payload = describeWebSocketMessage(message)
+      let payload = describeWebSocketMessage(message, includeBody: panelActive)
       state.messageCountIn += 1
       state.bytesIn += payload.byteCount
-      appendMessage(direction: "<<", payload: payload, to: state)
+      if panelActive {
+        appendMessage(direction: "<<", payload: payload, to: state)
+      }
     }
   }
 
@@ -554,7 +562,9 @@ final class InAppDebuggerNativeNetworkCapture {
     }
     mutateNativeWebSocket(task, policy: .visibleThrottled) { state in
       hydrateNativeWebSocketHandshake(for: task, state: state)
-      appendEvent("ping", to: state)
+      if panelActive {
+        appendEvent("ping", to: state)
+      }
     }
   }
 
@@ -754,8 +764,7 @@ final class InAppDebuggerNativeNetworkCapture {
     incoming: Data,
     contentType: String?
   ) -> (previewData: Data, previewText: String?) {
-    let previewLimit = 32_000
-    let remainingCapacity = max(previewLimit - existing.count, 0)
+    let remainingCapacity = max(inAppDebuggerNativeResponsePreviewLimit - existing.count, 0)
     var appendedData = existing
     if remainingCapacity > 0 {
       appendedData.append(incoming.prefix(remainingCapacity))
@@ -836,21 +845,24 @@ final class InAppDebuggerNativeNetworkCapture {
     String(UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque()))
   }
 
-  private func describeWebSocketMessage(_ message: AnyObject) -> (kind: String, body: String?, byteCount: Int) {
+  private func describeWebSocketMessage(
+    _ message: AnyObject,
+    includeBody: Bool = true
+  ) -> (kind: String, body: String?, byteCount: Int) {
     if message.responds(to: NSSelectorFromString("string")),
        let text = message.perform(NSSelectorFromString("string"))?.takeUnretainedValue() as? NSString {
       let value = text as String
-      return ("text", truncatedTextPreview(value), value.lengthOfBytes(using: .utf8))
+      return ("text", includeBody ? truncatedTextPreview(value) : nil, value.lengthOfBytes(using: .utf8))
     }
 
     if message.responds(to: NSSelectorFromString("data")),
        let data = message.perform(NSSelectorFromString("data"))?.takeUnretainedValue() as? NSData {
       let value = data as Data
-      return ("binary", binaryPreview(for: value), value.count)
+      return ("binary", includeBody ? binaryPreview(for: value) : nil, value.count)
     }
 
     let fallback = String(describing: message)
-    return ("unknown", truncatedTextPreview(fallback), fallback.lengthOfBytes(using: .utf8))
+    return ("unknown", includeBody ? truncatedTextPreview(fallback) : nil, fallback.lengthOfBytes(using: .utf8))
   }
 
   private func sanitizeInlineText(_ text: String) -> String {
