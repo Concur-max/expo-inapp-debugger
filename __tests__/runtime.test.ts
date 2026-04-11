@@ -107,7 +107,11 @@ describe('DebugRuntime', () => {
     expect(batch.errors).toHaveLength(1);
     expect(batch.network).toBeNull();
     expect(batch.logs[0][5]).toBe('hello');
+    expect(typeof batch.logs[0][8]).toBe('number');
+    expect(typeof batch.logs[0][9]).toBe('number');
     expect(batch.errors[0][1]).toBe('console');
+    expect(typeof batch.errors[0][5]).toBe('number');
+    expect(typeof batch.errors[0][6]).toBe('number');
 
     await runtime.disable();
     console.log('after disable');
@@ -295,5 +299,6 @@ describe('DebugRuntime', () => {
     expect(batch.network[0][10]).toBe(200);
     expect(batch.network[0][11]).toEqual(['accept', 'application/json']);
     expect(batch.network[0][12]).toEqual(['content-type', 'application/json']);
+    expect(typeof batch.network[0][32]).toBe('number');
   });
 });

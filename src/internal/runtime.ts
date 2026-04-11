@@ -76,14 +76,28 @@ export type DebugRuntimeDependencies = {
   networkFactory?: (options: {
     maxRequests: number;
     onEntry: (entry: DebugNetworkEntry) => void;
+    nextTimelineSequence: () => number;
     onInternalWarning?: (message: string, error?: unknown) => void;
     onDiagnostic?: (component: string, message: string) => void;
   }) => { enable(): void; disable(): void; updateOptions(options: { maxRequests: number }): void };
 };
 
-function createId(nowValue: number) {
+type RuntimeIdentity = {
+  id: string;
+  sequence: number;
+};
+
+function nextRuntimeSequence() {
   runtimeEntryCounter += 1;
-  return `${nowValue}_${runtimeEntryCounter.toString(36)}`;
+  return runtimeEntryCounter;
+}
+
+function createRuntimeIdentity(nowValue: number): RuntimeIdentity {
+  const sequence = nextRuntimeSequence();
+  return {
+    id: `${nowValue}_${sequence.toString(36)}`,
+    sequence,
+  };
 }
 
 function stringifyValue(value: unknown) {
@@ -273,12 +287,14 @@ export class DebugRuntime {
       dependencies.networkFactory?.({
         maxRequests: this.providerConfig.maxRequests,
         onEntry: (entry) => this.captureNetwork(entry),
+        nextTimelineSequence: () => nextRuntimeSequence(),
         onInternalWarning: (message, error) => this.internalWarn(message, error),
         onDiagnostic: (component, message) => this.emitDiagnostic(component, message),
       }) ??
       new NetworkCollector({
         maxRequests: this.providerConfig.maxRequests,
         onEntry: (entry) => this.captureNetwork(entry),
+        nextTimelineSequence: () => nextRuntimeSequence(),
         onInternalWarning: (message, error) => this.internalWarn(message, error),
         onDiagnostic: (component, message) => this.emitDiagnostic(component, message),
       });
@@ -345,13 +361,16 @@ export class DebugRuntime {
 
   log(level: DebugLevel, args: unknown[]) {
     const nowValue = this.now();
+    const identity = createRuntimeIdentity(nowValue);
     const entry: DebugLogEntry = {
-      id: createId(nowValue),
+      id: identity.id,
       type: level,
       origin: 'js',
       context: 'console',
       message: formatMessage(args),
       ...formatTimestamps(nowValue),
+      timelineTimestampMillis: nowValue,
+      timelineSequence: identity.sequence,
     };
     this.enqueueLog(entry);
     if (level === 'error') {
@@ -361,11 +380,14 @@ export class DebugRuntime {
 
   captureError(source: DebugErrorSource, args: unknown[]) {
     const nowValue = this.now();
+    const identity = createRuntimeIdentity(nowValue);
     const entry: DebugErrorEntry = {
-      id: createId(nowValue),
+      id: identity.id,
       source,
       message: formatMessage(args),
       ...formatTimestamps(nowValue),
+      timelineTimestampMillis: nowValue,
+      timelineSequence: identity.sequence,
     };
     this.enqueueError(entry);
   }
@@ -653,6 +675,8 @@ export class DebugRuntime {
 }
 
 function encodeLogEntry(entry: DebugLogEntry): NativeLogWireEntry {
+  const timelineTimestampMillis = entry.timelineTimestampMillis ?? resolveTimelineTimestampMillis(entry.fullTimestamp);
+  const timelineSequence = entry.timelineSequence ?? resolveTimelineSequence(entry.id);
   return [
     entry.id,
     entry.type,
@@ -662,20 +686,27 @@ function encodeLogEntry(entry: DebugLogEntry): NativeLogWireEntry {
     entry.message,
     entry.timestamp,
     entry.fullTimestamp,
+    timelineTimestampMillis,
+    timelineSequence,
   ]
 }
 
 function encodeErrorEntry(entry: DebugErrorEntry): NativeErrorWireEntry {
+  const timelineTimestampMillis = entry.timelineTimestampMillis ?? resolveTimelineTimestampMillis(entry.fullTimestamp);
+  const timelineSequence = entry.timelineSequence ?? resolveTimelineSequence(entry.id);
   return [
     entry.id,
     entry.source,
     entry.message,
     entry.timestamp,
     entry.fullTimestamp,
+    timelineTimestampMillis,
+    timelineSequence,
   ]
 }
 
 function encodeNetworkEntry(entry: DebugNetworkEntry): NativeNetworkWireEntry {
+  const timelineSequence = entry.timelineSequence ?? resolveTimelineSequence(entry.id);
   return [
     entry.id,
     entry.kind,
@@ -709,7 +740,38 @@ function encodeNetworkEntry(entry: DebugNetworkEntry): NativeNetworkWireEntry {
     entry.bytesOut ?? null,
     entry.events ?? null,
     entry.messages ?? null,
+    timelineSequence,
   ]
+}
+
+function resolveTimelineTimestampMillis(fullTimestamp: string): number | null {
+  if (!fullTimestamp) {
+    return null;
+  }
+  const parsed = Date.parse(fullTimestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveTimelineSequence(id: string): number | null {
+  const suffix = id.slice(id.lastIndexOf('_') + 1);
+  if (!suffix) {
+    return null;
+  }
+
+  if (/^\d+$/.test(suffix)) {
+    const decimalValue = Number.parseInt(suffix, 10);
+    return Number.isFinite(decimalValue) ? decimalValue : null;
+  }
+
+  let value = 0;
+  for (const char of suffix.toLowerCase()) {
+    const digit = Number.parseInt(char, 36);
+    if (!Number.isFinite(digit) || digit < 0 || digit >= 36) {
+      return null;
+    }
+    value = value * 36 + digit;
+  }
+  return Number.isFinite(value) ? value : null;
 }
 
 function encodeHeaderMap(headers: DebugNetworkEntry['requestHeaders']): string[] | null {

@@ -393,6 +393,7 @@ object InAppDebuggerNativeNetworkCapture {
   private fun createCallStateLocked(request: Request): NativeOkHttpCallState {
     val startedAt = System.currentTimeMillis()
     val isWebSocket = isWebSocketUpgrade(request)
+    val timelineSequence = requestCounter.incrementAndGet()
     val method =
       if (isWebSocket) {
         webSocketMethod(request.url.toString())
@@ -400,12 +401,13 @@ object InAppDebuggerNativeNetworkCapture {
         request.method.uppercase(Locale.ROOT)
       }
     val state = NativeOkHttpCallState(
-      requestId = buildRequestId(isWebSocket, startedAt),
+      requestId = buildRequestId(isWebSocket, startedAt, timelineSequence),
       kind = if (isWebSocket) "websocket" else "http",
       method = method,
       url = request.url.toString(),
       startedAt = startedAt,
       updatedAt = startedAt,
+      timelineSequence = timelineSequence,
       requestHeaders = request.headers.toDebugHeaderMap(),
       requestedProtocols = request.header("Sec-WebSocket-Protocol")?.takeIf { it.isNotBlank() },
       state = if (isWebSocket) "connecting" else "pending"
@@ -414,9 +416,13 @@ object InAppDebuggerNativeNetworkCapture {
     return state
   }
 
-  private fun buildRequestId(isWebSocket: Boolean, startedAt: Long): String {
+  private fun buildRequestId(
+    isWebSocket: Boolean,
+    startedAt: Long,
+    timelineSequence: Long
+  ): String {
     val prefix = if (isWebSocket) NATIVE_WS_ID_PREFIX else NATIVE_HTTP_ID_PREFIX
-    return prefix + startedAt + "_" + requestCounter.incrementAndGet()
+    return prefix + startedAt + "_" + timelineSequence
   }
 
   private fun appendRedirectEventsLocked(
@@ -490,6 +496,7 @@ internal data class NativeOkHttpCallState(
   var url: String,
   val startedAt: Long,
   var updatedAt: Long,
+  val timelineSequence: Long,
   val requestHeaders: Map<String, String>,
   var responseHeaders: Map<String, String> = emptyMap(),
   var requestBody: String? = null,
@@ -544,7 +551,8 @@ internal data class NativeOkHttpCallState(
       error = error,
       protocol = protocol,
       requestedProtocols = requestedProtocols,
-      events = serializedEvents
+      events = serializedEvents,
+      timelineSequence = timelineSequence
     )
   }
 }

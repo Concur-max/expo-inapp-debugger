@@ -13,10 +13,10 @@ object InAppDebuggerStore {
   private val publishVisibleUiRunnable = Runnable { flushVisibleUiState() }
 
   private var config = DebugConfig()
-  private val logs = RingBuffer<DebugLogEntry>(DebugConfig().maxLogs)
-  private val pendingNativeLogs = RingBuffer<DebugLogEntry>(DebugConfig().maxLogs)
-  private val errors = RingBuffer<DebugErrorEntry>(DebugConfig().maxErrors)
-  private val network = KeyedRingBuffer<String, DebugNetworkEntry>(DebugConfig().maxRequests) { it.id }
+  private val logs = TimelineBuffer(DebugConfig().maxLogs, DebugLogEntry::timelineSortKey)
+  private val pendingNativeLogs = TimelineBuffer(DebugConfig().maxLogs, DebugLogEntry::timelineSortKey)
+  private val errors = TimelineBuffer(DebugConfig().maxErrors, DebugErrorEntry::timelineSortKey)
+  private val network = KeyedTimelineBuffer(DebugConfig().maxRequests, { it.id }, DebugNetworkEntry::timelineSortKey)
   private var runtimeInfo = DebugRuntimeInfo()
 
   private var panelVisible = false
@@ -483,58 +483,83 @@ object InAppDebuggerStore {
   private fun parseLog(raw: Any?): DebugLogEntry? {
     val map = raw.typedMap()
     if (map != null) {
+      val id = map.string("id") ?: return null
+      val fullTimestamp = map.string("fullTimestamp") ?: ""
       return DebugLogEntry(
-        id = map.string("id") ?: return null,
+        id = id,
         type = map.string("type") ?: "log",
         origin = map.string("origin") ?: "js",
         context = map.string("context"),
         details = map.string("details"),
         message = map.string("message") ?: "",
         timestamp = map.string("timestamp") ?: "",
-        fullTimestamp = map.string("fullTimestamp") ?: ""
+        fullTimestamp = fullTimestamp,
+        timelineTimestampMillis =
+          map.long("timelineTimestampMillis")
+            ?: map.long("timestampMillis")
+            ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
+        timelineSequence = map.long("timelineSequence") ?: resolveTimelineSequence(id)
       )
     }
 
     val list = raw.typedList() ?: return null
+    val id = list.string(0) ?: return null
+    val fullTimestamp = list.string(7) ?: ""
     return DebugLogEntry(
-      id = list.string(0) ?: return null,
+      id = id,
       type = list.string(1) ?: "log",
       origin = list.string(2) ?: "js",
       context = list.string(3),
       details = list.string(4),
       message = list.string(5) ?: "",
       timestamp = list.string(6) ?: "",
-      fullTimestamp = list.string(7) ?: ""
+      fullTimestamp = fullTimestamp,
+      timelineTimestampMillis =
+        list.long(8) ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
+      timelineSequence = list.long(9) ?: resolveTimelineSequence(id)
     )
   }
 
   private fun parseError(raw: Any?): DebugErrorEntry? {
     val map = raw.typedMap()
     if (map != null) {
+      val id = map.string("id") ?: return null
+      val fullTimestamp = map.string("fullTimestamp") ?: ""
       return DebugErrorEntry(
-        id = map.string("id") ?: return null,
+        id = id,
         source = map.string("source") ?: "console",
         message = map.string("message") ?: "",
         timestamp = map.string("timestamp") ?: "",
-        fullTimestamp = map.string("fullTimestamp") ?: ""
+        fullTimestamp = fullTimestamp,
+        timelineTimestampMillis =
+          map.long("timelineTimestampMillis")
+            ?: map.long("timestampMillis")
+            ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
+        timelineSequence = map.long("timelineSequence") ?: resolveTimelineSequence(id)
       )
     }
 
     val list = raw.typedList() ?: return null
+    val id = list.string(0) ?: return null
+    val fullTimestamp = list.string(4) ?: ""
     return DebugErrorEntry(
-      id = list.string(0) ?: return null,
+      id = id,
       source = list.string(1) ?: "console",
       message = list.string(2) ?: "",
       timestamp = list.string(3) ?: "",
-      fullTimestamp = list.string(4) ?: ""
+      fullTimestamp = fullTimestamp,
+      timelineTimestampMillis =
+        list.long(5) ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
+      timelineSequence = list.long(6) ?: resolveTimelineSequence(id)
     )
   }
 
   private fun parseNetwork(raw: Any?): DebugNetworkEntry? {
     val map = raw.typedMap()
     if (map != null) {
+      val id = map.string("id") ?: return null
       return DebugNetworkEntry(
-        id = map.string("id") ?: return null,
+        id = id,
         kind = map.string("kind") ?: "http",
         method = map.string("method") ?: "GET",
         url = map.string("url") ?: "",
@@ -565,14 +590,16 @@ object InAppDebuggerStore {
         bytesIn = map.int("bytesIn"),
         bytesOut = map.int("bytesOut"),
         events = map.string("events"),
-        messages = map.string("messages")
+        messages = map.string("messages"),
+        timelineSequence = map.long("timelineSequence") ?: resolveTimelineSequence(id)
       )
     }
 
     val list = raw.typedList() ?: return null
+    val id = list.string(0) ?: return null
     val startedAt = list.long(6) ?: 0L
     return DebugNetworkEntry(
-      id = list.string(0) ?: return null,
+      id = id,
       kind = list.string(1) ?: "http",
       method = list.string(2) ?: "GET",
       url = list.string(3) ?: "",
@@ -603,7 +630,8 @@ object InAppDebuggerStore {
       bytesIn = list.int(28),
       bytesOut = list.int(29),
       events = list.string(30),
-      messages = list.string(31)
+      messages = list.string(31),
+      timelineSequence = list.long(32) ?: resolveTimelineSequence(id)
     )
   }
 
@@ -616,166 +644,63 @@ object InAppDebuggerStore {
   }
 }
 
-private class RingBuffer<T>(initialCapacity: Int) {
-  private var storage = arrayOfNulls<Any?>(initialCapacity.coerceAtLeast(0))
-  private var head = 0
-
-  var size: Int = 0
-    private set
-
-  fun append(item: T): Boolean {
-    if (storage.isEmpty()) {
-      return false
-    }
-
-    if (size < storage.size) {
-      storage[(head + size) % storage.size] = item
-      size += 1
-      return true
-    }
-
-    storage[head] = item
-    head = (head + 1) % storage.size
-    return true
-  }
-
-  fun appendAll(items: Iterable<T>): Boolean {
-    var changed = false
-    items.forEach { item ->
-      if (append(item)) {
-        changed = true
-      }
-    }
-    return changed
-  }
-
-  fun moveAllTo(target: RingBuffer<T>): Boolean {
-    if (size == 0) {
-      return false
-    }
-
-    var targetChanged = false
-    var remaining = size
-    var slot = head
-    @Suppress("UNCHECKED_CAST")
-    while (remaining > 0) {
-      if (target.append(storage[slot] as T)) {
-        targetChanged = true
-      }
-      storage[slot] = null
-      slot += 1
-      if (slot == storage.size) {
-        slot = 0
-      }
-      remaining -= 1
-    }
-
-    head = 0
-    size = 0
-    return targetChanged
-  }
-
-  fun snapshot(): List<T> {
-    if (size == 0) {
-      return emptyList()
-    }
-
-    val result = ArrayList<T>(size)
-    var remaining = size
-    var slot = head
-    @Suppress("UNCHECKED_CAST")
-    while (remaining > 0) {
-      result.add(storage[slot] as T)
-      slot += 1
-      if (slot == storage.size) {
-        slot = 0
-      }
-      remaining -= 1
-    }
-    return result
-  }
-
-  fun clear(): Boolean {
-    if (size == 0) {
-      return false
-    }
-
-    storage.fill(null)
-    head = 0
-    size = 0
-    return true
-  }
-
-  fun resize(nextCapacity: Int): Boolean {
-    val normalizedCapacity = nextCapacity.coerceAtLeast(0)
-    if (normalizedCapacity == storage.size) {
-      return false
-    }
-
-    val nextStorage = arrayOfNulls<Any?>(normalizedCapacity)
-    val nextSize = minOf(size, normalizedCapacity)
-    val startIndex = size - nextSize
-
-    for (index in 0 until nextSize) {
-      nextStorage[index] = elementAt(startIndex + index)
-    }
-
-    storage = nextStorage
-    head = 0
-    size = nextSize
-    return true
-  }
-
-  @Suppress("UNCHECKED_CAST")
-  private fun elementAt(index: Int): T {
-    val slot = (head + index) % storage.size
-    return storage[slot] as T
-  }
-}
-
-private class KeyedRingBuffer<K, T>(
+private class TimelineBuffer<T>(
   initialCapacity: Int,
-  private val keySelector: (T) -> K
+  private val sortKeySelector: (T) -> TimelineSortKey
 ) {
   private var capacity = initialCapacity.coerceAtLeast(0)
-  private val items = LinkedHashMap<K, T>(capacity.coerceAtLeast(16))
+  private val items = ArrayList<T>(capacity.coerceAtLeast(0))
 
   val size: Int
     get() = items.size
 
-  fun upsert(item: T): Boolean {
+  fun append(item: T): Boolean {
     if (capacity == 0) {
       return false
     }
 
-    val key = keySelector(item)
-    items[key] = item
-    trimToCapacity()
+    val insertionIndex = insertionIndexFor(sortKeySelector(item))
+    items.add(insertionIndex, item)
+    if (items.size > capacity) {
+      if (insertionIndex == 0) {
+        items.removeAt(0)
+        return false
+      }
+      items.removeAt(0)
+    }
     return true
   }
 
-  fun get(key: K): T? {
-    return items[key]
-  }
-
-  fun upsertAll(values: Iterable<T>): Boolean {
+  fun appendAll(values: Iterable<T>): Boolean {
     var changed = false
     values.forEach { value ->
-      if (upsert(value)) {
+      if (append(value)) {
         changed = true
       }
     }
     return changed
+  }
+
+  fun moveAllTo(target: TimelineBuffer<T>): Boolean {
+    if (items.isEmpty()) {
+      return false
+    }
+
+    var targetChanged = false
+    items.forEach { item ->
+      if (target.append(item)) {
+        targetChanged = true
+      }
+    }
+    items.clear()
+    return targetChanged
   }
 
   fun snapshot(): List<T> {
     if (items.isEmpty()) {
       return emptyList()
     }
-
-    val result = ArrayList<T>(items.size)
-    items.values.forEach(result::add)
-    return result
+    return ArrayList(items)
   }
 
   fun clear(): Boolean {
@@ -804,15 +729,161 @@ private class KeyedRingBuffer<K, T>(
       return
     }
 
-    while (items.size > capacity) {
-      val iterator = items.entries.iterator()
-      if (!iterator.hasNext()) {
-        return
-      }
-      iterator.next()
-      iterator.remove()
+    val overflow = items.size - capacity
+    if (overflow > 0) {
+      items.subList(0, overflow).clear()
     }
   }
+
+  private fun insertionIndexFor(sortKey: TimelineSortKey): Int {
+    var low = 0
+    var high = items.size
+    while (low < high) {
+      val mid = (low + high) ushr 1
+      val comparison = compareTimelineSortKeys(sortKeySelector(items[mid]), sortKey)
+      if (comparison <= 0) {
+        low = mid + 1
+      } else {
+        high = mid
+      }
+    }
+    return low
+  }
+}
+
+private class KeyedTimelineBuffer<T>(
+  initialCapacity: Int,
+  private val keySelector: (T) -> String,
+  private val sortKeySelector: (T) -> TimelineSortKey
+) {
+  private var capacity = initialCapacity.coerceAtLeast(0)
+  private val itemsByKey = HashMap<String, T>(capacity.coerceAtLeast(16))
+  private val sortKeysByKey = HashMap<String, TimelineSortKey>(capacity.coerceAtLeast(16))
+  private val orderedKeys = ArrayList<String>(capacity.coerceAtLeast(0))
+
+  val size: Int
+    get() = orderedKeys.size
+
+  fun upsert(item: T): Boolean {
+    if (capacity == 0) {
+      return false
+    }
+
+    val key = keySelector(item)
+    orderedKeys.remove(key)
+    itemsByKey[key] = item
+    val sortKey = sortKeySelector(item)
+    sortKeysByKey[key] = sortKey
+
+    val insertionIndex = insertionIndexFor(sortKey)
+    orderedKeys.add(insertionIndex, key)
+    if (orderedKeys.size > capacity) {
+      val removedKey = orderedKeys.removeAt(0)
+      itemsByKey.remove(removedKey)
+      sortKeysByKey.remove(removedKey)
+      return removedKey != key
+    }
+    return true
+  }
+
+  fun get(key: String): T? {
+    return itemsByKey[key]
+  }
+
+  fun upsertAll(values: Iterable<T>): Boolean {
+    var changed = false
+    values.forEach { value ->
+      if (upsert(value)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  fun snapshot(): List<T> {
+    if (orderedKeys.isEmpty()) {
+      return emptyList()
+    }
+
+    val result = ArrayList<T>(orderedKeys.size)
+    orderedKeys.forEach { key ->
+      itemsByKey[key]?.let(result::add)
+    }
+    return result
+  }
+
+  fun clear(): Boolean {
+    if (orderedKeys.isEmpty()) {
+      return false
+    }
+
+    itemsByKey.clear()
+    sortKeysByKey.clear()
+    orderedKeys.clear()
+    return true
+  }
+
+  fun resize(nextCapacity: Int): Boolean {
+    val normalizedCapacity = nextCapacity.coerceAtLeast(0)
+    if (normalizedCapacity == capacity) {
+      return false
+    }
+
+    capacity = normalizedCapacity
+    trimToCapacity()
+    return true
+  }
+
+  private fun trimToCapacity() {
+    if (capacity <= 0) {
+      itemsByKey.clear()
+      sortKeysByKey.clear()
+      orderedKeys.clear()
+      return
+    }
+
+    while (orderedKeys.size > capacity) {
+      val removedKey = orderedKeys.removeAt(0)
+      itemsByKey.remove(removedKey)
+      sortKeysByKey.remove(removedKey)
+    }
+  }
+
+  private fun insertionIndexFor(sortKey: TimelineSortKey): Int {
+    var low = 0
+    var high = orderedKeys.size
+    while (low < high) {
+      val mid = (low + high) ushr 1
+      val currentKey = orderedKeys[mid]
+      val currentSortKey = sortKeysByKey[currentKey] ?: break
+      val comparison = compareTimelineSortKeys(currentSortKey, sortKey)
+      if (comparison <= 0) {
+        low = mid + 1
+      } else {
+        high = mid
+      }
+    }
+    return low
+  }
+}
+
+private fun compareTimelineSortKeys(lhs: TimelineSortKey, rhs: TimelineSortKey): Int {
+  val primaryComparison = lhs.primaryTimeMillis.compareTo(rhs.primaryTimeMillis)
+  if (primaryComparison != 0) {
+    return primaryComparison
+  }
+
+  val secondaryComparison = lhs.secondaryTimeMillis.compareTo(rhs.secondaryTimeMillis)
+  if (secondaryComparison != 0) {
+    return secondaryComparison
+  }
+
+  val sequenceComparison = lhs.sequence.compareTo(rhs.sequence)
+  if (sequenceComparison != 0) {
+    return sequenceComparison
+  }
+
+  return lhs.stableId.compareTo(rhs.stableId)
 }
 
 private fun Map<String, Any?>.string(key: String): String? = this[key] as? String

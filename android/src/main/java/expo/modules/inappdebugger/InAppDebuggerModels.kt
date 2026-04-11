@@ -35,7 +35,9 @@ data class DebugLogEntry(
   val details: String? = null,
   val message: String,
   val timestamp: String,
-  val fullTimestamp: String
+  val fullTimestamp: String,
+  val timelineTimestampMillis: Long = 0L,
+  val timelineSequence: Long = 0L
 )
 
 data class DebugErrorEntry(
@@ -43,7 +45,9 @@ data class DebugErrorEntry(
   val source: String,
   val message: String,
   val timestamp: String,
-  val fullTimestamp: String
+  val fullTimestamp: String,
+  val timelineTimestampMillis: Long = 0L,
+  val timelineSequence: Long = 0L
 )
 
 data class DebugNetworkEntry(
@@ -78,7 +82,8 @@ data class DebugNetworkEntry(
   val bytesIn: Int? = null,
   val bytesOut: Int? = null,
   val events: String? = null,
-  val messages: String? = null
+  val messages: String? = null,
+  val timelineSequence: Long = 0L
 )
 
 data class DebugRuntimeInfo(
@@ -139,6 +144,13 @@ data class DebugListWindowState<T>(
   val items: List<T> = emptyList()
 )
 
+data class TimelineSortKey(
+  val primaryTimeMillis: Long,
+  val secondaryTimeMillis: Long = Long.MIN_VALUE,
+  val sequence: Long = 0L,
+  val stableId: String
+)
+
 private val nativeLogClockFormatter: DateTimeFormatter =
   DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
 private val nativeIsoInstantFormatter: DateTimeFormatter = DateTimeFormatter.ISO_INSTANT
@@ -158,16 +170,88 @@ fun createNativeDebugLogEntry(
   timestampMillis: Long = System.currentTimeMillis()
 ): DebugLogEntry {
   val instant = Instant.ofEpochMilli(timestampMillis)
+  val sequence = nativeEntryIdCounter.incrementAndGet()
   return DebugLogEntry(
-    id = "native_${timestampMillis}_${nativeEntryIdCounter.incrementAndGet()}",
+    id = "native_${timestampMillis}_${sequence}",
     type = type,
     origin = "native",
     context = context,
     details = details,
     message = message,
     timestamp = formatNativeLogClock(instant),
-    fullTimestamp = nativeIsoInstantFormatter.format(instant)
+    fullTimestamp = nativeIsoInstantFormatter.format(instant),
+    timelineTimestampMillis = timestampMillis,
+    timelineSequence = sequence
   )
+}
+
+fun DebugLogEntry.timelineSortKey(): TimelineSortKey {
+  return TimelineSortKey(
+    primaryTimeMillis = timelineTimestampMillis,
+    sequence = timelineSequence,
+    stableId = id
+  )
+}
+
+fun DebugErrorEntry.timelineSortKey(): TimelineSortKey {
+  return TimelineSortKey(
+    primaryTimeMillis = timelineTimestampMillis,
+    sequence = timelineSequence,
+    stableId = id
+  )
+}
+
+fun DebugNetworkEntry.timelineSortKey(): TimelineSortKey {
+  return TimelineSortKey(
+    primaryTimeMillis = startedAt,
+    sequence = timelineSequence,
+    stableId = id
+  )
+}
+
+fun resolveTimelineTimestampMillis(
+  fullTimestamp: String?,
+  fallbackTimestampMillis: Long = 0L,
+  id: String? = null
+): Long {
+  if (!fullTimestamp.isNullOrBlank()) {
+    runCatching {
+      Instant.parse(fullTimestamp).toEpochMilli()
+    }.getOrNull()?.let { parsed ->
+      return parsed
+    }
+  }
+
+  if (fallbackTimestampMillis > 0L) {
+    return fallbackTimestampMillis
+  }
+
+  extractTimelineTimestampMillisFromId(id)?.let { parsed ->
+    return parsed
+  }
+
+  return 0L
+}
+
+fun resolveTimelineSequence(id: String): Long {
+  val suffix = id.substringAfterLast('_', missingDelimiterValue = "")
+  if (suffix.isEmpty()) {
+    return 0L
+  }
+
+  return suffix.toLongOrNull() ?: suffix.toLongOrNull(radix = 36) ?: 0L
+}
+
+private fun extractTimelineTimestampMillisFromId(id: String?): Long? {
+  val parts = id?.split('_') ?: return null
+  for (index in parts.indices.reversed()) {
+    val candidate = parts[index]
+    if (candidate.length < 10 || !candidate.all(Char::isDigit)) {
+      continue
+    }
+    return candidate.toLongOrNull()
+  }
+  return null
 }
 
 fun DebugLogEntry.toMap(): Map<String, Any?> = mapOf(
@@ -178,7 +262,9 @@ fun DebugLogEntry.toMap(): Map<String, Any?> = mapOf(
   "details" to details,
   "message" to message,
   "timestamp" to timestamp,
-  "fullTimestamp" to fullTimestamp
+  "fullTimestamp" to fullTimestamp,
+  "timelineTimestampMillis" to timelineTimestampMillis,
+  "timelineSequence" to timelineSequence
 )
 
 fun DebugErrorEntry.toMap(): Map<String, Any?> = mapOf(
@@ -186,7 +272,9 @@ fun DebugErrorEntry.toMap(): Map<String, Any?> = mapOf(
   "source" to source,
   "message" to message,
   "timestamp" to timestamp,
-  "fullTimestamp" to fullTimestamp
+  "fullTimestamp" to fullTimestamp,
+  "timelineTimestampMillis" to timelineTimestampMillis,
+  "timelineSequence" to timelineSequence
 )
 
 fun DebugNetworkEntry.toMap(): Map<String, Any?> = mapOf(
@@ -221,5 +309,6 @@ fun DebugNetworkEntry.toMap(): Map<String, Any?> = mapOf(
   "bytesIn" to bytesIn,
   "bytesOut" to bytesOut,
   "events" to events,
-  "messages" to messages
+  "messages" to messages,
+  "timelineSequence" to timelineSequence
 )

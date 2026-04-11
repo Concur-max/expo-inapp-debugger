@@ -30,6 +30,7 @@ type WebSocketInterceptorModule = {
 type NetworkCollectorOptions = {
   maxRequests: number;
   onEntry: (entry: DebugNetworkEntry) => void;
+  nextTimelineSequence?: () => number;
   onInternalWarning?: (message: string, error?: unknown) => void;
   onDiagnostic?: (component: string, message: string) => void;
 };
@@ -109,6 +110,7 @@ export class NetworkCollector {
   private readonly xhrIdMap = new Map<number, string>();
   private readonly requestToXHRId = new Map<string, number>();
   private nextId = 1;
+  private nextFallbackTimelineSequence = 1;
   private enabled = false;
   private xhrInterceptor: XHRInterceptorModule | null = null;
   private webSocketInterceptor: WebSocketInterceptorModule | null = null;
@@ -181,6 +183,7 @@ export class NetworkCollector {
         updatedAt: timestamp,
         requestHeaders: {},
         responseHeaders: {},
+        timelineSequence: this.nextTimelineSequence(),
       };
       this.requests.set(requestId, entry);
       this.options.onDiagnostic?.('JSNetwork', `xhr open id=${requestId} method=${entry.method} url=${url}`);
@@ -205,6 +208,7 @@ export class NetworkCollector {
       entry.requestBody = safeStringify(data);
       entry.startedAt = timestamp;
       entry.updatedAt = timestamp;
+      entry.timelineSequence = this.nextTimelineSequence();
       this.emit(entry);
     });
 
@@ -285,6 +289,7 @@ export class NetworkCollector {
           updatedAt: timestamp,
           messages: '',
           messagesList: [],
+          timelineSequence: this.nextTimelineSequence(),
         };
         this.requests.set(entry.id, entry);
         this.options.onDiagnostic?.('JSNetwork', `ws connect id=${entry.id} url=${url}`);
@@ -395,13 +400,31 @@ export class NetworkCollector {
 
   private trim() {
     while (this.requests.size > this.options.maxRequests) {
-      const firstKey = this.requests.keys().next().value;
-      if (!firstKey) {
+      const oldestEntry = this.findOldestEntry();
+      if (!oldestEntry) {
         return;
       }
-      this.requests.delete(firstKey);
-      this.releaseXHRRequest(firstKey);
+      this.requests.delete(oldestEntry.id);
+      this.releaseXHRRequest(oldestEntry.id);
     }
+  }
+
+  private nextTimelineSequence() {
+    return this.options.nextTimelineSequence?.() ?? this.nextFallbackTimelineSequence++;
+  }
+
+  private findOldestEntry() {
+    let candidate: MutableNetworkEntry | null = null;
+    for (const entry of this.requests.values()) {
+      if (!candidate) {
+        candidate = entry;
+        continue;
+      }
+      if (compareNetworkTimeline(entry, candidate) < 0) {
+        candidate = entry;
+      }
+    }
+    return candidate;
   }
 
   private releaseXHRRequest(requestId: string) {
@@ -455,4 +478,14 @@ function parseRawResponseHeaders(rawHeaders: string): HeaderMap {
     result[key] = existingValue ? `${existingValue}, ${value}` : value;
   }
   return result;
+}
+
+function compareNetworkTimeline(lhs: DebugNetworkEntry, rhs: DebugNetworkEntry) {
+  if (lhs.startedAt !== rhs.startedAt) {
+    return lhs.startedAt - rhs.startedAt;
+  }
+  if ((lhs.timelineSequence ?? 0) !== (rhs.timelineSequence ?? 0)) {
+    return (lhs.timelineSequence ?? 0) - (rhs.timelineSequence ?? 0);
+  }
+  return lhs.id.localeCompare(rhs.id);
 }

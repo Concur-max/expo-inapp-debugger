@@ -44,6 +44,8 @@ export type DebugLogEntry = {
   message: string;
   timestamp: string;
   fullTimestamp: string;
+  timelineTimestampMillis?: number;
+  timelineSequence?: number;
 };
 
 export type DebugErrorEntry = {
@@ -52,6 +54,8 @@ export type DebugErrorEntry = {
   message: string;
   timestamp: string;
   fullTimestamp: string;
+  timelineTimestampMillis?: number;
+  timelineSequence?: number;
 };
 
 export type DebugNetworkEntry = {
@@ -87,6 +91,7 @@ export type DebugNetworkEntry = {
   bytesOut?: number;
   events?: string;
   messages?: string;
+  timelineSequence?: number;
 };
 
 export type DebugSnapshot = {

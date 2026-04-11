@@ -10,6 +10,8 @@ export type NativeLogWireEntry = [
   message: string,
   timestamp: string,
   fullTimestamp: string,
+  timelineTimestampMillis?: number | null,
+  timelineSequence?: number | null,
 ];
 
 export type NativeErrorWireEntry = [
@@ -18,6 +20,8 @@ export type NativeErrorWireEntry = [
   message: string,
   timestamp: string,
   fullTimestamp: string,
+  timelineTimestampMillis?: number | null,
+  timelineSequence?: number | null,
 ];
 
 export type NativeNetworkWireEntry = [
@@ -53,6 +57,7 @@ export type NativeNetworkWireEntry = [
   bytesOut: number | null,
   events: string | null,
   messages: string | null,
+  timelineSequence?: number | null,
 ];
 
 export type NativeBatchPayload = {
