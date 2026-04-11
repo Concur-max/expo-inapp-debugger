@@ -40,6 +40,7 @@ private const val MAX_BODY_PREVIEW_BYTES = 32_000L
 private const val MAX_BINARY_PREVIEW_BYTES = 48
 private const val MAX_EVENT_REDIRECTS = 8
 private const val MAX_EVENT_LINES = 48
+private const val LIVE_UPDATE_THROTTLE_MS = 120L
 private val HEX_DIGITS = "0123456789ABCDEF".toCharArray()
 
 object InAppDebuggerNativeNetworkCapture {
@@ -50,13 +51,17 @@ object InAppDebuggerNativeNetworkCapture {
   private var appContextRef: WeakReference<Context>? = null
   @Volatile private var enabled = false
   @Volatile private var hooksInstalled = false
+  @Volatile private var livePanelActive = false
+  private var panelRequestedActive = false
   private val activeCalls = mutableMapOf<Call, NativeOkHttpCallState>()
 
   fun applyConfig(context: Context?, config: DebugConfig) {
+    var shouldRefreshVisibleEntries = false
     synchronized(lock) {
       if (context != null) {
         appContextRef = WeakReference(context.applicationContext)
       }
+      val wasLivePanelActive = livePanelActive
       enabled = config.enabled && config.enableNetworkTab
       if (enabled) {
         if (!hooksInstalled) {
@@ -65,15 +70,54 @@ object InAppDebuggerNativeNetworkCapture {
       } else {
         activeCalls.clear()
       }
+      livePanelActive = enabled && panelRequestedActive
+      shouldRefreshVisibleEntries = livePanelActive && !wasLivePanelActive
+    }
+    if (shouldRefreshVisibleEntries) {
+      refreshVisibleEntries()
     }
   }
 
   fun shutdown() {
     synchronized(lock) {
       enabled = false
+      livePanelActive = false
+      panelRequestedActive = false
       activeCalls.clear()
     }
   }
+
+  fun setPanelActive(active: Boolean) {
+    var shouldRefreshVisibleEntries = false
+    synchronized(lock) {
+      val wasLivePanelActive = livePanelActive
+      panelRequestedActive = active
+      livePanelActive = enabled && panelRequestedActive
+      shouldRefreshVisibleEntries = livePanelActive && !wasLivePanelActive
+    }
+    if (shouldRefreshVisibleEntries) {
+      refreshVisibleEntries()
+    }
+  }
+
+  fun refreshVisibleEntries() {
+    val entries = synchronized(lock) {
+      if (!livePanelActive || activeCalls.isEmpty()) {
+        return
+      }
+
+      val emissionTimestamp = System.currentTimeMillis()
+      val snapshot = ArrayList<DebugNetworkEntry>(activeCalls.size)
+      activeCalls.values.forEach { state ->
+        state.lastStoreEmissionAt = emissionTimestamp
+        snapshot += state.toEntryLocked()
+      }
+      snapshot
+    }
+    entries.forEach(InAppDebuggerStore::upsertNetworkEntry)
+  }
+
+  internal fun shouldCaptureLivePayloadPreview(): Boolean = livePanelActive
 
   fun applyTo(builder: OkHttpClient.Builder): OkHttpClient.Builder {
     val currentInterceptors = builder.interceptors()
@@ -125,7 +169,11 @@ object InAppDebuggerNativeNetworkCapture {
         return@synchronized null
       }
       state.startEmitted = true
-      state.toEntryLocked()
+      prepareEntryForStoreLocked(
+        state = state,
+        timestamp = state.updatedAt,
+        policy = StoreEmissionPolicy.VisibleImmediate
+      )
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
@@ -152,7 +200,11 @@ object InAppDebuggerNativeNetworkCapture {
         return@synchronized null
       }
 
-      state.toEntryLocked()
+      prepareEntryForStoreLocked(
+        state = state,
+        timestamp = state.updatedAt,
+        policy = StoreEmissionPolicy.VisibleThrottled
+      )
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
@@ -191,7 +243,11 @@ object InAppDebuggerNativeNetworkCapture {
         }
       }
 
-      state.toEntryLocked()
+      prepareEntryForStoreLocked(
+        state = state,
+        timestamp = timestamp,
+        policy = StoreEmissionPolicy.VisibleThrottled
+      )
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
@@ -232,7 +288,11 @@ object InAppDebuggerNativeNetworkCapture {
       }
 
       state.dirty = true
-      state.toEntryLocked()
+      prepareEntryForStoreLocked(
+        state = state,
+        timestamp = state.updatedAt,
+        policy = StoreEmissionPolicy.VisibleThrottled
+      )
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
@@ -251,7 +311,11 @@ object InAppDebuggerNativeNetworkCapture {
         timestamp,
         "failure ${throwable.javaClass.simpleName}: ${throwable.message ?: "Request failed"}"
       )
-      state.toEntryLocked()
+      prepareEntryForStoreLocked(
+        state = state,
+        timestamp = timestamp,
+        policy = StoreEmissionPolicy.Always
+      )
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
@@ -282,7 +346,11 @@ object InAppDebuggerNativeNetworkCapture {
       if (!state.startEmitted || !state.dirty) {
         return
       }
-      state.toEntryLocked()
+      prepareEntryForStoreLocked(
+        state = state,
+        timestamp = timestamp,
+        policy = StoreEmissionPolicy.Always
+      )
     }
     entry?.let(InAppDebuggerStore::upsertNetworkEntry)
   }
@@ -416,6 +484,32 @@ object InAppDebuggerNativeNetworkCapture {
     return state
   }
 
+  private fun prepareEntryForStoreLocked(
+    state: NativeOkHttpCallState,
+    timestamp: Long,
+    policy: StoreEmissionPolicy
+  ): DebugNetworkEntry? {
+    if (!shouldEmitToStoreLocked(state.lastStoreEmissionAt, timestamp, policy)) {
+      return null
+    }
+    state.lastStoreEmissionAt = timestamp
+    return state.toEntryLocked()
+  }
+
+  private fun shouldEmitToStoreLocked(
+    lastEmissionAt: Long,
+    timestamp: Long,
+    policy: StoreEmissionPolicy
+  ): Boolean {
+    return when (policy) {
+      StoreEmissionPolicy.Always -> true
+      StoreEmissionPolicy.VisibleImmediate -> livePanelActive
+      StoreEmissionPolicy.VisibleThrottled -> {
+        livePanelActive && (timestamp - lastEmissionAt >= LIVE_UPDATE_THROTTLE_MS)
+      }
+    }
+  }
+
   private fun buildRequestId(
     isWebSocket: Boolean,
     startedAt: Long,
@@ -487,6 +581,12 @@ object InAppDebuggerNativeNetworkCapture {
       applyTo(builder)
     }
   }
+
+  private enum class StoreEmissionPolicy {
+    VisibleImmediate,
+    VisibleThrottled,
+    Always
+  }
 }
 
 internal data class NativeOkHttpCallState(
@@ -521,7 +621,8 @@ internal data class NativeOkHttpCallState(
   var dirty: Boolean = true,
   var eventsChanged: Boolean = false,
   var redirectsRecorded: Boolean = false,
-  var truncatedEvents: Boolean = false
+  var truncatedEvents: Boolean = false,
+  var lastStoreEmissionAt: Long = 0L
 ) {
   fun toEntryLocked(): DebugNetworkEntry {
     dirty = false
@@ -603,6 +704,9 @@ private class NativeOkHttpCaptureInterceptor : Interceptor {
 private fun instrumentRequestBody(request: Request, call: Call): Request {
   val body = request.body ?: return request
   if (body is PreviewingRequestBody || isWebSocketUpgrade(request)) {
+    return request
+  }
+  if (!InAppDebuggerNativeNetworkCapture.shouldCaptureLivePayloadPreview()) {
     return request
   }
 
@@ -710,6 +814,9 @@ private data class RequestBodyPreviewCapture(
 private fun instrumentResponseBody(response: Response, call: Call): Response {
   val body = response.body ?: return response
   if (body is PreviewingResponseBody || isWebSocketUpgrade(response.request)) {
+    return response
+  }
+  if (!InAppDebuggerNativeNetworkCapture.shouldCaptureLivePayloadPreview()) {
     return response
   }
 

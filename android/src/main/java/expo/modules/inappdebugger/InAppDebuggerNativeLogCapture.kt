@@ -586,7 +586,7 @@ object InAppDebuggerNativeLogCapture {
   private fun runLogcatReader(handle: LogcatReaderHandle) {
     var exitCode = 0
     val startupNoise = StringBuilder()
-    val batch = ArrayList<DebugLogEntry>(32)
+    var batch = ArrayList<DebugLogEntry>(32)
 
     try {
       BufferedReader(InputStreamReader(handle.process.inputStream, StandardCharsets.UTF_8)).use { reader ->
@@ -609,14 +609,15 @@ object InAppDebuggerNativeLogCapture {
             type = levelForPriority(parsed.priority),
             message = parsed.message,
             context = parsed.tag.ifBlank { LOGCAT_CONTEXT },
-            details = buildLogcatDetails(handle.detailsPrefix, parsed.priority, parsed.pid, parsed.tid),
+            details = buildLogcatDetails(handle, parsed.priority, parsed.pid, parsed.tid),
             timestampMillis = parsed.timestampMillis
             )
           )
 
           if (batch.size >= 32) {
-            InAppDebuggerStore.appendNativeLogs(ArrayList(batch))
-            batch.clear()
+            val completedBatch = batch
+            batch = ArrayList(32)
+            InAppDebuggerStore.appendNativeLogs(completedBatch)
           }
         }
       }
@@ -624,8 +625,7 @@ object InAppDebuggerNativeLogCapture {
       // Expected when the process is destroyed during shutdown.
     } finally {
       if (batch.isNotEmpty()) {
-        InAppDebuggerStore.appendNativeLogs(batch.toList())
-        batch.clear()
+        InAppDebuggerStore.appendNativeLogs(batch)
       }
 
       exitCode = try {
@@ -1178,9 +1178,12 @@ private fun buildLogcatDetailsPrefix(mode: String, useRoot: Boolean): String {
   }
 }
 
-private fun buildLogcatDetails(prefix: String, priority: String, pid: Int, tid: Int): String {
-  return buildString(prefix.length + 24) {
-    append(prefix)
+private fun buildLogcatDetails(handle: LogcatReaderHandle, priority: String, pid: Int, tid: Int): String {
+  val cacheKey = logcatDetailsCacheKey(priority, pid, tid)
+  handle.detailsCache[cacheKey]?.let { return it }
+
+  val details = buildString(handle.detailsPrefix.length + 24) {
+    append(handle.detailsPrefix)
     append(priority)
     append('\n')
     append("pid=")
@@ -1189,6 +1192,15 @@ private fun buildLogcatDetails(prefix: String, priority: String, pid: Int, tid: 
     append("tid=")
     append(tid)
   }
+  handle.detailsCache[cacheKey] = details
+  return details
+}
+
+private fun logcatDetailsCacheKey(priority: String, pid: Int, tid: Int): Long {
+  val priorityCode = priority.firstOrNull()?.code ?: 0
+  return (priorityCode.toLong() shl 48) or
+    ((pid.toLong() and 0xFFFFFFL) shl 24) or
+    (tid.toLong() and 0xFFFFFFL)
 }
 
 private fun materializeChunkLine(
@@ -1287,6 +1299,11 @@ private data class LogcatReaderHandle(
   val fallbackToAppScope: Boolean,
   val detailsPrefix: String,
   val process: java.lang.Process,
+  val detailsCache: LinkedHashMap<Long, String> = object : LinkedHashMap<Long, String>(128, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, String>?): Boolean {
+      return size > 128
+    }
+  },
   @Volatile var running: Boolean = true,
   @Volatile var readerThread: Thread? = null
 )

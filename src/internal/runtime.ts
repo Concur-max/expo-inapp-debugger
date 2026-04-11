@@ -18,7 +18,7 @@ import type {
   ResolvedInAppDebugConfig,
 } from '../types';
 import { defaultStrings, resolveStrings } from './strings';
-import { NetworkCollector } from './network';
+import { materializeNetworkEntry, NetworkCollector } from './network';
 
 type ConsoleLike = Pick<typeof console, 'log' | 'info' | 'warn' | 'error' | 'debug'>;
 
@@ -55,6 +55,7 @@ type RuntimeNativeModule = {
 
 const FLUSH_DELAY_MS = 64;
 const MAX_BUFFERED_BATCH_SIZE = 120;
+const JS_PIPELINE_DIAGNOSTICS_ENABLED = false;
 const DEFAULT_ANDROID_LOGCAT_BUFFERS: AndroidLogcatBuffer[] = ['main', 'system', 'crash'];
 const VALID_ANDROID_LOGCAT_BUFFERS = new Set<AndroidLogcatBuffer>([
   'main',
@@ -66,6 +67,7 @@ const VALID_ANDROID_LOGCAT_BUFFERS = new Set<AndroidLogcatBuffer>([
 let runtimeEntryCounter = 0;
 let cachedTimestampSecond = -1;
 let cachedTimestampPrefix = '';
+let cachedIsoTimestampPrefix = '';
 
 export type DebugRuntimeDependencies = {
   nativeModule: RuntimeNativeModule;
@@ -126,19 +128,20 @@ export function formatMessage(args: unknown[]) {
 }
 
 function formatTimestamps(nowValue: number) {
-  const date = new Date(nowValue);
   const secondBucket = Math.floor(nowValue / 1000);
   if (secondBucket !== cachedTimestampSecond) {
+    const date = new Date(secondBucket * 1000);
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const seconds = String(date.getSeconds()).padStart(2, '0');
     cachedTimestampPrefix = `${hours}:${minutes}:${seconds}.`;
+    cachedIsoTimestampPrefix = `${date.toISOString().slice(0, 19)}.`;
     cachedTimestampSecond = secondBucket;
   }
-  const milliseconds = String(date.getMilliseconds()).padStart(3, '0');
+  const milliseconds = String(nowValue - secondBucket * 1000).padStart(3, '0');
   return {
     timestamp: `${cachedTimestampPrefix}${milliseconds}`,
-    fullTimestamp: date.toISOString(),
+    fullTimestamp: `${cachedIsoTimestampPrefix}${milliseconds}Z`,
   };
 }
 
@@ -262,8 +265,7 @@ export class DebugRuntime {
   private manualEnabledOverride: boolean | null = null;
   private logQueue: NativeLogWireEntry[] = [];
   private errorQueue: NativeErrorWireEntry[] = [];
-  private networkQueue: NativeNetworkWireEntry[] = [];
-  private queuedNetworkEntryIndexes = new Map<string, number>();
+  private networkQueue = new Map<string, DebugNetworkEntry>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushInFlight: Promise<void> | null = null;
   private configured = false;
@@ -289,14 +291,18 @@ export class DebugRuntime {
         onEntry: (entry) => this.captureNetwork(entry),
         nextTimelineSequence: () => nextRuntimeSequence(),
         onInternalWarning: (message, error) => this.internalWarn(message, error),
-        onDiagnostic: (component, message) => this.emitDiagnostic(component, message),
+        onDiagnostic: JS_PIPELINE_DIAGNOSTICS_ENABLED
+          ? (component, message) => this.emitDiagnostic(component, message)
+          : undefined,
       }) ??
       new NetworkCollector({
         maxRequests: this.providerConfig.maxRequests,
         onEntry: (entry) => this.captureNetwork(entry),
         nextTimelineSequence: () => nextRuntimeSequence(),
         onInternalWarning: (message, error) => this.internalWarn(message, error),
-        onDiagnostic: (component, message) => this.emitDiagnostic(component, message),
+        onDiagnostic: JS_PIPELINE_DIAGNOSTICS_ENABLED
+          ? (component, message) => this.emitDiagnostic(component, message)
+          : undefined,
       });
   }
 
@@ -360,6 +366,11 @@ export class DebugRuntime {
   }
 
   log(level: DebugLevel, args: unknown[]) {
+    if (level === 'error') {
+      this.captureConsoleError(args);
+      return;
+    }
+
     const nowValue = this.now();
     const identity = createRuntimeIdentity(nowValue);
     const entry: DebugLogEntry = {
@@ -373,9 +384,6 @@ export class DebugRuntime {
       timelineSequence: identity.sequence,
     };
     this.enqueueLog(entry);
-    if (level === 'error') {
-      this.captureError('console', args);
-    }
   }
 
   captureError(source: DebugErrorSource, args: unknown[]) {
@@ -394,6 +402,34 @@ export class DebugRuntime {
 
   captureNetwork(entry: DebugNetworkEntry) {
     this.enqueueNetwork(entry);
+  }
+
+  private captureConsoleError(args: unknown[]) {
+    const nowValue = this.now();
+    const formattedMessage = formatMessage(args);
+    const timestamps = formatTimestamps(nowValue);
+    const logIdentity = createRuntimeIdentity(nowValue);
+    const errorIdentity = createRuntimeIdentity(nowValue);
+
+    this.enqueueLog({
+      id: logIdentity.id,
+      type: 'error',
+      origin: 'js',
+      context: 'console',
+      message: formattedMessage,
+      ...timestamps,
+      timelineTimestampMillis: nowValue,
+      timelineSequence: logIdentity.sequence,
+    });
+
+    this.enqueueError({
+      id: errorIdentity.id,
+      source: 'console',
+      message: formattedMessage,
+      ...timestamps,
+      timelineTimestampMillis: nowValue,
+      timelineSequence: errorIdentity.sequence,
+    });
   }
 
   private async applyConfig() {
@@ -494,8 +530,7 @@ export class DebugRuntime {
     }
     this.logQueue = [];
     this.errorQueue = [];
-    this.networkQueue = [];
-    this.queuedNetworkEntryIndexes.clear();
+    this.networkQueue.clear();
   }
 
   private installGlobalErrorHandler() {
@@ -552,15 +587,7 @@ export class DebugRuntime {
       return;
     }
 
-    const encodedEntry = encodeNetworkEntry(entry)
-    const entryId = encodedEntry[0]
-    const existingIndex = this.queuedNetworkEntryIndexes.get(entryId)
-    if (existingIndex != null) {
-      this.networkQueue[existingIndex] = encodedEntry
-    } else {
-      this.queuedNetworkEntryIndexes.set(entryId, this.networkQueue.length)
-      this.networkQueue.push(encodedEntry)
-    }
+    this.networkQueue.set(entry.id, entry)
     this.scheduleFlushIfNeeded()
   }
 
@@ -580,7 +607,7 @@ export class DebugRuntime {
   }
 
   private pendingEntryCount(): number {
-    return this.logQueue.length + this.errorQueue.length + this.networkQueue.length
+    return this.logQueue.length + this.errorQueue.length + this.networkQueue.size
   }
 
   private cancelScheduledFlush() {
@@ -604,6 +631,7 @@ export class DebugRuntime {
     if (this.pendingEntryCount() === 0) {
       return;
     }
+    const queuedNetworkEntries = this.networkQueue;
     const batch: NativeBatchPayload = {}
     if (this.logQueue.length > 0) {
       batch.logs = this.logQueue
@@ -611,17 +639,18 @@ export class DebugRuntime {
     if (this.errorQueue.length > 0) {
       batch.errors = this.errorQueue
     }
-    if (this.networkQueue.length > 0) {
-      batch.network = this.networkQueue
+    if (queuedNetworkEntries.size > 0) {
+      batch.network = Array.from(queuedNetworkEntries.values(), (entry) =>
+        encodeNetworkEntry(materializeNetworkEntry(entry))
+      )
     }
     this.emitDiagnostic(
       'JSRuntime',
-      `flush logs=${this.logQueue.length} errors=${this.errorQueue.length} network=${this.networkQueue.length}`
+      `flush logs=${this.logQueue.length} errors=${this.errorQueue.length} network=${queuedNetworkEntries.size}`
     );
     this.logQueue = [];
     this.errorQueue = [];
-    this.networkQueue = [];
-    this.queuedNetworkEntryIndexes.clear();
+    this.networkQueue = new Map<string, DebugNetworkEntry>();
     const flushPromise = (async () => {
       try {
         await this.dependencies.nativeModule.ingestBatch(
@@ -654,6 +683,9 @@ export class DebugRuntime {
   }
 
   private emitDiagnostic(source: string, message: string) {
+    if (!JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      return;
+    }
     void this.dependencies.nativeModule.emitDiagnostic?.(source, message).catch(() => undefined);
   }
 

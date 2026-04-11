@@ -37,6 +37,7 @@ type NetworkCollectorOptions = {
 
 type MutableNetworkEntry = DebugNetworkEntry & {
   messagesList?: string[];
+  messagesDirty?: boolean;
 };
 
 type XHRShell = {
@@ -287,8 +288,8 @@ export class NetworkCollector {
           state: 'connecting',
           startedAt: timestamp,
           updatedAt: timestamp,
-          messages: '',
           messagesList: [],
+          messagesDirty: false,
           timelineSequence: this.nextTimelineSequence(),
         };
         this.requests.set(entry.id, entry);
@@ -370,11 +371,9 @@ export class NetworkCollector {
     messagesList.push(message);
     if (messagesList.length > 100) {
       messagesList.splice(0, messagesList.length - 100);
-      entry.messages = messagesList.join('\n');
-    } else {
-      entry.messages = entry.messages ? `${entry.messages}\n${message}` : message;
     }
     entry.messagesList = messagesList;
+    entry.messagesDirty = true;
     entry.updatedAt = now();
     this.emit(entry);
   }
@@ -435,6 +434,21 @@ export class NetworkCollector {
     this.requestToXHRId.delete(requestId);
     this.xhrIdMap.delete(xhrId);
   }
+}
+
+export function materializeNetworkEntry(entry: DebugNetworkEntry): DebugNetworkEntry {
+  const mutableEntry = entry as MutableNetworkEntry;
+  const messagesList = mutableEntry.messagesList;
+  if (!messagesList) {
+    return entry;
+  }
+
+  if (mutableEntry.messagesDirty) {
+    mutableEntry.messages = messagesList.join('\n');
+    mutableEntry.messagesDirty = false;
+  }
+
+  return mutableEntry;
 }
 
 function normalizeHeaderMap(headers: RawHeaderMap): HeaderMap {

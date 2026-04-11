@@ -9,7 +9,6 @@ import android.text.format.Formatter
 import android.view.View
 import android.view.ViewGroup
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
@@ -1161,7 +1160,6 @@ private fun LogCard(
       Column(
         modifier = Modifier
           .padding(12.dp)
-          .animateContentSize()
       ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
           PanelChip(
@@ -1196,44 +1194,42 @@ private fun LogCard(
           }
         }
 
-        SelectionContainer(
+        Column(
           modifier = Modifier
             .fillMaxWidth()
             .padding(top = if (details.isNotBlank()) 6.dp else 8.dp)
         ) {
-          Column(modifier = Modifier.fillMaxWidth()) {
-            if (details.isNotBlank()) {
-              Text(
-                text = details,
-                style = MaterialTheme.typography.labelMedium,
-                color = PanelColors.MutedText,
-                maxLines = if (expanded) Int.MAX_VALUE else 2,
-                overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth(),
-                onTextLayout = { layoutResult ->
-                  if (!expanded) {
-                    detailsOverflow = layoutResult.hasVisualOverflow
-                  }
-                }
-              )
-            }
-
+          if (details.isNotBlank()) {
             Text(
-              text = log.message,
-              color = PanelColors.Text,
-              fontFamily = FontFamily.Monospace,
-              maxLines = if (expanded) Int.MAX_VALUE else 6,
+              text = details,
+              style = MaterialTheme.typography.labelMedium,
+              color = PanelColors.MutedText,
+              maxLines = if (expanded) Int.MAX_VALUE else 2,
               overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
-              modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = if (details.isNotBlank()) 8.dp else 0.dp),
+              modifier = Modifier.fillMaxWidth(),
               onTextLayout = { layoutResult ->
                 if (!expanded) {
-                  messageOverflow = layoutResult.hasVisualOverflow
+                  detailsOverflow = layoutResult.hasVisualOverflow
                 }
               }
             )
           }
+
+          Text(
+            text = log.message,
+            color = PanelColors.Text,
+            fontFamily = FontFamily.Monospace,
+            maxLines = if (expanded) Int.MAX_VALUE else 6,
+            overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(top = if (details.isNotBlank()) 8.dp else 0.dp),
+            onTextLayout = { layoutResult ->
+              if (!expanded) {
+                messageOverflow = layoutResult.hasVisualOverflow
+              }
+            }
+          )
         }
 
         if (canExpand) {

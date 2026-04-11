@@ -91,12 +91,14 @@ function loadNetworkCollector() {
   );
 
   let NetworkCollector!: NetworkModule['NetworkCollector'];
+  let materializeNetworkEntry!: NetworkModule['materializeNetworkEntry'];
   jest.isolateModules(() => {
-    ({ NetworkCollector } = require('../src/internal/network') as NetworkModule);
+    ({ NetworkCollector, materializeNetworkEntry } = require('../src/internal/network') as NetworkModule);
   });
 
   return {
     NetworkCollector,
+    materializeNetworkEntry,
     callbacks,
     xhrCallbacks,
     xhrInterceptor,
@@ -111,7 +113,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
   });
 
   it('tracks Android websocket connections using lifecycle states', () => {
-    const { NetworkCollector, callbacks, webSocketInterceptor } = loadNetworkCollector();
+    const { NetworkCollector, callbacks, webSocketInterceptor, materializeNetworkEntry } = loadNetworkCollector();
     const entries: Array<Record<string, unknown>> = [];
     const collector = new NetworkCollector({
       maxRequests: 20,
@@ -119,7 +121,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
         entries.push(entry);
       },
     });
-    const latestEntry = () => entries[entries.length - 1];
+    const latestEntry = () => materializeNetworkEntry(entries[entries.length - 1] as any);
 
     collector.enable();
 
@@ -166,7 +168,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
   });
 
   it('keeps the final websocket state as error when close follows a failure', () => {
-    const { NetworkCollector, callbacks } = loadNetworkCollector();
+    const { NetworkCollector, callbacks, materializeNetworkEntry } = loadNetworkCollector();
     const entries: Array<Record<string, unknown>> = [];
     const collector = new NetworkCollector({
       maxRequests: 20,
@@ -174,7 +176,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
         entries.push(entry);
       },
     });
-    const latestEntry = () => entries[entries.length - 1];
+    const latestEntry = () => materializeNetworkEntry(entries[entries.length - 1] as any);
 
     collector.enable();
 

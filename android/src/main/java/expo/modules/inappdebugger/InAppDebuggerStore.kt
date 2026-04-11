@@ -45,8 +45,10 @@ object InAppDebuggerStore {
 
   fun updateConfig(next: DebugConfig) {
     var nextChromeState: DebugPanelChromeState? = null
+    var nextNetworkPanelActive: Boolean? = null
 
     synchronized(this) {
+      val previousNetworkPanelActive = isLiveNetworkPanelActiveLocked()
       val shouldFlushPendingNativeLogs = next.enabled && pendingNativeLogs.size > 0
       if (config == next && !shouldFlushPendingNativeLogs) {
         return
@@ -77,9 +79,14 @@ object InAppDebuggerStore {
       if (logsChanged || errorsChanged || networkChanged) {
         publishVisibleFeedNowLocked()
       }
+      val currentNetworkPanelActive = isLiveNetworkPanelActiveLocked()
+      if (currentNetworkPanelActive != previousNetworkPanelActive) {
+        nextNetworkPanelActive = currentNetworkPanelActive
+      }
     }
 
     nextChromeState?.let(::publishChromeState)
+    nextNetworkPanelActive?.let(InAppDebuggerNativeNetworkCapture::setPanelActive)
   }
 
   fun ingestBatch(
@@ -91,31 +98,37 @@ object InAppDebuggerStore {
       "ingestBatch raw logs=${logs?.size() ?: 0} " +
         "errors=${errors?.size() ?: 0} network=${network?.size() ?: 0}"
     }
-    val parsedBatch = parseBatch(logs, errors, network)
-    inAppDebuggerDiagnostic("Store") {
-      "ingestBatch parsed logs=${parsedBatch.logs.size} " +
-        "errors=${parsedBatch.errors.size} network=${parsedBatch.network.size}"
-    }
-    if (
-      parsedBatch.logs.isEmpty() &&
-      parsedBatch.errors.isEmpty() &&
-      parsedBatch.network.isEmpty()
-    ) {
-      return
-    }
+
+    var parsedLogsCount = 0
+    var parsedErrorsCount = 0
+    var parsedNetworkCount = 0
 
     synchronized(this) {
       var logsChanged = false
       var errorsChanged = false
       var networkChanged = false
 
-      if (parsedBatch.logs.isNotEmpty() && logs.appendAll(parsedBatch.logs)) {
+      val logsResult = appendParsedBatchItems(logs, ::parseLog) { entry ->
+        this@InAppDebuggerStore.logs.append(entry)
+      }
+      parsedLogsCount = logsResult.parsedCount
+      if (logsResult.changed) {
         logsChanged = true
       }
-      if (parsedBatch.errors.isNotEmpty() && errors.appendAll(parsedBatch.errors)) {
+
+      val errorsResult = appendParsedBatchItems(errors, ::parseError) { entry ->
+        this@InAppDebuggerStore.errors.append(entry)
+      }
+      parsedErrorsCount = errorsResult.parsedCount
+      if (errorsResult.changed) {
         errorsChanged = true
       }
-      if (parsedBatch.network.isNotEmpty() && network.upsertAll(parsedBatch.network)) {
+
+      val networkResult = appendParsedBatchItems(network, ::parseNetwork) { entry ->
+        this@InAppDebuggerStore.network.upsert(entry)
+      }
+      parsedNetworkCount = networkResult.parsedCount
+      if (networkResult.changed) {
         networkChanged = true
       }
 
@@ -131,6 +144,11 @@ object InAppDebuggerStore {
       if (logsChanged || errorsChanged || networkChanged) {
         scheduleVisibleFeedPublishLocked()
       }
+    }
+
+    inAppDebuggerDiagnostic("Store") {
+      "ingestBatch parsed logs=$parsedLogsCount " +
+        "errors=$parsedErrorsCount network=$parsedNetworkCount"
     }
   }
 
@@ -193,30 +211,32 @@ object InAppDebuggerStore {
   @Synchronized
   fun currentConfig(): DebugConfig = config
 
-  @Synchronized
   fun shutdown() {
-    cancelVisibleFeedPublishLocked()
-    config = DebugConfig()
-    logs.clear()
-    pendingNativeLogs.clear()
-    errors.clear()
-    network.clear()
-    runtimeInfo = DebugRuntimeInfo()
-    panelVisible = false
-    activeFeed = DebugPanelFeed.None
-    logsVersion = 0L
-    errorsVersion = 0L
-    networkVersion = 0L
-    logsDirty = false
-    errorsDirty = false
-    networkDirty = false
-    _chromeState.value = DebugPanelChromeState()
-    _logsWindowState.value = DebugListWindowState()
-    _errorsWindowState.value = DebugListWindowState()
-    _networkWindowState.value = DebugListWindowState()
-    visibleUiHandlerThread?.quitSafely()
-    visibleUiHandlerThread = null
-    uiHandler = null
+    synchronized(this) {
+      cancelVisibleFeedPublishLocked()
+      config = DebugConfig()
+      logs.clear()
+      pendingNativeLogs.clear()
+      errors.clear()
+      network.clear()
+      runtimeInfo = DebugRuntimeInfo()
+      panelVisible = false
+      activeFeed = DebugPanelFeed.None
+      logsVersion = 0L
+      errorsVersion = 0L
+      networkVersion = 0L
+      logsDirty = false
+      errorsDirty = false
+      networkDirty = false
+      _chromeState.value = DebugPanelChromeState()
+      _logsWindowState.value = DebugListWindowState()
+      _errorsWindowState.value = DebugListWindowState()
+      _networkWindowState.value = DebugListWindowState()
+      visibleUiHandlerThread?.quitSafely()
+      visibleUiHandlerThread = null
+      uiHandler = null
+    }
+    InAppDebuggerNativeNetworkCapture.setPanelActive(false)
   }
 
   @Synchronized
@@ -274,48 +294,66 @@ object InAppDebuggerStore {
     nextChromeState?.let(::publishChromeState)
   }
 
-  @Synchronized
   fun setPanelVisible(visible: Boolean) {
-    if (panelVisible == visible) {
-      return
-    }
+    var nextNetworkPanelActive: Boolean? = null
 
-    panelVisible = visible
-    inAppDebuggerDiagnostic("Store") {
-      "setPanelVisible visible=$visible activeFeed=$activeFeed " +
-        "dirty=logs:$logsDirty errors:$errorsDirty network:$networkDirty"
-    }
-    if (!visible) {
-      activeFeed = DebugPanelFeed.None
-      cancelVisibleFeedPublishLocked()
-      return
-    }
+    synchronized(this) {
+      if (panelVisible == visible) {
+        return
+      }
 
-    publishVisibleFeedNowLocked()
-  }
-
-  @Synchronized
-  fun setActiveFeed(feed: DebugPanelFeed) {
-    if (activeFeed == feed) {
-      if (panelVisible && feed != DebugPanelFeed.None) {
+      val previousNetworkPanelActive = isLiveNetworkPanelActiveLocked()
+      panelVisible = visible
+      inAppDebuggerDiagnostic("Store") {
+        "setPanelVisible visible=$visible activeFeed=$activeFeed " +
+          "dirty=logs:$logsDirty errors:$errorsDirty network:$networkDirty"
+      }
+      if (!visible) {
+        activeFeed = DebugPanelFeed.None
+        cancelVisibleFeedPublishLocked()
+      } else {
         publishVisibleFeedNowLocked()
       }
-      return
+
+      val currentNetworkPanelActive = isLiveNetworkPanelActiveLocked()
+      if (currentNetworkPanelActive != previousNetworkPanelActive) {
+        nextNetworkPanelActive = currentNetworkPanelActive
+      }
     }
 
-    activeFeed = feed
-    inAppDebuggerDiagnostic("Store") {
-      "setActiveFeed feed=$feed panelVisible=$panelVisible " +
-        "dirty=logs:$logsDirty errors:$errorsDirty network:$networkDirty"
-    }
-    if (feed == DebugPanelFeed.None) {
-      cancelVisibleFeedPublishLocked()
-      return
+    nextNetworkPanelActive?.let(InAppDebuggerNativeNetworkCapture::setPanelActive)
+  }
+
+  fun setActiveFeed(feed: DebugPanelFeed) {
+    var nextNetworkPanelActive: Boolean? = null
+
+    synchronized(this) {
+      if (activeFeed == feed) {
+        if (panelVisible && feed != DebugPanelFeed.None) {
+          publishVisibleFeedNowLocked()
+        }
+        return
+      }
+
+      val previousNetworkPanelActive = isLiveNetworkPanelActiveLocked()
+      activeFeed = feed
+      inAppDebuggerDiagnostic("Store") {
+        "setActiveFeed feed=$feed panelVisible=$panelVisible " +
+          "dirty=logs:$logsDirty errors:$errorsDirty network:$networkDirty"
+      }
+      if (feed == DebugPanelFeed.None) {
+        cancelVisibleFeedPublishLocked()
+      } else if (panelVisible) {
+        publishVisibleFeedNowLocked()
+      }
+
+      val currentNetworkPanelActive = isLiveNetworkPanelActiveLocked()
+      if (currentNetworkPanelActive != previousNetworkPanelActive) {
+        nextNetworkPanelActive = currentNetworkPanelActive
+      }
     }
 
-    if (panelVisible) {
-      publishVisibleFeedNowLocked()
-    }
+    nextNetworkPanelActive?.let(InAppDebuggerNativeNetworkCapture::setPanelActive)
   }
 
   private fun buildChromeStateLocked(): DebugPanelChromeState {
@@ -323,6 +361,13 @@ object InAppDebuggerStore {
       config = config,
       runtimeInfo = runtimeInfo
     )
+  }
+
+  private fun isLiveNetworkPanelActiveLocked(): Boolean {
+    return panelVisible &&
+      activeFeed == DebugPanelFeed.Network &&
+      config.enabled &&
+      config.enableNetworkTab
   }
 
   private fun publishChromeState(nextState: DebugPanelChromeState) {
@@ -558,17 +603,6 @@ object InAppDebuggerStore {
     )
   }
 
-  private fun parseBatch(
-    logs: ReadableArray?,
-    errors: ReadableArray?,
-    network: ReadableArray?
-  ): ParsedBatch {
-    return ParsedBatch(
-      logs = parseBatchItems(logs, ::parseLog),
-      errors = parseBatchItems(errors, ::parseError),
-      network = parseBatchItems(network, ::parseNetwork)
-    )
-  }
 }
 
 private class TimelineBuffer<T>(
@@ -576,7 +610,7 @@ private class TimelineBuffer<T>(
   private val sortKeySelector: (T) -> TimelineSortKey
 ) {
   private var capacity = initialCapacity.coerceAtLeast(0)
-  private val items = ArrayList<T>(capacity.coerceAtLeast(0))
+  private val items = ArrayDeque<T>(capacity.coerceAtLeast(0))
 
   val size: Int
     get() = items.size
@@ -588,17 +622,18 @@ private class TimelineBuffer<T>(
 
     val sortKey = sortKeySelector(item)
     if (items.size >= capacity) {
-      val oldestSortKey = sortKeySelector(items[0])
+      val oldestSortKey = sortKeySelector(items.first())
       if (compareTimelineSortKeys(sortKey, oldestSortKey) <= 0) {
         return false
       }
+      items.removeFirst()
     }
 
     val insertionIndex =
       if (items.isEmpty()) {
         0
       } else {
-        val tailSortKey = sortKeySelector(items[items.lastIndex])
+        val tailSortKey = sortKeySelector(items.last())
         if (compareTimelineSortKeys(tailSortKey, sortKey) <= 0) {
           items.size
         } else {
@@ -606,12 +641,9 @@ private class TimelineBuffer<T>(
         }
       }
     if (insertionIndex == items.size) {
-      items.add(item)
+      items.addLast(item)
     } else {
       items.add(insertionIndex, item)
-    }
-    if (items.size > capacity) {
-      items.removeAt(0)
     }
     return true
   }
@@ -674,9 +706,8 @@ private class TimelineBuffer<T>(
       return
     }
 
-    val overflow = items.size - capacity
-    if (overflow > 0) {
-      items.subList(0, overflow).clear()
+    while (items.size > capacity) {
+      items.removeFirst()
     }
   }
 
@@ -704,7 +735,7 @@ private class KeyedTimelineBuffer<T>(
   private var capacity = initialCapacity.coerceAtLeast(0)
   private val itemsByKey = HashMap<String, T>(capacity.coerceAtLeast(16))
   private val sortKeysByKey = HashMap<String, TimelineSortKey>(capacity.coerceAtLeast(16))
-  private val orderedKeys = ArrayList<String>(capacity.coerceAtLeast(0))
+  private val orderedKeys = ArrayDeque<String>(capacity.coerceAtLeast(0))
 
   val size: Int
     get() = orderedKeys.size
@@ -716,7 +747,8 @@ private class KeyedTimelineBuffer<T>(
 
     val key = keySelector(item)
     val sortKey = sortKeySelector(item)
-    if (!itemsByKey.containsKey(key) && orderedKeys.size >= capacity) {
+    val existed = itemsByKey.containsKey(key)
+    if (!existed && orderedKeys.size >= capacity) {
       val oldestKey = orderedKeys.firstOrNull()
       val oldestSortKey = oldestKey?.let(sortKeysByKey::get)
       if (oldestSortKey != null && compareTimelineSortKeys(sortKey, oldestSortKey) <= 0) {
@@ -725,6 +757,11 @@ private class KeyedTimelineBuffer<T>(
     }
 
     orderedKeys.remove(key)
+    if (!existed && orderedKeys.size >= capacity) {
+      val removedKey = orderedKeys.removeFirst()
+      itemsByKey.remove(removedKey)
+      sortKeysByKey.remove(removedKey)
+    }
     itemsByKey[key] = item
     sortKeysByKey[key] = sortKey
 
@@ -732,7 +769,7 @@ private class KeyedTimelineBuffer<T>(
       if (orderedKeys.isEmpty()) {
         0
       } else {
-        val tailKey = orderedKeys[orderedKeys.lastIndex]
+        val tailKey = orderedKeys.last()
         val tailSortKey = sortKeysByKey[tailKey]
         if (tailSortKey != null && compareTimelineSortKeys(tailSortKey, sortKey) <= 0) {
           orderedKeys.size
@@ -741,15 +778,9 @@ private class KeyedTimelineBuffer<T>(
         }
       }
     if (insertionIndex == orderedKeys.size) {
-      orderedKeys.add(key)
+      orderedKeys.addLast(key)
     } else {
       orderedKeys.add(insertionIndex, key)
-    }
-    if (orderedKeys.size > capacity) {
-      val removedKey = orderedKeys.removeAt(0)
-      itemsByKey.remove(removedKey)
-      sortKeysByKey.remove(removedKey)
-      return removedKey != key
     }
     return true
   }
@@ -811,7 +842,7 @@ private class KeyedTimelineBuffer<T>(
     }
 
     while (orderedKeys.size > capacity) {
-      val removedKey = orderedKeys.removeAt(0)
+      val removedKey = orderedKeys.removeFirst()
       itemsByKey.remove(removedKey)
       sortKeysByKey.remove(removedKey)
     }
@@ -854,28 +885,35 @@ private fun compareTimelineSortKeys(lhs: TimelineSortKey, rhs: TimelineSortKey):
   return lhs.stableId.compareTo(rhs.stableId)
 }
 
-private data class ParsedBatch(
-  val logs: List<DebugLogEntry>,
-  val errors: List<DebugErrorEntry>,
-  val network: List<DebugNetworkEntry>
+private data class ParsedAppendResult(
+  val parsedCount: Int,
+  val changed: Boolean
 )
 
-private fun <T> parseBatchItems(
+private fun <T> appendParsedBatchItems(
   raw: ReadableArray?,
-  parser: (ReadableArray) -> T?
-): List<T> {
-  raw ?: return emptyList()
-  if (raw.size() == 0) {
-    return emptyList()
+  parser: (ReadableArray) -> T?,
+  append: (T) -> Boolean
+): ParsedAppendResult {
+  raw ?: return ParsedAppendResult(parsedCount = 0, changed = false)
+  val rawSize = raw.size()
+  if (rawSize == 0) {
+    return ParsedAppendResult(parsedCount = 0, changed = false)
   }
 
-  val result = ArrayList<T>(raw.size())
-  for (index in 0 until raw.size()) {
+  var parsedCount = 0
+  var changed = false
+  for (index in 0 until rawSize) {
     raw.array(index)?.let { item ->
-      parser(item)?.let(result::add)
+      parser(item)?.let { parsedItem ->
+        parsedCount += 1
+        if (append(parsedItem)) {
+          changed = true
+        }
+      }
     }
   }
-  return result
+  return ParsedAppendResult(parsedCount = parsedCount, changed = changed)
 }
 
 private fun ReadableArray.typeAt(index: Int): ReadableType? {
