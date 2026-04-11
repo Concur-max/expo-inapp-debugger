@@ -129,12 +129,22 @@ private func networkKindBadgeTitle(_ rawKind: String) -> String {
 
 private func networkTrailingBadgeTitle(_ entry: DebugNetworkEntry) -> String? {
   if let status = entry.status {
+    if status == 0 && entry.state == "error" {
+      return "(failed)"
+    }
     return String(status)
   }
   if isWebSocketKind(entry.kind) {
     return nil
   }
   return networkKindBadgeTitle(entry.kind)
+}
+
+private func shouldShowNetworkStateLabel(_ entry: DebugNetworkEntry) -> Bool {
+  if isWebSocketKind(entry.kind) {
+    return true
+  }
+  return entry.status == nil
 }
 
 private func toneForLogLevel(_ level: String) -> PanelTone {
@@ -285,7 +295,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var selectedLogOrigins: Set<String> = PanelFilterPreferences.loadLogOrigins()
   private var selectedNetworkOrigins: Set<String> = PanelFilterPreferences.loadNetworkOrigins()
   private var selectedNetworkKinds: Set<String> = PanelFilterPreferences.loadNetworkKinds()
-  private var sortAscending = false
+  private var sortAscending = true
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
   private var displayedLogLookup: [String: DebugLogEntry] = [:]
@@ -1165,11 +1175,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func networkSortComparator(_ lhs: DebugNetworkEntry, _ rhs: DebugNetworkEntry) -> Bool {
-    if lhs.updatedAt != rhs.updatedAt {
-      return sortAscending ? lhs.updatedAt < rhs.updatedAt : lhs.updatedAt > rhs.updatedAt
-    }
     if lhs.startedAt != rhs.startedAt {
       return sortAscending ? lhs.startedAt < rhs.startedAt : lhs.startedAt > rhs.startedAt
+    }
+    if lhs.updatedAt != rhs.updatedAt {
+      return sortAscending ? lhs.updatedAt < rhs.updatedAt : lhs.updatedAt > rhs.updatedAt
     }
     return sortAscending ? lhs.id < rhs.id : lhs.id > rhs.id
   }
@@ -1700,6 +1710,7 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     statusLabel.textColor = tone.foreground
     statusLabel.backgroundColor = tone.background
     stateLabel.text = entry.state.uppercased()
+    stateLabel.isHidden = !shouldShowNetworkStateLabel(entry)
     urlLabel.text = entry.url
     if isWebSocketKind(entry.kind) {
       let incoming = entry.messageCountIn ?? 0
@@ -2113,13 +2124,11 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let noRequestBodyText = strings["noRequestBody"] ?? "无请求体"
     let noResponseBodyText = strings["noResponseBody"] ?? "无响应体"
     let noMessagesText = strings["noMessages"] ?? "暂无消息"
-
-    return [
+    var sections: [(title: String, body: String, monospace: Bool)] = [
       (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
       (title: localizedNetworkTypeTitle(locale: locale), body: localizedNetworkKindTitle(entry.kind, locale: locale), monospace: false),
       (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
-      (title: strings["status"] ?? "状态码", body: entry.status.map(String.init) ?? "-", monospace: false),
-      (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
+      (title: strings["status"] ?? "状态码", body: networkTrailingBadgeTitle(entry) ?? "-", monospace: false),
       (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
       (title: "URL", body: entry.url, monospace: true),
       (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
@@ -2129,6 +2138,12 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText, monospace: true),
       (title: strings["messages"] ?? "消息", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true),
     ]
+
+    if shouldShowNetworkStateLabel(entry) {
+      sections.insert((title: strings["state"] ?? "状态", body: entry.state, monospace: false), at: 4)
+    }
+
+    return sections
   }
 
   private func webSocketSections() -> [(title: String, body: String, monospace: Bool)] {

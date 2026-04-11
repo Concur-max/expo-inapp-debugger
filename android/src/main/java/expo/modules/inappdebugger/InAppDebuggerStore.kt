@@ -749,7 +749,6 @@ private class KeyedRingBuffer<K, T>(
     }
 
     val key = keySelector(item)
-    items.remove(key)
     items[key] = item
     trimToCapacity()
     return true

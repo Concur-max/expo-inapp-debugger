@@ -224,7 +224,7 @@ export class NetworkCollector {
     this.xhrInterceptor.setResponseCallback?.(
       (
         status: number,
-        timeout: number,
+        _configuredTimeoutMs: number,
         response: unknown,
         responseURL: string,
         responseType: string,
@@ -240,9 +240,9 @@ export class NetworkCollector {
         entry.endedAt = endedAt;
         entry.durationMs = endedAt - entry.startedAt;
         entry.updatedAt = endedAt;
-        entry.state = timeout ? 'error' : status >= 400 ? 'error' : 'success';
-        if (timeout) {
-          entry.error = `timeout=${timeout}`;
+        entry.state = status === 0 || status >= 400 ? 'error' : 'success';
+        if (status === 0) {
+          entry.error = 'XMLHttpRequest failed';
         }
         this.options.onDiagnostic?.(
           'JSNetwork',

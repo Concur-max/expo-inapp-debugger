@@ -243,4 +243,59 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     });
     expect(latestEntry()?.endedAt).toEqual(expect.any(Number));
   });
+
+  it('keeps XHR requests successful when a timeout is configured but the response is 200', () => {
+    const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const latestEntry = () => entries[entries.length - 1];
+
+    collector.enable();
+
+    const xhr: Record<string, unknown> = {};
+    xhrCallbacks.open?.('POST', 'https://example.com/items', xhr);
+    xhrCallbacks.send?.('{"name":"demo"}', xhr);
+    xhrCallbacks.response?.(200, 60000, '{"ok":true}', 'https://example.com/items', 'json', xhr);
+
+    expect(latestEntry()).toMatchObject({
+      id: 'http_1',
+      kind: 'http',
+      state: 'success',
+      status: 200,
+      responseBody: '{"ok":true}',
+    });
+    expect(latestEntry()?.error).toBeUndefined();
+  });
+
+  it('marks XHR requests with status 0 as errors', () => {
+    const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const latestEntry = () => entries[entries.length - 1];
+
+    collector.enable();
+
+    const xhr: Record<string, unknown> = {};
+    xhrCallbacks.open?.('GET', 'https://example.com/items', xhr);
+    xhrCallbacks.send?.(null, xhr);
+    xhrCallbacks.response?.(0, 0, '', '', 'text', xhr);
+
+    expect(latestEntry()).toMatchObject({
+      id: 'http_1',
+      kind: 'http',
+      state: 'error',
+      status: 0,
+      error: 'XMLHttpRequest failed',
+    });
+  });
 });

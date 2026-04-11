@@ -429,7 +429,6 @@ private fun DebugPanel(onDismiss: () -> Unit) {
         Tab(
           selected = activeTab == DebugTab.AppInfo,
           onClick = {
-            InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
             activeTab = DebugTab.AppInfo
           },
           text = { Text("app Info") }
@@ -468,7 +467,7 @@ private fun AppInfoTab(
   }
 
   LaunchedEffect(Unit) {
-    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = true)
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
   }
 
   val sections by produceState(
@@ -497,19 +496,20 @@ private fun AppInfoTab(
     item("app_info_root_control") {
       RootEnhancedControlCard(
         checked = rootEnhancedEnabled,
-        enabled = runtimeInfo.rootStatus != "checking" && !rootTogglePending,
-        pending = rootTogglePending,
+        enabled = runtimeInfo.rootStatus != "checking",
         runtimeInfo = runtimeInfo,
         locale = locale,
         onCheckedChange = { enabled ->
-          rootTogglePending = true
-          scope.launch {
-            try {
-              withContext(Dispatchers.Default) {
-                applyPanelRootEnhancedMode(context.applicationContext, enabled)
+          if (!rootTogglePending) {
+            rootTogglePending = true
+            scope.launch {
+              try {
+                withContext(Dispatchers.Default) {
+                  applyPanelRootEnhancedMode(context.applicationContext, enabled)
+                }
+              } finally {
+                rootTogglePending = false
               }
-            } finally {
-              rootTogglePending = false
             }
           }
         }
@@ -535,12 +535,11 @@ private fun AppInfoTab(
 private fun RootEnhancedControlCard(
   checked: Boolean,
   enabled: Boolean,
-  pending: Boolean,
   runtimeInfo: DebugRuntimeInfo,
   locale: String,
   onCheckedChange: (Boolean) -> Unit
 ) {
-  val tone = toneForRootEnhancedControl(runtimeInfo, checked, pending)
+  val tone = toneForRootEnhancedControl(runtimeInfo, checked)
 
   Card(
     modifier = Modifier.fillMaxWidth(),
@@ -562,7 +561,7 @@ private fun RootEnhancedControlCard(
           )
           Spacer(modifier = Modifier.height(6.dp))
           Text(
-            text = localizedRootEnhancedControlSummary(runtimeInfo, checked, pending, locale),
+            text = localizedRootEnhancedControlSummary(runtimeInfo, checked, locale),
             style = MaterialTheme.typography.bodyMedium,
             color = PanelColors.MutedText
           )
@@ -577,7 +576,7 @@ private fun RootEnhancedControlCard(
 
       Spacer(modifier = Modifier.height(10.dp))
       PanelChip(
-        text = localizedRootEnhancedControlStatus(runtimeInfo, checked, pending, locale),
+        text = localizedRootEnhancedControlStatus(runtimeInfo, checked, locale),
         background = tone.background,
         foreground = tone.foreground
       )
@@ -605,7 +604,7 @@ private fun LogsTab(
   val context = LocalContext.current
   val strings = config.strings
   var searchQuery by rememberSaveable { mutableStateOf("") }
-  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Desc) }
+  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
   var selectedLevels by remember { mutableStateOf(PanelPreferences.loadLogLevels(context)) }
   var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadLogOrigins(context)) }
   val hasActiveFilters = remember(selectedLevels, selectedOrigins) {
@@ -743,7 +742,7 @@ private fun NetworkTab(
   val context = LocalContext.current
   val strings = config.strings
   var searchQuery by rememberSaveable { mutableStateOf("") }
-  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Desc) }
+  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
   var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
   var selectedKinds by remember { mutableStateOf(PanelPreferences.loadNetworkKinds(context)) }
   val hasActiveFilters = remember(selectedOrigins, selectedKinds) {
@@ -1256,7 +1255,8 @@ private fun NetworkCard(
 ) {
   val durationLabel = strings["duration"] ?: "耗时"
   val tone = remember(entry.state, entry.status) { toneForNetwork(entry) }
-  val trailingBadgeText = remember(entry.kind, entry.status) { networkTrailingBadgeTitle(entry) }
+  val trailingBadgeText = remember(entry.kind, entry.status, entry.state) { networkTrailingBadgeTitle(entry) }
+  val showStateLabel = remember(entry.kind, entry.status) { shouldShowNetworkStateLabel(entry) }
   val durationSummary = remember(
     entry.kind,
     entry.durationMs,
@@ -1305,11 +1305,13 @@ private fun NetworkCard(
             )
           }
           Spacer(modifier = Modifier.weight(1f))
-          Text(
-            text = entry.state.uppercase(Locale.ROOT),
-            style = MaterialTheme.typography.labelMedium,
-            color = PanelColors.MutedText
-          )
+          if (showStateLabel) {
+            Text(
+              text = entry.state.uppercase(Locale.ROOT),
+              style = MaterialTheme.typography.labelMedium,
+              color = PanelColors.MutedText
+            )
+          }
         }
 
         Text(
@@ -1387,7 +1389,7 @@ private fun applyPanelRootEnhancedMode(context: Context?, enabled: Boolean) {
   )
 
   if (nextAndroidNativeLogs == currentConfig.androidNativeLogs) {
-    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = enabled)
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
     return
   }
 
@@ -1395,7 +1397,7 @@ private fun applyPanelRootEnhancedMode(context: Context?, enabled: Boolean) {
   InAppDebuggerStore.updateConfig(nextConfig)
   InAppDebuggerNativeLogCapture.applyConfig(context?.applicationContext, nextConfig)
   InAppDebuggerNativeNetworkCapture.applyConfig(context?.applicationContext, nextConfig)
-  InAppDebuggerNativeLogCapture.refreshRuntimeInfo(forceRootProbe = enabled)
+  InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
 }
 
 private fun isRootEnhancedRequested(config: DebugConfig): Boolean {
@@ -1579,8 +1581,7 @@ private fun buildHttpSections(
     DetailItem(localizedOriginTitleLabel(locale), localizedOriginTitle(entry.origin, strings)),
     DetailItem(localizedNetworkTypeTitle(locale), localizedNetworkKindTitle(entry.kind, locale)),
     DetailItem(strings["method"] ?: "方法", entry.method),
-    DetailItem(strings["status"] ?: "状态码", entry.status?.toString() ?: "-"),
-    DetailItem(strings["state"] ?: "状态", entry.state),
+    DetailItem(strings["status"] ?: "状态码", httpStatusDetailText(entry)),
     DetailItem(strings["protocol"] ?: "协议", entry.protocol ?: "-"),
     DetailItem("URL", entry.url, monospace = true),
     DetailItem(strings["duration"] ?: "耗时", entry.durationMs?.let { "${it}ms" } ?: "-"),
@@ -1597,6 +1598,10 @@ private fun buildHttpSections(
       monospace = true
     )
   )
+
+  if (shouldShowNetworkStateLabel(entry)) {
+    items.add(4, DetailItem(strings["state"] ?: "状态", entry.state))
+  }
 
   entry.events?.takeIf { it.isNotBlank() }?.let { events ->
     items += DetailItem(
@@ -1655,7 +1660,7 @@ private fun buildWebSocketSections(
   }
 
   if (entry.status != null) {
-    items += DetailItem(strings["status"] ?: "状态码", entry.status.toString())
+    items += DetailItem(strings["status"] ?: "状态码", httpStatusDisplayText(entry))
   }
 
   if (entry.requestedCloseCode != null || !entry.requestedCloseReason.isNullOrBlank()) {
@@ -1873,21 +1878,20 @@ private fun toneForNetwork(entry: DebugNetworkEntry): PanelTone {
 
 private fun toneForRootEnhancedControl(
   runtimeInfo: DebugRuntimeInfo,
-  checked: Boolean,
-  pending: Boolean
+  checked: Boolean
 ): PanelTone {
   return when {
-    pending || runtimeInfo.rootStatus == "checking" -> toneForLogLevel("warn")
     checked && runtimeInfo.activeLogcatMode == "root-device" -> PanelTone(
       foreground = Color(0xFF067647),
       background = Color(0xFFE8F7EE)
     )
     checked && runtimeInfo.rootStatus == "non_root" -> toneForLogLevel("error")
-    checked -> toneForLogLevel("info")
+    runtimeInfo.rootStatus == "checking" -> toneForLogLevel("warn")
     runtimeInfo.rootStatus == "root" -> PanelTone(
       foreground = Color(0xFF067647),
       background = Color(0xFFE8F7EE)
     )
+    checked -> toneForLogLevel("info")
     else -> toneForLogLevel("debug")
   }
 }
@@ -1914,10 +1918,33 @@ private fun networkKindBadgeTitle(rawKind: String): String {
 
 private fun networkTrailingBadgeTitle(entry: DebugNetworkEntry): String? {
   return when {
-    entry.status != null -> entry.status.toString()
+    entry.status != null -> httpStatusDisplayText(entry)
     isWebSocketKind(entry.kind) -> null
     else -> networkKindBadgeTitle(entry.kind)
   }
+}
+
+private fun httpStatusDisplayText(entry: DebugNetworkEntry): String {
+  val status = entry.status ?: return "-"
+  if (status == 0 && entry.state == "error") {
+    return "(failed)"
+  }
+  return status.toString()
+}
+
+private fun httpStatusDetailText(entry: DebugNetworkEntry): String {
+  return if (entry.status != null) {
+    httpStatusDisplayText(entry)
+  } else {
+    "-"
+  }
+}
+
+private fun shouldShowNetworkStateLabel(entry: DebugNetworkEntry): Boolean {
+  if (isWebSocketKind(entry.kind)) {
+    return true
+  }
+  return entry.status == null
 }
 
 private fun localizedNetworkTypeTitle(locale: String): String {
@@ -2215,27 +2242,14 @@ private fun localizedRootEnhancedControlTitle(locale: String): String {
 private fun localizedRootEnhancedControlStatus(
   runtimeInfo: DebugRuntimeInfo,
   checked: Boolean,
-  pending: Boolean,
   locale: String
 ): String {
   return when {
-    pending -> when {
-      locale.startsWith("en") -> "Applying..."
-      locale.startsWith("ja") -> "適用中..."
-      locale == "zh-TW" -> "套用中..."
-      else -> "应用中..."
-    }
     checked && runtimeInfo.activeLogcatMode == "root-device" -> when {
       locale.startsWith("en") -> "Root device-wide capture active"
       locale.startsWith("ja") -> "root による端末全体採集が有効"
       locale == "zh-TW" -> "root 整機採集已啟用"
       else -> "root 整机采集已启用"
-    }
-    checked && runtimeInfo.rootStatus == "checking" -> when {
-      locale.startsWith("en") -> "Checking root availability"
-      locale.startsWith("ja") -> "root 利用可否を確認中"
-      locale == "zh-TW" -> "檢查 root 可用性中"
-      else -> "正在检查 root 可用性"
     }
     checked && runtimeInfo.rootStatus == "non_root" -> when {
       locale.startsWith("en") -> "Requested, but root is unavailable"
@@ -2243,17 +2257,23 @@ private fun localizedRootEnhancedControlStatus(
       locale == "zh-TW" -> "已請求，但 root 不可用"
       else -> "已请求，但 root 不可用"
     }
-    checked -> when {
-      locale.startsWith("en") -> "Requested"
-      locale.startsWith("ja") -> "要求済み"
-      locale == "zh-TW" -> "已請求"
-      else -> "已请求"
+    runtimeInfo.rootStatus == "checking" -> when {
+      locale.startsWith("en") -> "Checking root availability"
+      locale.startsWith("ja") -> "root 利用可否を確認中"
+      locale == "zh-TW" -> "檢查 root 可用性中"
+      else -> "正在检查 root 可用性"
     }
     runtimeInfo.rootStatus == "root" -> when {
       locale.startsWith("en") -> "Root available"
       locale.startsWith("ja") -> "root 利用可能"
       locale == "zh-TW" -> "root 可用"
       else -> "root 可用"
+    }
+    checked -> when {
+      locale.startsWith("en") -> "Requested"
+      locale.startsWith("ja") -> "要求済み"
+      locale == "zh-TW" -> "已請求"
+      else -> "已请求"
     }
     else -> when {
       locale.startsWith("en") -> "App-only capture"
@@ -2267,16 +2287,9 @@ private fun localizedRootEnhancedControlStatus(
 private fun localizedRootEnhancedControlSummary(
   runtimeInfo: DebugRuntimeInfo,
   checked: Boolean,
-  pending: Boolean,
   locale: String
 ): String {
   return when {
-    pending -> when {
-      locale.startsWith("en") -> "Updating the collector now. The panel will refresh after the native logcat readers restart."
-      locale.startsWith("ja") -> "現在コレクターを更新しています。ネイティブ logcat リーダー再起動後に面板が更新されます。"
-      locale == "zh-TW" -> "正在更新採集器，原生 logcat 讀取器重啟後面板會自動刷新。"
-      else -> "正在更新采集器，原生 logcat 读取器重启后面板会自动刷新。"
-    }
     checked && runtimeInfo.activeLogcatMode == "root-device" -> when {
       locale.startsWith("en") -> "The debugger is reading device-wide Android logcat through root, including logs outside the current app process."
       locale.startsWith("ja") -> "デバッガーは root 経由で端末全体の Android logcat を読み取っており、現在のアプリプロセス外のログも含まれます。"
@@ -2289,17 +2302,17 @@ private fun localizedRootEnhancedControlSummary(
       locale == "zh-TW" -> "已請求 root 增強模式，但 root 不可用或已被拒絕；在授權前會回退為目前應用採集。"
       else -> "已请求 root 增强模式，但 root 不可用或已被拒绝；在授权前会回退为当前应用采集。"
     }
-    checked -> when {
-      locale.startsWith("en") -> "This requests device-wide Android logcat through root. If root is unavailable, the collector falls back to app-only capture."
-      locale.startsWith("ja") -> "これは root 経由の端末全体 Android logcat を要求します。root が利用できない場合はアプリ限定採集に回退します。"
-      locale == "zh-TW" -> "這會要求透過 root 讀取整機 Android logcat；若 root 不可用，則會回退到僅當前應用採集。"
-      else -> "这会要求通过 root 读取整机 Android logcat；若 root 不可用，则会回退到仅当前应用采集。"
-    }
     runtimeInfo.rootStatus == "root" -> when {
       locale.startsWith("en") -> "Root is available on this device. Turn this on to upgrade Android logcat capture from app-only to device-wide."
       locale.startsWith("ja") -> "この端末では root が利用可能です。オンにすると Android logcat 採集をアプリ限定から端末全体へ拡張できます。"
       locale == "zh-TW" -> "此裝置可使用 root；打開後可將 Android logcat 採集從僅當前應用提升為整機範圍。"
       else -> "此设备可使用 root；打开后可将 Android logcat 采集从仅当前应用提升为整机范围。"
+    }
+    checked -> when {
+      locale.startsWith("en") -> "This requests device-wide Android logcat through root. If root is unavailable, the collector falls back to app-only capture."
+      locale.startsWith("ja") -> "これは root 経由の端末全体 Android logcat を要求します。root が利用できない場合はアプリ限定採集に回退します。"
+      locale == "zh-TW" -> "這會要求透過 root 讀取整機 Android logcat；若 root 不可用，則會回退到僅當前應用採集。"
+      else -> "这会要求通过 root 读取整机 Android logcat；若 root 不可用，则会回退到仅当前应用采集。"
     }
     else -> when {
       locale.startsWith("en") -> "Keep this off to stay on current-app logcat only. Turn it on later if root becomes available."
@@ -3085,7 +3098,7 @@ private fun formatNetworkSummaryText(
     "origin=${localizedOriginTitle(entry.origin, strings)}",
     "type=${localizedNetworkKindTitle(entry.kind, locale)}",
     "state=${entry.state}",
-    "status=${entry.status?.toString() ?: networkKindBadgeTitle(entry.kind)}",
+    "status=${entry.status?.let { httpStatusDisplayText(entry) } ?: networkKindBadgeTitle(entry.kind)}",
     "duration=${entry.durationMs?.let { "${it}ms" } ?: "-"}"
   )
   if (isWebSocketKind(entry.kind)) {

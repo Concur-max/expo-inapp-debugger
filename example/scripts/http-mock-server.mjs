@@ -127,9 +127,9 @@ const server = http.createServer(async (request, response) => {
       message: 'POST response body from local mock server',
     };
     console.log(
-      `[http:mock] POST ${url.pathname}${url.search} -> 201 body=${rawBody.slice(0, 160) || '-'}`
+      `[http:mock] POST ${url.pathname}${url.search} -> 200 body=${rawBody.slice(0, 160) || '-'}`
     );
-    sendJSON(response, 201, payload);
+    sendJSON(response, 200, payload);
     return;
   }
 
