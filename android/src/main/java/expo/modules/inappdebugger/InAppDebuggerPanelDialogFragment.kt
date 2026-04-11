@@ -91,6 +91,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.LinkedHashMap
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -602,6 +603,13 @@ private fun LogsTab(
   val logsWindowState by InAppDebuggerStore.logsWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
   val strings = config.strings
+  val logSearchCache = remember(config.maxLogs) {
+    SearchTextCache(
+      capacity = (config.maxLogs * 2).coerceAtLeast(256),
+      keySelector = DebugLogEntry::id,
+      searchTextBuilder = ::buildLogSearchText
+    )
+  }
   var searchQuery by rememberSaveable { mutableStateOf("") }
   var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
   var selectedLevels by remember { mutableStateOf(PanelPreferences.loadLogLevels(context)) }
@@ -626,7 +634,8 @@ private fun LogsTab(
           sortOrder = sortOrder,
           selectedLevels = selectedLevels,
           selectedOrigins = selectedOrigins,
-          allFiltersSelected = PanelPreferences.isAllLogFiltersSelected(selectedLevels, selectedOrigins)
+          allFiltersSelected = PanelPreferences.isAllLogFiltersSelected(selectedLevels, selectedOrigins),
+          searchCache = logSearchCache
         )
       }
   }
@@ -740,6 +749,18 @@ private fun NetworkTab(
   val networkWindowState by InAppDebuggerStore.networkWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
   val strings = config.strings
+  val networkSearchCache = remember(locale, config.maxRequests) {
+    SearchTextCache(
+      capacity = (config.maxRequests * 3).coerceAtLeast(256),
+      keySelector = DebugNetworkEntry::id,
+      searchTextBuilder = { entry ->
+        buildNetworkSearchText(
+          entry = entry,
+          localizedKindTitle = localizedNetworkKindFilterTitle(normalizedNetworkKind(entry.kind), locale)
+        )
+      }
+    )
+  }
   var searchQuery by rememberSaveable { mutableStateOf("") }
   var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
   var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
@@ -766,7 +787,8 @@ private fun NetworkTab(
           selectedOrigins = selectedOrigins,
           selectedKinds = selectedKinds,
           locale = locale,
-          allFiltersSelected = PanelPreferences.isAllNetworkFiltersSelected(selectedOrigins, selectedKinds)
+          allFiltersSelected = PanelPreferences.isAllNetworkFiltersSelected(selectedOrigins, selectedKinds),
+          searchCache = networkSearchCache
         )
       }
   }
@@ -1454,7 +1476,8 @@ private fun filterLogs(
   sortOrder: SortOrder,
   selectedLevels: Set<String>,
   selectedOrigins: Set<String>,
-  allFiltersSelected: Boolean = false
+  allFiltersSelected: Boolean = false,
+  searchCache: SearchTextCache<DebugLogEntry>? = null
 ): List<DebugLogEntry> {
   val trimmedQuery = query.trim()
   if (source.isEmpty() || selectedLevels.isEmpty() || selectedOrigins.isEmpty()) {
@@ -1472,7 +1495,7 @@ private fun filterLogs(
       if (entry.type !in selectedLevels || entry.origin !in selectedOrigins) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery)) {
+      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery, searchCache)) {
         continue
       }
       result.add(entry)
@@ -1482,7 +1505,7 @@ private fun filterLogs(
       if (entry.type !in selectedLevels || entry.origin !in selectedOrigins) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery)) {
+      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery, searchCache)) {
         continue
       }
       result.add(entry)
@@ -1499,7 +1522,8 @@ private fun filterNetwork(
   selectedOrigins: Set<String>,
   selectedKinds: Set<String>,
   locale: String,
-  allFiltersSelected: Boolean = false
+  allFiltersSelected: Boolean = false,
+  searchCache: SearchTextCache<DebugNetworkEntry>? = null
 ): List<DebugNetworkEntry> {
   val trimmedQuery = query.trim()
   if (source.isEmpty() || selectedOrigins.isEmpty() || selectedKinds.isEmpty()) {
@@ -1518,7 +1542,7 @@ private fun filterNetwork(
       if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind)) {
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind, searchCache)) {
         continue
       }
       result.add(entry)
@@ -1529,7 +1553,7 @@ private fun filterNetwork(
       if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind)) {
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind, searchCache)) {
         continue
       }
       result.add(entry)
@@ -1538,7 +1562,15 @@ private fun filterNetwork(
   return result
 }
 
-private fun matchesLogQuery(entry: DebugLogEntry, query: String): Boolean {
+private fun matchesLogQuery(
+  entry: DebugLogEntry,
+  query: String,
+  searchCache: SearchTextCache<DebugLogEntry>? = null
+): Boolean {
+  searchCache?.let { cache ->
+    return cache.matches(entry, query)
+  }
+
   return entry.message.contains(query, ignoreCase = true) ||
     entry.type.contains(query, ignoreCase = true) ||
     entry.origin.contains(query, ignoreCase = true) ||
@@ -1550,8 +1582,13 @@ private fun matchesNetworkQuery(
   entry: DebugNetworkEntry,
   query: String,
   locale: String,
-  kind: NetworkKindFilter = normalizedNetworkKind(entry.kind)
+  kind: NetworkKindFilter = normalizedNetworkKind(entry.kind),
+  searchCache: SearchTextCache<DebugNetworkEntry>? = null
 ): Boolean {
+  searchCache?.let { cache ->
+    return cache.matches(entry, query)
+  }
+
   val kindTitle = localizedNetworkKindFilterTitle(kind, locale)
   return entry.url.contains(query, ignoreCase = true) ||
     entry.origin.contains(query, ignoreCase = true) ||
@@ -3141,6 +3178,70 @@ private class ReversedListView<T>(
   override fun get(index: Int): T {
     return source[source.lastIndex - index]
   }
+}
+
+private class SearchTextCache<T>(
+  capacity: Int,
+  private val keySelector: (T) -> String,
+  private val searchTextBuilder: (T) -> String
+) {
+  private val texts = object : LinkedHashMap<String, String>(capacity, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+      return size > capacity
+    }
+  }
+
+  fun matches(entry: T, query: String): Boolean {
+    val key = keySelector(entry)
+    val searchText = texts[key] ?: searchTextBuilder(entry).also { built ->
+      texts[key] = built
+    }
+    return searchText.contains(query, ignoreCase = true)
+  }
+}
+
+private fun buildLogSearchText(entry: DebugLogEntry): String {
+  return buildSearchText(
+    entry.message,
+    entry.type,
+    entry.origin,
+    entry.context,
+    entry.details
+  )
+}
+
+private fun buildNetworkSearchText(
+  entry: DebugNetworkEntry,
+  localizedKindTitle: String
+): String {
+  return buildSearchText(
+    entry.url,
+    entry.origin,
+    entry.kind,
+    localizedKindTitle,
+    entry.method,
+    entry.state,
+    entry.protocol,
+    entry.requestedProtocols,
+    entry.closeReason,
+    entry.error,
+    entry.events,
+    entry.messages
+  )
+}
+
+private fun buildSearchText(vararg parts: String?): String {
+  val result = StringBuilder()
+  parts.forEach { part ->
+    if (!part.isNullOrEmpty()) {
+      if (result.isNotEmpty()) {
+        // Use a sentinel separator so a query cannot accidentally match across field boundaries.
+        result.append('\u0000')
+      }
+      result.append(part)
+    }
+  }
+  return result.toString()
 }
 
 private fun copyToClipboard(text: String, successMessage: String, context: Context?) {
