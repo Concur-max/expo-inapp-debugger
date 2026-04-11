@@ -2,6 +2,7 @@ package expo.modules.inappdebugger
 
 import java.time.Instant
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicLong
 
@@ -152,15 +153,48 @@ data class TimelineSortKey(
 )
 
 private val nativeLogClockFormatter: DateTimeFormatter =
-  DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
-private val nativeIsoInstantFormatter: DateTimeFormatter = DateTimeFormatter.ISO_INSTANT
+  DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+private val nativeIsoSecondFormatter: DateTimeFormatter =
+  DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss").withZone(ZoneOffset.UTC)
 private val nativeEntryIdCounter = AtomicLong(0)
+private val nativeTimestampCacheLock = Any()
+@Volatile private var cachedNativeTimestampSecond = Long.MIN_VALUE
+@Volatile private var cachedNativeClockPrefix = ""
+@Volatile private var cachedNativeIsoPrefix = ""
 
 fun formatNativeLogClock(timestampMillis: Long): String {
-  return formatNativeLogClock(Instant.ofEpochMilli(timestampMillis))
+  return nativeFormattedTimestamps(timestampMillis).clock
 }
 
-private fun formatNativeLogClock(instant: Instant): String = nativeLogClockFormatter.format(instant)
+private data class NativeFormattedTimestamps(
+  val clock: String,
+  val fullTimestamp: String
+)
+
+private fun nativeFormattedTimestamps(timestampMillis: Long): NativeFormattedTimestamps {
+  val secondBucket = Math.floorDiv(timestampMillis, 1000L)
+  var clockPrefix = cachedNativeClockPrefix
+  var isoPrefix = cachedNativeIsoPrefix
+  if (cachedNativeTimestampSecond != secondBucket) {
+    synchronized(nativeTimestampCacheLock) {
+      if (cachedNativeTimestampSecond != secondBucket) {
+        val instant = Instant.ofEpochSecond(secondBucket)
+        cachedNativeClockPrefix = nativeLogClockFormatter.format(instant) + "."
+        cachedNativeIsoPrefix = nativeIsoSecondFormatter.format(instant) + "."
+        cachedNativeTimestampSecond = secondBucket
+      }
+      clockPrefix = cachedNativeClockPrefix
+      isoPrefix = cachedNativeIsoPrefix
+    }
+  }
+
+  val millis = Math.floorMod(timestampMillis, 1000L)
+  val millisSuffix = millis.toString().padStart(3, '0')
+  return NativeFormattedTimestamps(
+    clock = clockPrefix + millisSuffix,
+    fullTimestamp = isoPrefix + millisSuffix + "Z"
+  )
+}
 
 fun createNativeDebugLogEntry(
   type: String,
@@ -169,8 +203,8 @@ fun createNativeDebugLogEntry(
   details: String? = null,
   timestampMillis: Long = System.currentTimeMillis()
 ): DebugLogEntry {
-  val instant = Instant.ofEpochMilli(timestampMillis)
   val sequence = nativeEntryIdCounter.incrementAndGet()
+  val formattedTimestamps = nativeFormattedTimestamps(timestampMillis)
   return DebugLogEntry(
     id = "native_${timestampMillis}_${sequence}",
     type = type,
@@ -178,8 +212,8 @@ fun createNativeDebugLogEntry(
     context = context,
     details = details,
     message = message,
-    timestamp = formatNativeLogClock(instant),
-    fullTimestamp = nativeIsoInstantFormatter.format(instant),
+    timestamp = formattedTimestamps.clock,
+    fullTimestamp = formattedTimestamps.fullTimestamp,
     timelineTimestampMillis = timestampMillis,
     timelineSequence = sequence
   )

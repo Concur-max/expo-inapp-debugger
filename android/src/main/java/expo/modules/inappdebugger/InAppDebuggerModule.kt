@@ -65,18 +65,10 @@ class InAppDebuggerModule : Module() {
         return@AsyncFunction
       }
       inAppDebuggerDiagnostic("NativeModule") {
-        "ingestBatch logsType=${logs?.javaClass?.name ?: "null"} " +
-          "errorsType=${errors?.javaClass?.name ?: "null"} " +
-          "networkType=${network?.javaClass?.name ?: "null"} " +
-          "logsSize=${logs?.size() ?: 0} errorsSize=${errors?.size() ?: 0} networkSize=${network?.size() ?: 0}"
+        "ingestBatch logsSize=${logs?.size() ?: 0} " +
+          "errorsSize=${errors?.size() ?: 0} networkSize=${network?.size() ?: 0}"
       }
-      InAppDebuggerStore.ingestBatch(
-        mapOf(
-          "logs" to logs?.toArrayList(),
-          "errors" to errors?.toArrayList(),
-          "network" to network?.toArrayList()
-        )
-      )
+      InAppDebuggerStore.ingestBatch(logs, errors, network)
     }
 
     AsyncFunction("emitDiagnostic") { source: String, message: String ->

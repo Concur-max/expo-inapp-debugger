@@ -2,6 +2,8 @@ package expo.modules.inappdebugger
 
 import android.os.Handler
 import android.os.HandlerThread
+import com.facebook.react.bridge.ReadableArray
+import com.facebook.react.bridge.ReadableType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -80,13 +82,16 @@ object InAppDebuggerStore {
     nextChromeState?.let(::publishChromeState)
   }
 
-  fun ingestBatch(batch: Map<String, Any?>) {
+  fun ingestBatch(
+    logs: ReadableArray?,
+    errors: ReadableArray?,
+    network: ReadableArray?
+  ) {
     inAppDebuggerDiagnostic("Store") {
-      "ingestBatch raw logs=${describeBatchPayload(batch["logs"])} " +
-        "errors=${describeBatchPayload(batch["errors"])} " +
-        "network=${describeBatchPayload(batch["network"])}"
+      "ingestBatch raw logs=${logs?.size() ?: 0} " +
+        "errors=${errors?.size() ?: 0} network=${network?.size() ?: 0}"
     }
-    val parsedBatch = parseBatch(batch)
+    val parsedBatch = parseBatch(logs, errors, network)
     inAppDebuggerDiagnostic("Store") {
       "ingestBatch parsed logs=${parsedBatch.logs.size} " +
         "errors=${parsedBatch.errors.size} network=${parsedBatch.network.size}"
@@ -480,166 +485,88 @@ object InAppDebuggerStore {
     }
   }
 
-  private fun parseLog(raw: Any?): DebugLogEntry? {
-    val map = raw.typedMap()
-    if (map != null) {
-      val id = map.string("id") ?: return null
-      val fullTimestamp = map.string("fullTimestamp") ?: ""
-      return DebugLogEntry(
-        id = id,
-        type = map.string("type") ?: "log",
-        origin = map.string("origin") ?: "js",
-        context = map.string("context"),
-        details = map.string("details"),
-        message = map.string("message") ?: "",
-        timestamp = map.string("timestamp") ?: "",
-        fullTimestamp = fullTimestamp,
-        timelineTimestampMillis =
-          map.long("timelineTimestampMillis")
-            ?: map.long("timestampMillis")
-            ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
-        timelineSequence = map.long("timelineSequence") ?: resolveTimelineSequence(id)
-      )
-    }
-
-    val list = raw.typedList() ?: return null
-    val id = list.string(0) ?: return null
-    val fullTimestamp = list.string(7) ?: ""
+  private fun parseLog(raw: ReadableArray): DebugLogEntry? {
+    val id = raw.string(0) ?: return null
+    val fullTimestamp = raw.string(7) ?: ""
     return DebugLogEntry(
       id = id,
-      type = list.string(1) ?: "log",
-      origin = list.string(2) ?: "js",
-      context = list.string(3),
-      details = list.string(4),
-      message = list.string(5) ?: "",
-      timestamp = list.string(6) ?: "",
+      type = raw.string(1) ?: "log",
+      origin = raw.string(2) ?: "js",
+      context = raw.string(3),
+      details = raw.string(4),
+      message = raw.string(5) ?: "",
+      timestamp = raw.string(6) ?: "",
       fullTimestamp = fullTimestamp,
       timelineTimestampMillis =
-        list.long(8) ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
-      timelineSequence = list.long(9) ?: resolveTimelineSequence(id)
+        raw.long(8) ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
+      timelineSequence = raw.long(9) ?: resolveTimelineSequence(id)
     )
   }
 
-  private fun parseError(raw: Any?): DebugErrorEntry? {
-    val map = raw.typedMap()
-    if (map != null) {
-      val id = map.string("id") ?: return null
-      val fullTimestamp = map.string("fullTimestamp") ?: ""
-      return DebugErrorEntry(
-        id = id,
-        source = map.string("source") ?: "console",
-        message = map.string("message") ?: "",
-        timestamp = map.string("timestamp") ?: "",
-        fullTimestamp = fullTimestamp,
-        timelineTimestampMillis =
-          map.long("timelineTimestampMillis")
-            ?: map.long("timestampMillis")
-            ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
-        timelineSequence = map.long("timelineSequence") ?: resolveTimelineSequence(id)
-      )
-    }
-
-    val list = raw.typedList() ?: return null
-    val id = list.string(0) ?: return null
-    val fullTimestamp = list.string(4) ?: ""
+  private fun parseError(raw: ReadableArray): DebugErrorEntry? {
+    val id = raw.string(0) ?: return null
+    val fullTimestamp = raw.string(4) ?: ""
     return DebugErrorEntry(
       id = id,
-      source = list.string(1) ?: "console",
-      message = list.string(2) ?: "",
-      timestamp = list.string(3) ?: "",
+      source = raw.string(1) ?: "console",
+      message = raw.string(2) ?: "",
+      timestamp = raw.string(3) ?: "",
       fullTimestamp = fullTimestamp,
       timelineTimestampMillis =
-        list.long(5) ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
-      timelineSequence = list.long(6) ?: resolveTimelineSequence(id)
+        raw.long(5) ?: resolveTimelineTimestampMillis(fullTimestamp, id = id),
+      timelineSequence = raw.long(6) ?: resolveTimelineSequence(id)
     )
   }
 
-  private fun parseNetwork(raw: Any?): DebugNetworkEntry? {
-    val map = raw.typedMap()
-    if (map != null) {
-      val id = map.string("id") ?: return null
-      return DebugNetworkEntry(
-        id = id,
-        kind = map.string("kind") ?: "http",
-        method = map.string("method") ?: "GET",
-        url = map.string("url") ?: "",
-        origin = map.string("origin") ?: "js",
-        state = map.string("state") ?: "pending",
-        startedAt = map.long("startedAt") ?: 0L,
-        updatedAt = map.long("updatedAt") ?: map.long("startedAt") ?: 0L,
-        endedAt = map.long("endedAt"),
-        durationMs = map.long("durationMs"),
-        status = map.int("status"),
-        requestHeaders = map.stringMap("requestHeaders"),
-        responseHeaders = map.stringMap("responseHeaders"),
-        requestBody = map.string("requestBody"),
-        responseBody = map.string("responseBody"),
-        responseType = map.string("responseType"),
-        responseContentType = map.string("responseContentType"),
-        responseSize = map.int("responseSize"),
-        error = map.string("error"),
-        protocol = map.string("protocol"),
-        requestedProtocols = map.string("requestedProtocols"),
-        closeReason = map.string("closeReason"),
-        closeCode = map.int("closeCode"),
-        requestedCloseCode = map.int("requestedCloseCode"),
-        requestedCloseReason = map.string("requestedCloseReason"),
-        cleanClose = map.bool("cleanClose"),
-        messageCountIn = map.int("messageCountIn"),
-        messageCountOut = map.int("messageCountOut"),
-        bytesIn = map.int("bytesIn"),
-        bytesOut = map.int("bytesOut"),
-        events = map.string("events"),
-        messages = map.string("messages"),
-        timelineSequence = map.long("timelineSequence") ?: resolveTimelineSequence(id)
-      )
-    }
-
-    val list = raw.typedList() ?: return null
-    val id = list.string(0) ?: return null
-    val startedAt = list.long(6) ?: 0L
+  private fun parseNetwork(raw: ReadableArray): DebugNetworkEntry? {
+    val id = raw.string(0) ?: return null
+    val startedAt = raw.long(6) ?: 0L
     return DebugNetworkEntry(
       id = id,
-      kind = list.string(1) ?: "http",
-      method = list.string(2) ?: "GET",
-      url = list.string(3) ?: "",
-      origin = list.string(4) ?: "js",
-      state = list.string(5) ?: "pending",
+      kind = raw.string(1) ?: "http",
+      method = raw.string(2) ?: "GET",
+      url = raw.string(3) ?: "",
+      origin = raw.string(4) ?: "js",
+      state = raw.string(5) ?: "pending",
       startedAt = startedAt,
-      updatedAt = list.long(7) ?: startedAt,
-      endedAt = list.long(8),
-      durationMs = list.long(9),
-      status = list.int(10),
-      requestHeaders = list.stringMap(11),
-      responseHeaders = list.stringMap(12),
-      requestBody = list.string(13),
-      responseBody = list.string(14),
-      responseType = list.string(15),
-      responseContentType = list.string(16),
-      responseSize = list.int(17),
-      error = list.string(18),
-      protocol = list.string(19),
-      requestedProtocols = list.string(20),
-      closeReason = list.string(21),
-      closeCode = list.int(22),
-      requestedCloseCode = list.int(23),
-      requestedCloseReason = list.string(24),
-      cleanClose = list.bool(25),
-      messageCountIn = list.int(26),
-      messageCountOut = list.int(27),
-      bytesIn = list.int(28),
-      bytesOut = list.int(29),
-      events = list.string(30),
-      messages = list.string(31),
-      timelineSequence = list.long(32) ?: resolveTimelineSequence(id)
+      updatedAt = raw.long(7) ?: startedAt,
+      endedAt = raw.long(8),
+      durationMs = raw.long(9),
+      status = raw.int(10),
+      requestHeaders = raw.stringMap(11),
+      responseHeaders = raw.stringMap(12),
+      requestBody = raw.string(13),
+      responseBody = raw.string(14),
+      responseType = raw.string(15),
+      responseContentType = raw.string(16),
+      responseSize = raw.int(17),
+      error = raw.string(18),
+      protocol = raw.string(19),
+      requestedProtocols = raw.string(20),
+      closeReason = raw.string(21),
+      closeCode = raw.int(22),
+      requestedCloseCode = raw.int(23),
+      requestedCloseReason = raw.string(24),
+      cleanClose = raw.bool(25),
+      messageCountIn = raw.int(26),
+      messageCountOut = raw.int(27),
+      bytesIn = raw.int(28),
+      bytesOut = raw.int(29),
+      events = raw.string(30),
+      messages = raw.string(31),
+      timelineSequence = raw.long(32) ?: resolveTimelineSequence(id)
     )
   }
 
-  private fun parseBatch(batch: Map<String, Any?>): ParsedBatch {
+  private fun parseBatch(
+    logs: ReadableArray?,
+    errors: ReadableArray?,
+    network: ReadableArray?
+  ): ParsedBatch {
     return ParsedBatch(
-      logs = parseBatchItems(batch["logs"], ::parseLog),
-      errors = parseBatchItems(batch["errors"], ::parseError),
-      network = parseBatchItems(batch["network"], ::parseNetwork)
+      logs = parseBatchItems(logs, ::parseLog),
+      errors = parseBatchItems(errors, ::parseError),
+      network = parseBatchItems(network, ::parseNetwork)
     )
   }
 }
@@ -659,13 +586,31 @@ private class TimelineBuffer<T>(
       return false
     }
 
-    val insertionIndex = insertionIndexFor(sortKeySelector(item))
-    items.add(insertionIndex, item)
-    if (items.size > capacity) {
-      if (insertionIndex == 0) {
-        items.removeAt(0)
+    val sortKey = sortKeySelector(item)
+    if (items.size >= capacity) {
+      val oldestSortKey = sortKeySelector(items[0])
+      if (compareTimelineSortKeys(sortKey, oldestSortKey) <= 0) {
         return false
       }
+    }
+
+    val insertionIndex =
+      if (items.isEmpty()) {
+        0
+      } else {
+        val tailSortKey = sortKeySelector(items[items.lastIndex])
+        if (compareTimelineSortKeys(tailSortKey, sortKey) <= 0) {
+          items.size
+        } else {
+          insertionIndexFor(sortKey)
+        }
+      }
+    if (insertionIndex == items.size) {
+      items.add(item)
+    } else {
+      items.add(insertionIndex, item)
+    }
+    if (items.size > capacity) {
       items.removeAt(0)
     }
     return true
@@ -770,13 +715,36 @@ private class KeyedTimelineBuffer<T>(
     }
 
     val key = keySelector(item)
+    val sortKey = sortKeySelector(item)
+    if (!itemsByKey.containsKey(key) && orderedKeys.size >= capacity) {
+      val oldestKey = orderedKeys.firstOrNull()
+      val oldestSortKey = oldestKey?.let(sortKeysByKey::get)
+      if (oldestSortKey != null && compareTimelineSortKeys(sortKey, oldestSortKey) <= 0) {
+        return false
+      }
+    }
+
     orderedKeys.remove(key)
     itemsByKey[key] = item
-    val sortKey = sortKeySelector(item)
     sortKeysByKey[key] = sortKey
 
-    val insertionIndex = insertionIndexFor(sortKey)
-    orderedKeys.add(insertionIndex, key)
+    val insertionIndex =
+      if (orderedKeys.isEmpty()) {
+        0
+      } else {
+        val tailKey = orderedKeys[orderedKeys.lastIndex]
+        val tailSortKey = sortKeysByKey[tailKey]
+        if (tailSortKey != null && compareTimelineSortKeys(tailSortKey, sortKey) <= 0) {
+          orderedKeys.size
+        } else {
+          insertionIndexFor(sortKey)
+        }
+      }
+    if (insertionIndex == orderedKeys.size) {
+      orderedKeys.add(key)
+    } else {
+      orderedKeys.add(insertionIndex, key)
+    }
     if (orderedKeys.size > capacity) {
       val removedKey = orderedKeys.removeAt(0)
       itemsByKey.remove(removedKey)
@@ -886,72 +854,6 @@ private fun compareTimelineSortKeys(lhs: TimelineSortKey, rhs: TimelineSortKey):
   return lhs.stableId.compareTo(rhs.stableId)
 }
 
-private fun Map<String, Any?>.string(key: String): String? = this[key] as? String
-
-@Suppress("UNCHECKED_CAST")
-private fun Any?.typedMap(): Map<String, Any?>? = this as? Map<String, Any?>
-
-@Suppress("UNCHECKED_CAST")
-private fun Any?.typedList(): List<Any?>? = this as? List<Any?>
-
-private fun Map<String, Any?>.int(key: String): Int? = (this[key] as? Number)?.toInt()
-
-private fun Map<String, Any?>.long(key: String): Long? = (this[key] as? Number)?.toLong()
-
-private fun Map<String, Any?>.bool(key: String): Boolean? = this[key] as? Boolean
-
-private fun List<Any?>.string(index: Int): String? = getOrNull(index) as? String
-
-private fun List<Any?>.int(index: Int): Int? = (getOrNull(index) as? Number)?.toInt()
-
-private fun List<Any?>.long(index: Int): Long? = (getOrNull(index) as? Number)?.toLong()
-
-private fun List<Any?>.bool(index: Int): Boolean? = getOrNull(index) as? Boolean
-
-private fun Map<String, Any?>.stringMap(key: String): Map<String, String> {
-  return this[key].stringMapValue()
-}
-
-private fun List<Any?>.stringMap(index: Int): Map<String, String> {
-  return getOrNull(index).stringMapValue()
-}
-
-private fun Any?.stringMapValue(): Map<String, String> {
-  when (this) {
-    is Map<*, *> -> {
-      if (isEmpty()) {
-        return emptyMap()
-      }
-
-      val result = LinkedHashMap<String, String>(size)
-      forEach { (entryKey, entryValue) ->
-        val mapKey = entryKey as? String ?: return@forEach
-        result[mapKey] = entryValue?.toString() ?: ""
-      }
-      return result
-    }
-
-    is List<*> -> {
-      if (isEmpty()) {
-        return emptyMap()
-      }
-
-      val result = LinkedHashMap<String, String>(size / 2)
-      var index = 0
-      while (index + 1 < size) {
-        val mapKey = get(index) as? String
-        if (mapKey != null) {
-          result[mapKey] = get(index + 1)?.toString() ?: ""
-        }
-        index += 2
-      }
-      return result
-    }
-
-    else -> return emptyMap()
-  }
-}
-
 private data class ParsedBatch(
   val logs: List<DebugLogEntry>,
   val errors: List<DebugErrorEntry>,
@@ -959,32 +861,104 @@ private data class ParsedBatch(
 )
 
 private fun <T> parseBatchItems(
-  raw: Any?,
-  parser: (Any?) -> T?
+  raw: ReadableArray?,
+  parser: (ReadableArray) -> T?
 ): List<T> {
-  val items = raw.batchItems() ?: return emptyList()
-  if (items.isEmpty()) {
+  raw ?: return emptyList()
+  if (raw.size() == 0) {
     return emptyList()
   }
 
-  val result = ArrayList<T>(items.size)
-  items.forEach { item ->
-    parser(item)?.let(result::add)
+  val result = ArrayList<T>(raw.size())
+  for (index in 0 until raw.size()) {
+    raw.array(index)?.let { item ->
+      parser(item)?.let(result::add)
+    }
   }
   return result
 }
 
-private fun Any?.batchItems(): List<Any?>? {
-  return when (this) {
-    is List<*> -> this
-    is Array<*> -> this.asList()
-    is Iterable<*> -> this.toList()
+private fun ReadableArray.typeAt(index: Int): ReadableType? {
+  if (index < 0 || index >= size()) {
+    return null
+  }
+  return getType(index)
+}
+
+private fun ReadableArray.string(index: Int): String? {
+  return if (typeAt(index) == ReadableType.String) {
+    getString(index)
+  } else {
+    null
+  }
+}
+
+private fun ReadableArray.stringValue(index: Int): String? {
+  return when (typeAt(index)) {
+    ReadableType.String -> getString(index)
+    ReadableType.Number -> {
+      val value = getDouble(index)
+      if (value == value.toLong().toDouble()) {
+        value.toLong().toString()
+      } else {
+        value.toString()
+      }
+    }
+    ReadableType.Boolean -> getBoolean(index).toString()
     else -> null
   }
 }
 
-private fun describeBatchPayload(raw: Any?): String {
-  val type = raw?.javaClass?.name ?: "null"
-  val size = raw.batchItems()?.size
-  return if (size != null) "$type(size=$size)" else type
+private fun ReadableArray.int(index: Int): Int? {
+  return if (typeAt(index) == ReadableType.Number) {
+    getDouble(index).toInt()
+  } else {
+    null
+  }
+}
+
+private fun ReadableArray.long(index: Int): Long? {
+  return if (typeAt(index) == ReadableType.Number) {
+    getDouble(index).toLong()
+  } else {
+    null
+  }
+}
+
+private fun ReadableArray.bool(index: Int): Boolean? {
+  return if (typeAt(index) == ReadableType.Boolean) {
+    getBoolean(index)
+  } else {
+    null
+  }
+}
+
+private fun ReadableArray.array(index: Int): ReadableArray? {
+  return if (typeAt(index) == ReadableType.Array) {
+    getArray(index)
+  } else {
+    null
+  }
+}
+
+private fun ReadableArray.stringMap(index: Int): Map<String, String> {
+  return array(index).stringMapValue()
+}
+
+private fun ReadableArray?.stringMapValue(): Map<String, String> {
+  this ?: return emptyMap()
+  if (size() == 0) {
+    return emptyMap()
+  }
+
+  val result = LinkedHashMap<String, String>(size() / 2)
+  var index = 0
+  while (index + 1 < size()) {
+    val key = string(index)
+    if (key != null) {
+      result[key] = stringValue(index + 1) ?: ""
+    }
+    index += 2
+  }
+  return result
 }
