@@ -33,7 +33,7 @@ npx expo run:android
 
 ## 快速接入
 
-在应用根部包一层 `InAppDebugProvider`。建议开发期启用，生产环境谨慎开启。
+最简单的默认接入方式是一层 `InAppDebugRoot`：
 
 ```tsx
 import { InAppDebugRoot } from 'expo-inapp-debugger';
@@ -47,34 +47,99 @@ export default function Root() {
 }
 ```
 
-`InAppDebugRoot` 是默认推荐接入方式，内部等价于 `InAppDebugProvider + InAppDebugBoundary`。如果你已经有自己的 Error Boundary，或者只想接 Provider，也可以继续分别使用这两个组件。
+`InAppDebugRoot` 内部等价于 `InAppDebugProvider + InAppDebugBoundary`。它适合想要“开箱即用”拿到调试器和 React Error Boundary 的场景。
+
+如果你把“未启用时尽量不改变宿主功能”作为硬约束，生产环境更推荐只挂 `InAppDebugProvider`，继续沿用宿主自己现有的 Error Boundary：
+
+```tsx
+import { InAppDebugProvider } from 'expo-inapp-debugger';
+
+export default function Root() {
+  return (
+    <InAppDebugProvider enabled={__DEV__} locale="zh-CN">
+      <App />
+    </InAppDebugProvider>
+  );
+}
+```
+
+原因是：`InAppDebugBoundary` 是一个真实的 React Error Boundary。即使 `enabled={false}`，它也仍然会捕获 React 渲染错误并渲染 fallback UI，只是“写入调试面板”这一步在 runtime 未创建时会变成 no-op。
+
+可以把三种接入方式理解成下面这样：
+
+| 方式 | 适用场景 | 对宿主功能的影响 | 关闭态开销 |
+| --- | --- | --- | --- |
+| `InAppDebugRoot` | 默认最简单接入 | 会额外引入一个 React Error Boundary | 比 `Provider` 略高，但通常仍很低 |
+| `InAppDebugProvider` | 生产环境最稳妥、最小语义影响 | 不改变 React 错误处理语义 | 低 |
+| `InAppDebugBoundary` | 只想单独使用内置 Error Boundary | 会改变 React 渲染错误的处理方式 | 与调试器是否启用无强绑定 |
 
 `InAppDebugProvider` 默认是关闭的。只要挂载了 `InAppDebugProvider`，`enabled` 就是启停调试器的唯一权威开关。只有它变成 `true`，库才会创建运行时并安装 JS / native 采集 hook。
 
 ## 生产环境按需开启
 
-如果你希望把库随生产包一起发布，但只给少量内部同学或测试账号开启，推荐把 `enabled` 绑定到业务开关，而不是直接跟 `__DEV__` 绑定：
+如果你希望把库随生产包一起发布，但只给少量内部同学或测试账号开启，推荐把 `enabled` 绑定到业务开关，而不是直接跟 `__DEV__` 绑定。
+
+对绝大部分生产项目，推荐优先级是这样的：
+
+1. 最优策略：账号命中前不要 `import`，不要挂 `Provider`，不要挂 `Boundary`。
+2. 次优策略：可以先 `import` 包，但只挂 `InAppDebugProvider enabled={debuggerEnabled}`。
+3. 最简单策略：使用 `InAppDebugRoot`，前提是你接受它自带的 Boundary 语义。
+
+如果你追求“未命中账号时运行期开销无限逼近 0”，可以把导入也延后到命中后再发生：
 
 ```tsx
-import { InAppDebugRoot } from 'expo-inapp-debugger';
-
 export default function Root() {
   const debuggerEnabled =
     isInternalDeveloper && remoteConfig.inAppDebuggerEnabled;
 
+  if (!debuggerEnabled) {
+    return <App />;
+  }
+
+  const { InAppDebugRoot } = require('expo-inapp-debugger');
   return (
-    <InAppDebugRoot enabled={debuggerEnabled} locale="zh-CN">
+    <InAppDebugRoot enabled locale="zh-CN">
       <App />
     </InAppDebugRoot>
   );
 }
 ```
 
+如果你不想把 import 延后，至少建议这样做：
+
+```tsx
+import { InAppDebugProvider } from 'expo-inapp-debugger';
+
+export default function Root() {
+  const debuggerEnabled =
+    isInternalDeveloper && remoteConfig.inAppDebuggerEnabled;
+
+  return (
+    <InAppDebugProvider enabled={debuggerEnabled} locale="zh-CN">
+      <App />
+    </InAppDebugProvider>
+  );
+}
+```
+
 建议尽量在应用启动早期完成这个判断。这样命中的内部人员可以拿到更完整的启动期信息，而绝大部分 `enabled={false}` 的用户会保持休眠态。
 
-库内部也会尽量延迟加载公共实现：如果只是 `import 'expo-inapp-debugger'`，但还没有实际渲染 `InAppDebugProvider` / `InAppDebugBoundary`，也没有调用 `InAppDebugController` / `inAppDebug`，入口不会立刻把对应实现模块全部求值。
+库内部也会尽量延迟加载公共实现：如果只是 `import 'expo-inapp-debugger'`，但还没有实际渲染 `InAppDebugProvider` / `InAppDebugBoundary` / `InAppDebugRoot`，也没有调用 `InAppDebugController` / `inAppDebug`，入口不会立刻把对应实现模块全部求值。
 
-## 关闭状态对宿主的影响
+## 真实开销模型
+
+下面的说明基于当前仓库代码路径，是“真实行为分层”，不是承诺某个固定的毫秒或内存数字。具体体感仍然会受宿主 App 规模、React Native 版本、设备性能和业务初始化逻辑影响。
+
+| 状态 | 真实行为 | 是否通常可忽略 |
+| --- | --- | --- |
+| 生产包根本不安装本库 | 没有任何库相关 JS / native 运行期开销，也没有原生模块注册成本 | 是 |
+| 已安装到生产包，但当前进程没有 import 本库 | 仍然有包体、原生链接、Expo module 注册成本；没有本库 JS runtime 成本 | 对业务运行通常可忽略，但不是零体积 |
+| 已 import 包，但没有渲染 `Provider` / `Boundary` / `Root`，也没有调用任何 API | 只有入口包装模块求值；不会创建 `DebugRuntime`，不会安装采集 hook | 通常可忽略 |
+| 渲染 `InAppDebugProvider enabled={false}`，且本进程从未启用过 | 会有少量 React render、effect、配置解析、Context 成本；不会创建 runtime，也不会安装 collectors | 通常可忽略 |
+| 渲染 `InAppDebugRoot enabled={false}`，且本进程从未启用过 | 在上一行基础上，再多一个 Boundary 组件；同时 React 渲染错误处理语义会改变 | 性能通常可忽略，但功能影响不是零 |
+| `enabled={true}` | 会创建 runtime，并按配置安装 console / error / promise / network / native collectors | 不能视为可忽略 |
+| 同一进程里曾启用过，之后又切回 `enabled={false}` | 重采集会停止，UI/store 会释放；但 runtime 对象仍在，底层 native 网络 hook 会留在快速跳过路径 | 对普通业务通常很低，可近似忽略，但不等于“从未启用” |
+| 上一行之后再把应用进程杀掉并重启，且新进程里 `enabled={false}` | 会回到“新进程从未启用”的关闭态，只保留包体和原生注册这类构建级成本 | 通常可认为接近最干净关闭态 |
 
 如果明确传入 `enabled={false}`，并且没有主动去挂载启用态的 Provider，调试器会保持休眠：
 
@@ -83,11 +148,31 @@ export default function Root() {
 - iOS 不开启 native log / URLProtocol / URLSession / WebSocket 采集。
 - Android 不开启 logcat / stdout / stderr / uncaught exception / OkHttp 采集，也不会启动面板刷新用的后台线程。
 
-这里的“关闭”指运行期不介入宿主逻辑。只要依赖仍然安装并被原生工程链接，它仍然会带来不可避免的包体、编译产物和 Expo module 注册成本。生产环境如果要求完全零体积、零注册成本，建议用 dev-only 入口或构建变体让生产包不安装 / 不导入这个库。
+这里的“关闭”指运行期尽量不介入宿主逻辑。只要依赖仍然安装并被原生工程链接，它仍然会带来不可避免的包体、编译产物和 Expo module 注册成本。生产环境如果要求完全零体积、零注册成本，建议用 dev-only 入口或构建变体让生产包不安装这个库。
 
-即使包入口已经被 `import`，只要还没有真正使用这些公共 API，JS 侧也会尽量保持惰性加载；但如果你已经真实挂载了 `InAppDebugProvider` / `InAppDebugBoundary`，仍然会有少量不可避免的 React 渲染与 Context 成本。要把关闭态开销压到最低，最推荐的仍然是先完成账号 / 远端开关判断，再决定是否导入并挂载这些组件。
+## 运行时 API 与懒加载行为
 
-如果曾经启用过，再把 Provider 的 `enabled` 切回 `false`，库会停止采集、隐藏 UI，并尽量释放已占用的 store / overlay / native log 资源；不过已经安装过的底层网络 hook 会进入快速跳过路径，这仍然和“进程启动后从未启用”不是同一个零介入状态。
+当前代码行为可以总结为：
+
+- 只要 `InAppDebugProvider` 已经挂载，`enabled` 就是唯一权威开关。
+- `InAppDebugController.enable()` / `disable()` 只作为“不挂 Provider 时”的兼容入口保留；一旦 Provider 已经挂载，这两个方法不会再覆盖 Provider 的状态。
+- `InAppDebugController.show()` / `hide()` / `clear()` / `exportSnapshot()` / `configureAndroidNativeLogs()` 第一次调用时，会创建一个 `DebugRuntime` 对象；但如果当前并未启用调试器，它们不会因此安装 collectors。
+- `inAppDebug.log()` / `inAppDebug.captureError()` 不会主动创建 runtime；如果 runtime 还不存在，它们会直接 no-op。
+- `InAppDebugBoundary` / `InAppDebugRoot` 会一直作为 React Error Boundary 存在，不以 `enabled` 为前提。
+
+如果你的目标是把关闭态开销压到最低，普通用户路径上应尽量避免调用任何 `InAppDebugController` API。
+
+## 切账号、退出登录与进程重启
+
+如果一个用户在当前进程里登录过开发账号并启用过调试器，之后退出登录并切回普通账号：
+
+- 只要 Provider 的 `enabled` 重新变成 `false`，重采集部分就会停掉。
+- 但这时同一进程里并不会完全回到“从未启用”的最干净状态。
+- JS 侧已经创建过的 `DebugRuntime` 对象会继续留在内存里。
+- Android / iOS 已经安装过一次的底层 native 网络 hook 不会反安装，而是进入快速跳过路径。
+- iOS 的 native crash / signal handler 也会在“本进程已经启用过一次”后继续留到进程结束。
+
+这类“历史启用残留”通常已经低到可以在普通业务路径里近似忽略，但如果你要求回到最接近“从未启用”的状态，最稳妥的方式仍然是让应用进程结束后重新进入。
 
 ## 面板说明
 
@@ -149,6 +234,8 @@ export default function Root() {
 ## React Error Boundary
 
 `InAppDebugBoundary` 会捕获 React 渲染错误，并把错误写入调试面板。
+
+需要特别注意的是：它不依赖 `enabled` 才生效。只要你挂载了 `InAppDebugBoundary`，宿主的 React 渲染错误处理语义就已经发生了变化。
 
 ```tsx
 <InAppDebugBoundary
@@ -275,6 +362,8 @@ iOS 侧会尽量保留低开销策略：
 - native 网络 payload preview 只在 `network` 面板激活时尽量处理，平时优先记录轻量元数据。
 - iOS 系统限制较多，无法保证回放调试器启动之前的任意日志，但会尽力保留未捕获崩溃报告。
 
+补充说明：一旦当前进程里启用过 iOS native log capture，崩溃 / signal handler 会保留到该进程结束。因此“启用过再关闭”在同一进程里仍然不等于“从未启用过”。
+
 ## 网络面板说明
 
 网络面板会展示：
@@ -291,9 +380,11 @@ iOS 侧会尽量保留低开销策略：
 ## 性能建议
 
 - 不要默认在生产环境全量开启，除非你明确接受日志与网络内容被本地记录的风险。
-- 推荐用远程配置、隐藏手势或内部构建开关控制 `enabled`。
+- 如果“未启用时几乎零影响”是第一优先级，优先做到“账号命中前不 import、不挂 Provider、不挂 Boundary”。
+- 如果需要长期把库随正式包带上，生产环境优先考虑 `InAppDebugProvider`，而不是 `InAppDebugRoot`。
+- 普通用户路径上避免调用 `InAppDebugController.show()` / `exportSnapshot()` 等 API，因为它们会创建 runtime 对象。
 - `maxLogs`、`maxRequests` 不要无限调大。当前 native store 使用固定容量 ring buffer，但 UI 展示和搜索仍然会受数量影响。
-- 如果只排查 JS 问题，可以关闭 native 来源过滤或关闭 network 面板，减少额外采集。
+- 如果只排查 JS 问题，可以关闭 network 面板或减少 native 来源采集，进一步压低开销。
 
 ## 示例工程
 
