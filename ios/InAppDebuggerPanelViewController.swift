@@ -2977,11 +2977,6 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return prettyObject
     }
 
-    if let decodedString = decodedJSONStringValue(rawTrimmed),
-       let prettyObject = prettyPrintedJSONObjectOrArray(decodedString.trimmingCharacters(in: .whitespacesAndNewlines)) {
-      return prettyObject
-    }
-
     if let structuredJSON = extractedStructuredJSON(from: rawTrimmed),
        let prettyObject = prettyPrintedJSONObjectOrArray(structuredJSON) {
       return prettyObject
@@ -2996,11 +2991,6 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return prettyObject
     }
 
-    if let decodedString = decodedJSONStringValue(normalizedTrimmed),
-       let prettyObject = prettyPrintedJSONObjectOrArray(decodedString.trimmingCharacters(in: .whitespacesAndNewlines)) {
-      return prettyObject
-    }
-
     if let structuredJSON = extractedStructuredJSON(from: normalizedTrimmed),
        let prettyObject = prettyPrintedJSONObjectOrArray(structuredJSON) {
       return prettyObject
@@ -3010,23 +3000,8 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   }
 
   private func prettyPrintedJSONObjectOrArray(_ text: String) -> String? {
-    guard let data = text.data(using: .utf8),
-          let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
-          object is [Any] || object is [String: Any],
-          let prettyData = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
-          let prettyText = String(data: prettyData, encoding: .utf8) else {
-      return nil
-    }
-    return prettyText
-  }
-
-  private func decodedJSONStringValue(_ text: String) -> String? {
-    guard let data = text.data(using: .utf8),
-          let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
-          let stringValue = object as? String else {
-      return nil
-    }
-    return stringValue
+    var formatter = InAppDebuggerJSONPrettyPrinter(source: text)
+    return formatter.formatTopLevelObjectOrArray()
   }
 
   private func extractedStructuredJSON(from text: String) -> String? {
@@ -3086,35 +3061,19 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    let lineNumberFont = UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-    let lineNumberColor = UIColor(red: 0.10, green: 0.33, blue: 0.86, alpha: 1)
-    let lineNumberBackground = UIColor(red: 0.92, green: 0.96, blue: 1.00, alpha: 1)
     let guideColor = UIColor(red: 0.76, green: 0.84, blue: 1.00, alpha: 1)
     let baseColor = UIColor(red: 0.14, green: 0.18, blue: 0.24, alpha: 1)
     let punctuationColor = UIColor(red: 0.24, green: 0.30, blue: 0.39, alpha: 1)
     let keyColor = UIColor(red: 0.75, green: 0.23, blue: 0.16, alpha: 1)
-    let stringColor = UIColor(red: 0.66, green: 0.35, blue: 0.08, alpha: 1)
-    let numberColor = UIColor(red: 0.11, green: 0.43, blue: 0.87, alpha: 1)
-    let literalColor = UIColor(red: 0.01, green: 0.53, blue: 0.42, alpha: 1)
+    let valueColor = UIColor(red: 0.66, green: 0.35, blue: 0.08, alpha: 1)
     let paragraphStyle = NSMutableParagraphStyle()
     paragraphStyle.lineSpacing = 3
     paragraphStyle.lineBreakMode = .byCharWrapping
 
     let lines = prettyJSON.components(separatedBy: .newlines)
-    let digits = max(2, String(lines.count).count)
     let result = NSMutableAttributedString()
 
     for (index, line) in lines.enumerated() {
-      let lineNumber = String(format: "%\(digits)d", index + 1)
-      let prefix = " \(lineNumber) │ "
-      let prefixAttributes: [NSAttributedString.Key: Any] = [
-        .font: lineNumberFont,
-        .foregroundColor: lineNumberColor,
-        .backgroundColor: lineNumberBackground,
-        .paragraphStyle: paragraphStyle,
-      ]
-      result.append(NSAttributedString(string: prefix, attributes: prefixAttributes))
-
       let lineAttributes: [NSAttributedString.Key: Any] = [
         .font: codeFont,
         .foregroundColor: baseColor,
@@ -3124,9 +3083,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       highlightJSONStringTokens(
         in: lineAttributed,
         keyColor: keyColor,
-        stringColor: stringColor,
-        numberColor: numberColor,
-        literalColor: literalColor,
+        valueColor: valueColor,
         punctuationColor: punctuationColor,
         guideColor: guideColor,
         font: codeFont
@@ -3144,9 +3101,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private func highlightJSONStringTokens(
     in attributedString: NSMutableAttributedString,
     keyColor: UIColor,
-    stringColor: UIColor,
-    numberColor: UIColor,
-    literalColor: UIColor,
+    valueColor: UIColor,
     punctuationColor: UIColor,
     guideColor: UIColor,
     font: UIFont
@@ -3173,7 +3128,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       #""(?:\\.|[^"\\])*""#,
       to: attributedString,
       attributes: [
-        .foregroundColor: stringColor,
+        .foregroundColor: valueColor,
         .font: font,
       ]
     )
@@ -3191,7 +3146,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       #"(?<![A-Za-z0-9_])[-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"#,
       to: attributedString,
       attributes: [
-        .foregroundColor: numberColor,
+        .foregroundColor: valueColor,
         .font: font,
       ]
     )
@@ -3200,7 +3155,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       #"\b(?:true|false|null)\b"#,
       to: attributedString,
       attributes: [
-        .foregroundColor: literalColor,
+        .foregroundColor: valueColor,
         .font: font,
       ]
     )
@@ -3306,6 +3261,303 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 private extension String {
   func ifEmpty(_ fallback: String) -> String {
     isEmpty ? fallback : self
+  }
+}
+
+// Formats JSON by rewriting whitespace only. All original token text is preserved verbatim.
+private struct InAppDebuggerJSONPrettyPrinter {
+  private let source: String
+  private var index: String.Index
+
+  init(source: String) {
+    self.source = source
+    self.index = source.startIndex
+  }
+
+  mutating func formatTopLevelObjectOrArray() -> String? {
+    skipWhitespace()
+
+    let formatted: String?
+    switch currentCharacter {
+    case "{":
+      formatted = parseObject(indentationLevel: 0)
+    case "[":
+      formatted = parseArray(indentationLevel: 0)
+    default:
+      formatted = nil
+    }
+
+    guard let formatted else {
+      return nil
+    }
+
+    skipWhitespace()
+    guard index == source.endIndex else {
+      return nil
+    }
+    return formatted
+  }
+
+  private var currentCharacter: Character? {
+    guard index < source.endIndex else {
+      return nil
+    }
+    return source[index]
+  }
+
+  private mutating func advance() {
+    index = source.index(after: index)
+  }
+
+  private mutating func skipWhitespace() {
+    while let character = currentCharacter,
+          character == " " || character == "\n" || character == "\r" || character == "\t" {
+      advance()
+    }
+  }
+
+  private func indentation(_ level: Int) -> String {
+    String(repeating: "  ", count: level)
+  }
+
+  private mutating func parseValue(indentationLevel: Int) -> String? {
+    skipWhitespace()
+
+    switch currentCharacter {
+    case "{":
+      return parseObject(indentationLevel: indentationLevel)
+    case "[":
+      return parseArray(indentationLevel: indentationLevel)
+    case "\"":
+      return parseStringLiteral()
+    case "t":
+      return parseKeyword("true")
+    case "f":
+      return parseKeyword("false")
+    case "n":
+      return parseKeyword("null")
+    case "-", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+      return parseNumberLiteral()
+    default:
+      return nil
+    }
+  }
+
+  private mutating func parseObject(indentationLevel: Int) -> String? {
+    guard currentCharacter == "{" else {
+      return nil
+    }
+    advance()
+    skipWhitespace()
+
+    if currentCharacter == "}" {
+      advance()
+      return "{}"
+    }
+
+    var members: [String] = []
+
+    while true {
+      skipWhitespace()
+      guard let key = parseStringLiteral() else {
+        return nil
+      }
+
+      skipWhitespace()
+      guard currentCharacter == ":" else {
+        return nil
+      }
+      advance()
+
+      guard let value = parseValue(indentationLevel: indentationLevel + 1) else {
+        return nil
+      }
+      members.append("\(indentation(indentationLevel + 1))\(key): \(value)")
+
+      skipWhitespace()
+      if currentCharacter == "," {
+        advance()
+        continue
+      }
+      if currentCharacter == "}" {
+        advance()
+        break
+      }
+      return nil
+    }
+
+    return "{\n\(members.joined(separator: ",\n"))\n\(indentation(indentationLevel))}"
+  }
+
+  private mutating func parseArray(indentationLevel: Int) -> String? {
+    guard currentCharacter == "[" else {
+      return nil
+    }
+    advance()
+    skipWhitespace()
+
+    if currentCharacter == "]" {
+      advance()
+      return "[]"
+    }
+
+    var elements: [String] = []
+
+    while true {
+      guard let value = parseValue(indentationLevel: indentationLevel + 1) else {
+        return nil
+      }
+      elements.append("\(indentation(indentationLevel + 1))\(value)")
+
+      skipWhitespace()
+      if currentCharacter == "," {
+        advance()
+        continue
+      }
+      if currentCharacter == "]" {
+        advance()
+        break
+      }
+      return nil
+    }
+
+    return "[\n\(elements.joined(separator: ",\n"))\n\(indentation(indentationLevel))]"
+  }
+
+  private mutating func parseStringLiteral() -> String? {
+    guard currentCharacter == "\"" else {
+      return nil
+    }
+
+    let start = index
+    advance()
+
+    while let character = currentCharacter {
+      if character == "\"" {
+        advance()
+        return String(source[start..<index])
+      }
+
+      if character == "\\" {
+        advance()
+        guard let escapedCharacter = currentCharacter else {
+          return nil
+        }
+
+        switch escapedCharacter {
+        case "\"", "\\", "/", "b", "f", "n", "r", "t":
+          advance()
+        case "u":
+          advance()
+          for _ in 0..<4 {
+            guard let hex = currentCharacter, isHexDigit(hex) else {
+              return nil
+            }
+            advance()
+          }
+        default:
+          return nil
+        }
+        continue
+      }
+
+      if isDisallowedStringCharacter(character) {
+        return nil
+      }
+
+      advance()
+    }
+
+    return nil
+  }
+
+  private mutating func parseKeyword(_ keyword: String) -> String? {
+    guard source[index...].hasPrefix(keyword) else {
+      return nil
+    }
+    index = source.index(index, offsetBy: keyword.count)
+    return keyword
+  }
+
+  private mutating func parseNumberLiteral() -> String? {
+    let start = index
+
+    if currentCharacter == "-" {
+      advance()
+    }
+
+    guard let firstDigit = currentCharacter else {
+      return nil
+    }
+
+    if firstDigit == "0" {
+      advance()
+    } else if isDigitOneToNine(firstDigit) {
+      advance()
+      while let digit = currentCharacter, isDigit(digit) {
+        advance()
+      }
+    } else {
+      return nil
+    }
+
+    if currentCharacter == "." {
+      advance()
+      guard let digit = currentCharacter, isDigit(digit) else {
+        return nil
+      }
+      while let digit = currentCharacter, isDigit(digit) {
+        advance()
+      }
+    }
+
+    if currentCharacter == "e" || currentCharacter == "E" {
+      advance()
+      if currentCharacter == "+" || currentCharacter == "-" {
+        advance()
+      }
+      guard let digit = currentCharacter, isDigit(digit) else {
+        return nil
+      }
+      while let digit = currentCharacter, isDigit(digit) {
+        advance()
+      }
+    }
+
+    return String(source[start..<index])
+  }
+
+  private func isDigit(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    return scalar.value >= 48 && scalar.value <= 57
+  }
+
+  private func isDigitOneToNine(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    return scalar.value >= 49 && scalar.value <= 57
+  }
+
+  private func isHexDigit(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    switch scalar.value {
+    case 48...57, 65...70, 97...102:
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func isDisallowedStringCharacter(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    return scalar.value < 0x20
   }
 }
 
