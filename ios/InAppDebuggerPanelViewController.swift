@@ -304,6 +304,41 @@ private enum PanelFilterPreferences {
   }
 }
 
+private var panelNavigationTitleTextAttributes: [NSAttributedString.Key: Any] {
+  [
+    .foregroundColor: PanelColors.text,
+    .font: UIFont.systemFont(ofSize: 18, weight: .bold),
+  ]
+}
+
+private func makePanelNavigationBarStandardAppearance() -> UINavigationBarAppearance {
+  let appearance = UINavigationBarAppearance()
+  appearance.configureWithDefaultBackground()
+  appearance.shadowColor = .clear
+  appearance.titleTextAttributes = panelNavigationTitleTextAttributes
+  return appearance
+}
+
+private func applyPanelNavigationBarAppearance(to navigationBar: UINavigationBar) {
+  let standardAppearance = makePanelNavigationBarStandardAppearance()
+  navigationBar.standardAppearance = standardAppearance
+  navigationBar.compactAppearance = standardAppearance
+  navigationBar.scrollEdgeAppearance = nil
+  if #available(iOS 15.0, *) {
+    navigationBar.compactScrollEdgeAppearance = nil
+  }
+}
+
+private func applyPanelNavigationItemAppearance(_ navigationItem: UINavigationItem) {
+  let standardAppearance = makePanelNavigationBarStandardAppearance()
+  navigationItem.standardAppearance = standardAppearance
+  navigationItem.compactAppearance = standardAppearance
+  navigationItem.scrollEdgeAppearance = nil
+  if #available(iOS 15.0, *) {
+    navigationItem.compactScrollEdgeAppearance = nil
+  }
+}
+
 final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
   private enum ReloadReason {
     case full
@@ -318,6 +353,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private static let maxIncrementalTableMutationCount = 32
+  private static let topChromeHorizontalInset: CGFloat = 14
+  private static let topChromeTopInset: CGFloat = 10
+  private static let topChromeBottomInset: CGFloat = 14
+  private static let topChromeToContentSpacing: CGFloat = 0
+  private static let tableBottomInset: CGFloat = 18
 
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
@@ -338,6 +378,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var isSuspendingLiveUpdatesForScroll = false
   private var renderedAppInfoSignature = ""
   private var renderedTableTab: ActiveTab?
+  private var lastAppliedFloatingContentInsetTop: CGFloat = -1
 
   private lazy var closeButton: UIButton = {
     let button = UIButton(type: .close)
@@ -415,6 +456,19 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return stack
   }()
 
+  private lazy var floatingControlsStack: UIStackView = {
+    let stack = UIStackView(arrangedSubviews: [segmentedControl, actionRow])
+    stack.axis = .vertical
+    stack.spacing = 12
+    return stack
+  }()
+
+  private let floatingControlsContainer = InAppDebuggerPassThroughView()
+  private let floatingChromeBackgroundView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
+  private let floatingChromeTintView = UIView()
+  private let floatingChromeMaskLayer = CAGradientLayer()
+  private let floatingChromeTintLayer = CAGradientLayer()
+
   private lazy var tableView: UITableView = {
     let table = UITableView(frame: .zero, style: .plain)
     table.backgroundColor = PanelColors.background
@@ -424,7 +478,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     table.rowHeight = UITableView.automaticDimension
     table.estimatedRowHeight = 108
     table.keyboardDismissMode = .onDrag
-    table.contentInset = UIEdgeInsets(top: 4, left: 0, bottom: 18, right: 0)
+    table.contentInsetAdjustmentBehavior = .automatic
+    table.contentInset = UIEdgeInsets(top: 4, left: 0, bottom: Self.tableBottomInset, right: 0)
     table.register(InAppDebuggerLogCell.self, forCellReuseIdentifier: InAppDebuggerLogCell.reuseIdentifier)
     table.register(InAppDebuggerNetworkCell.self, forCellReuseIdentifier: InAppDebuggerNetworkCell.reuseIdentifier)
     return table
@@ -435,6 +490,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     scrollView.backgroundColor = PanelColors.background
     scrollView.alwaysBounceVertical = true
     scrollView.keyboardDismissMode = .onDrag
+    scrollView.contentInsetAdjustmentBehavior = .automatic
     scrollView.isHidden = true
     return scrollView
   }()
@@ -487,6 +543,13 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore()
   }
 
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    floatingChromeMaskLayer.frame = floatingChromeBackgroundView.bounds
+    floatingChromeTintLayer.frame = floatingChromeTintView.bounds
+    updateFloatingContentInsetsIfNeeded()
+  }
+
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
     guard isBeingDismissed || navigationController?.isBeingDismissed == true || isMovingFromParent else {
@@ -525,49 +588,83 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       return
     }
     navigationController?.navigationBar.prefersLargeTitles = false
-    let appearance = UINavigationBarAppearance()
-    appearance.configureWithDefaultBackground()
-    appearance.backgroundColor = PanelColors.background
-    appearance.shadowColor = .clear
-    appearance.titleTextAttributes = [
-      .foregroundColor: PanelColors.text,
-      .font: UIFont.systemFont(ofSize: 18, weight: .bold),
-    ]
-    navigationBar.standardAppearance = appearance
-    navigationBar.scrollEdgeAppearance = appearance
-    navigationBar.compactAppearance = appearance
+    applyPanelNavigationBarAppearance(to: navigationBar)
     navigationBar.tintColor = PanelColors.primary
   }
 
   private func layoutUI() {
-    let topStack = UIStackView(arrangedSubviews: [segmentedControl, actionRow])
-    topStack.axis = .vertical
-    topStack.spacing = 12
-    
-    view.addSubview(topStack)
     view.addSubview(tableView)
     view.addSubview(appInfoScrollView)
+    view.addSubview(floatingControlsContainer)
     appInfoScrollView.addSubview(appInfoStackView)
-    
-    topStack.translatesAutoresizingMaskIntoConstraints = false
+
+    floatingControlsContainer.addSubview(floatingChromeBackgroundView)
+    floatingControlsContainer.addSubview(floatingChromeTintView)
+    floatingControlsContainer.addSubview(floatingControlsStack)
+
     tableView.translatesAutoresizingMaskIntoConstraints = false
     appInfoScrollView.translatesAutoresizingMaskIntoConstraints = false
     appInfoStackView.translatesAutoresizingMaskIntoConstraints = false
+    floatingControlsContainer.translatesAutoresizingMaskIntoConstraints = false
+    floatingChromeBackgroundView.translatesAutoresizingMaskIntoConstraints = false
+    floatingChromeTintView.translatesAutoresizingMaskIntoConstraints = false
+    floatingControlsStack.translatesAutoresizingMaskIntoConstraints = false
+
+    floatingChromeBackgroundView.isUserInteractionEnabled = false
+    floatingChromeTintView.isUserInteractionEnabled = false
+    floatingChromeTintView.backgroundColor = .clear
+    floatingChromeMaskLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
+    floatingChromeMaskLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
+    floatingChromeMaskLayer.colors = [
+      UIColor.black.withAlphaComponent(1.0).cgColor,
+      UIColor.black.withAlphaComponent(1.0).cgColor,
+      UIColor.black.withAlphaComponent(0.93).cgColor,
+      UIColor.black.withAlphaComponent(0.48).cgColor,
+      UIColor.clear.cgColor,
+    ]
+    floatingChromeMaskLayer.locations = [0.0, 0.24, 0.62, 0.9, 1.0]
+    floatingChromeBackgroundView.layer.mask = floatingChromeMaskLayer
+
+    floatingChromeTintLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
+    floatingChromeTintLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
+    floatingChromeTintLayer.colors = [
+      UIColor.systemBackground.withAlphaComponent(0.78).cgColor,
+      UIColor.systemBackground.withAlphaComponent(0.56).cgColor,
+      UIColor.systemBackground.withAlphaComponent(0.24).cgColor,
+      UIColor.clear.cgColor,
+    ]
+    floatingChromeTintLayer.locations = [0.0, 0.4, 0.8, 1.0]
+    floatingChromeTintView.layer.addSublayer(floatingChromeTintLayer)
 
     NSLayoutConstraint.activate([
-      topStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
-      topStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-      topStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
-
-      tableView.topAnchor.constraint(equalTo: topStack.bottomAnchor, constant: 10),
+      tableView.topAnchor.constraint(equalTo: view.topAnchor),
       tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
       tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
       tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-      appInfoScrollView.topAnchor.constraint(equalTo: topStack.bottomAnchor, constant: 10),
+      appInfoScrollView.topAnchor.constraint(equalTo: view.topAnchor),
       appInfoScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       appInfoScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       appInfoScrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+      floatingControlsContainer.topAnchor.constraint(equalTo: view.topAnchor),
+      floatingControlsContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      floatingControlsContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+      floatingChromeBackgroundView.topAnchor.constraint(equalTo: floatingControlsContainer.topAnchor),
+      floatingChromeBackgroundView.leadingAnchor.constraint(equalTo: floatingControlsContainer.leadingAnchor),
+      floatingChromeBackgroundView.trailingAnchor.constraint(equalTo: floatingControlsContainer.trailingAnchor),
+      floatingChromeBackgroundView.bottomAnchor.constraint(equalTo: floatingControlsContainer.bottomAnchor),
+
+      floatingChromeTintView.topAnchor.constraint(equalTo: floatingControlsContainer.topAnchor),
+      floatingChromeTintView.leadingAnchor.constraint(equalTo: floatingControlsContainer.leadingAnchor),
+      floatingChromeTintView.trailingAnchor.constraint(equalTo: floatingControlsContainer.trailingAnchor),
+      floatingChromeTintView.bottomAnchor.constraint(equalTo: floatingControlsContainer.bottomAnchor),
+
+      floatingControlsStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Self.topChromeTopInset),
+      floatingControlsStack.leadingAnchor.constraint(equalTo: floatingControlsContainer.leadingAnchor, constant: Self.topChromeHorizontalInset),
+      floatingControlsStack.trailingAnchor.constraint(equalTo: floatingControlsContainer.trailingAnchor, constant: -Self.topChromeHorizontalInset),
+      floatingControlsStack.bottomAnchor.constraint(equalTo: floatingControlsContainer.bottomAnchor, constant: -Self.topChromeBottomInset),
 
       appInfoStackView.topAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.topAnchor, constant: 4),
       appInfoStackView.leadingAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.leadingAnchor, constant: 14),
@@ -584,6 +681,45 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       clearButton.widthAnchor.constraint(equalToConstant: 36),
       clearButton.heightAnchor.constraint(equalToConstant: 36),
     ])
+  }
+
+  private func updateFloatingContentInsetsIfNeeded() {
+    let safeAreaTop = view.safeAreaLayoutGuide.layoutFrame.minY
+    let floatingHeight = max(
+      0,
+      floatingControlsContainer.frame.maxY - safeAreaTop + Self.topChromeToContentSpacing
+    )
+    guard abs(floatingHeight - lastAppliedFloatingContentInsetTop) > 0.5 else {
+      return
+    }
+
+    lastAppliedFloatingContentInsetTop = floatingHeight
+
+    tableView.contentInset = UIEdgeInsets(
+      top: floatingHeight + 4,
+      left: 0,
+      bottom: Self.tableBottomInset,
+      right: 0
+    )
+    tableView.scrollIndicatorInsets = UIEdgeInsets(
+      top: floatingHeight,
+      left: 0,
+      bottom: Self.tableBottomInset,
+      right: 0
+    )
+
+    appInfoScrollView.contentInset = UIEdgeInsets(
+      top: floatingHeight,
+      left: 0,
+      bottom: Self.tableBottomInset,
+      right: 0
+    )
+    appInfoScrollView.scrollIndicatorInsets = UIEdgeInsets(
+      top: floatingHeight,
+      left: 0,
+      bottom: Self.tableBottomInset,
+      right: 0
+    )
   }
 
   private func makeToolbarButton(systemName: String, foregroundColor: UIColor) -> UIButton {
@@ -1060,6 +1196,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     if showingAppInfo {
       tableView.backgroundView = nil
     }
+    view.setNeedsLayout()
   }
 
   private func updateSortButton() {
@@ -1901,9 +2038,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       let entry = displayedNetwork[indexPath.row]
       let detail = InAppDebuggerNetworkDetailViewController(
-        entry: entry,
-        strings: strings,
-        locale: currentConfig.locale
+        entry: entry
       )
       navigationController?.pushViewController(detail, animated: true)
     case .appInfo:
@@ -2296,6 +2431,16 @@ private final class InAppDebuggerEmptyStateView: UIView {
   }
 }
 
+private final class InAppDebuggerPassThroughView: UIView {
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    let hitView = super.hitTest(point, with: event)
+    if hitView === self || hitView is UIStackView {
+      return nil
+    }
+    return hitView
+  }
+}
+
 
 private final class InAppDebuggerPaddedLabel: UILabel {
   var contentInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
@@ -2329,39 +2474,36 @@ final class InAppDebuggerTextDetailViewController: UIViewController {
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = PanelColors.background
-    navigationItem.rightBarButtonItem = UIBarButtonItem(
-      image: UIImage(systemName: "doc.on.doc"),
-      style: .plain,
-      target: self,
-      action: #selector(copyTapped)
-    )
+    navigationItem.largeTitleDisplayMode = .never
+    applyPanelNavigationItemAppearance(navigationItem)
 
     let textView = InAppDebuggerSelectableTextView()
-    textView.text = bodyText
+    let paragraphStyle = NSMutableParagraphStyle()
+    paragraphStyle.lineSpacing = 4
+    paragraphStyle.lineBreakMode = .byCharWrapping
+    textView.attributedText = NSAttributedString(
+      string: bodyText,
+      attributes: [
+        .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+        .foregroundColor: PanelColors.text,
+        .paragraphStyle: paragraphStyle,
+      ]
+    )
     textView.overrideCopyText = bodyText
-    textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-    textView.textColor = PanelColors.text
-    textView.backgroundColor = PanelColors.card
+    textView.presentsSelectionMenuAutomatically = true
     textView.isScrollEnabled = true
     textView.alwaysBounceVertical = true
     textView.showsVerticalScrollIndicator = true
-    textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-    textView.layer.cornerRadius = 8
-    textView.layer.borderColor = PanelColors.border.cgColor
-    textView.layer.borderWidth = 1
+    textView.contentInsetAdjustmentBehavior = .automatic
+    textView.textContainerInset = UIEdgeInsets(top: 18, left: 18, bottom: 32, right: 18)
     view.addSubview(textView)
     textView.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      textView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+      textView.topAnchor.constraint(equalTo: view.topAnchor),
+      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       textView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
-  }
-
-  @objc private func copyTapped() {
-    UIPasteboard.general.string = bodyText
-    showToast(message: "已复制")
   }
 }
 
@@ -2392,20 +2534,16 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
   private let entryId: String
   private var entry: DebugNetworkEntry
-  private let strings: [String: String]
-  private let locale: String
   private let scrollView = UIScrollView()
   private let stack = UIStackView()
   private var notificationObserver: NSObjectProtocol?
   private var scheduledReloadWorkItem: DispatchWorkItem?
 
-  init(entry: DebugNetworkEntry, strings: [String: String], locale: String) {
+  init(entry: DebugNetworkEntry) {
     self.entryId = entry.id
     self.entry = entry
-    self.strings = strings
-    self.locale = locale
     super.init(nibName: nil, bundle: nil)
-    title = strings["requestDetails"] ?? "请求详情"
+    title = "Request Details"
   }
 
   required init?(coder: NSCoder) {
@@ -2415,9 +2553,12 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = PanelColors.background
+    navigationItem.largeTitleDisplayMode = .never
+    applyPanelNavigationItemAppearance(navigationItem)
 
     stack.axis = .vertical
     stack.spacing = 10
+    scrollView.contentInsetAdjustmentBehavior = .automatic
     scrollView.delaysContentTouches = false
     view.addSubview(scrollView)
     scrollView.addSubview(stack)
@@ -2425,7 +2566,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     stack.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
-      scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      scrollView.topAnchor.constraint(equalTo: view.topAnchor),
       scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -2490,8 +2631,8 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       ? webSocketSections()
       : httpSections()
 
-    let messagesTitle = strings["messages"] ?? "消息"
-    let noMessagesText = strings["noMessages"] ?? "暂无消息"
+    let messagesTitle = "Messages"
+    let noMessagesText = "No messages"
 
     sections.forEach { title, body, monospace in
       if isWebSocketKind(entry.kind), title == messagesTitle {
@@ -2511,32 +2652,32 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     if let error = entry.error, !error.isEmpty {
-      stack.addArrangedSubview(makeSection(title: "错误", body: error, monospace: true))
+      stack.addArrangedSubview(makeSection(title: "Error", body: error, monospace: true))
     }
   }
 
   private func httpSections() -> [(title: String, body: String, monospace: Bool)] {
     let durationText = entry.durationMs.map { "\($0)ms" } ?? "-"
-    let noRequestBodyText = strings["noRequestBody"] ?? "无请求体"
-    let noResponseBodyText = strings["noResponseBody"] ?? "无响应体"
-    let noMessagesText = strings["noMessages"] ?? "暂无消息"
+    let noRequestBodyText = "No request body"
+    let noResponseBodyText = "No response body"
+    let noMessagesText = "No messages"
     var sections: [(title: String, body: String, monospace: Bool)] = [
-      (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
-      (title: localizedNetworkTypeTitle(locale: locale), body: localizedNetworkKindTitle(entry.kind, locale: locale), monospace: false),
-      (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
-      (title: strings["status"] ?? "状态码", body: networkTrailingBadgeTitle(entry) ?? "-", monospace: false),
-      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
+      (title: "Origin", body: englishOriginTitle(entry.origin), monospace: false),
+      (title: "Request Type", body: englishNetworkKindTitle(entry.kind), monospace: false),
+      (title: "Method", body: entry.method, monospace: false),
+      (title: "Status", body: networkTrailingBadgeTitle(entry) ?? "-", monospace: false),
+      (title: "Protocol", body: entry.`protocol` ?? "-", monospace: false),
       (title: "URL", body: entry.url, monospace: true),
-      (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
-      (title: strings["requestHeaders"] ?? "请求头", body: headerText(entry.requestHeaders), monospace: true),
-      (title: strings["responseHeaders"] ?? "响应头", body: headerText(entry.responseHeaders), monospace: true),
-      (title: strings["requestBody"] ?? "请求体", body: entry.requestBody ?? noRequestBodyText, monospace: true),
-      (title: strings["responseBody"] ?? "响应体", body: entry.responseBody ?? noResponseBodyText, monospace: true),
-      (title: strings["messages"] ?? "消息", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true),
+      (title: "Duration", body: durationText, monospace: false),
+      (title: "Request Headers", body: headerText(entry.requestHeaders), monospace: true),
+      (title: "Response Headers", body: headerText(entry.responseHeaders), monospace: true),
+      (title: "Request Body", body: entry.requestBody ?? noRequestBodyText, monospace: true),
+      (title: "Response Body", body: entry.responseBody ?? noResponseBodyText, monospace: true),
+      (title: "Messages", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true),
     ]
 
     if shouldShowNetworkStateLabel(entry) {
-      sections.insert((title: strings["state"] ?? "状态", body: entry.state, monospace: false), at: 4)
+      sections.insert((title: "State", body: entry.state, monospace: false), at: 4)
     }
 
     return sections
@@ -2544,31 +2685,29 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
   private func webSocketSections() -> [(title: String, body: String, monospace: Bool)] {
     let durationText = entry.durationMs.map { "\($0)ms" } ?? "-"
-    let noMessagesText = strings["noMessages"] ?? "暂无消息"
-    let noEventsText = "暂无事件"
-    let messageSummary = "IN \(entry.messageCountIn ?? 0) / OUT \(entry.messageCountOut ?? 0)"
+    let noMessagesText = "No messages"
+    let noEventsText = "No events"
     let byteSummary = "IN \(formatNetworkByteCount(entry.bytesIn)) / OUT \(formatNetworkByteCount(entry.bytesOut))"
 
     var sections: [(title: String, body: String, monospace: Bool)] = [
-      (title: strings["origin"] ?? "来源", body: localizedOriginTitle(entry.origin, strings: strings), monospace: false),
-      (title: localizedNetworkTypeTitle(locale: locale), body: localizedNetworkKindTitle(entry.kind, locale: locale), monospace: false),
-      (title: strings["method"] ?? "方法", body: entry.method, monospace: false),
-      (title: strings["state"] ?? "状态", body: entry.state, monospace: false),
-      (title: strings["protocol"] ?? "协议", body: entry.`protocol` ?? "-", monospace: false),
+      (title: "Origin", body: englishOriginTitle(entry.origin), monospace: false),
+      (title: "Request Type", body: englishNetworkKindTitle(entry.kind), monospace: false),
+      (title: "Method", body: entry.method, monospace: false),
+      (title: "State", body: entry.state, monospace: false),
+      (title: "Protocol", body: entry.`protocol` ?? "-", monospace: false),
       (title: "Requested protocols", body: entry.requestedProtocols ?? "-", monospace: false),
       (title: "URL", body: entry.url, monospace: true),
-      (title: strings["duration"] ?? "耗时", body: durationText, monospace: false),
-      (title: "Messages", body: messageSummary, monospace: false),
+      (title: "Duration", body: durationText, monospace: false),
       (title: "Bytes", body: byteSummary, monospace: false),
-      (title: strings["requestHeaders"] ?? "请求头", body: headerText(entry.requestHeaders), monospace: true),
+      (title: "Request Headers", body: headerText(entry.requestHeaders), monospace: true),
     ]
 
     if !entry.responseHeaders.isEmpty {
-      sections.append((title: strings["responseHeaders"] ?? "响应头", body: headerText(entry.responseHeaders), monospace: true))
+      sections.append((title: "Response Headers", body: headerText(entry.responseHeaders), monospace: true))
     }
 
     if let status = entry.status {
-      sections.append((title: strings["status"] ?? "状态码", body: String(status), monospace: false))
+      sections.append((title: "Status", body: String(status), monospace: false))
     }
 
     if entry.requestedCloseCode != nil || (entry.requestedCloseReason?.isEmpty == false) {
@@ -2580,8 +2719,30 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     sections.append((title: "Event timeline", body: entry.events ?? noEventsText, monospace: true))
-    sections.append((title: strings["messages"] ?? "消息", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true))
+    sections.append((title: "Messages", body: formattedMessagesText(entry.messages, fallback: noMessagesText), monospace: true))
     return sections
+  }
+
+  private func englishOriginTitle(_ origin: String) -> String {
+    if isNativeOrigin(origin) {
+      return "Native"
+    }
+    return "JS"
+  }
+
+  private func englishNetworkKindTitle(_ rawKind: String) -> String {
+    let trimmedKind = rawKind.trimmingCharacters(in: .whitespacesAndNewlines)
+    switch normalizedNetworkKind(trimmedKind) {
+    case .http:
+      return "XHR/Fetch"
+    case .websocket:
+      return "WebSocket"
+    case .other:
+      if !trimmedKind.isEmpty, trimmedKind.lowercased() != NetworkKindFilter.other.rawValue {
+        return trimmedKind.uppercased()
+      }
+      return "Other"
+    }
   }
 
   private func headerText(_ headers: [String: String]) -> String {
@@ -2605,9 +2766,9 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   }
 
   private func maxBodyHeight(forSectionTitle title: String) -> CGFloat? {
-    let requestBodyTitle = strings["requestBody"] ?? "请求体"
-    let responseBodyTitle = strings["responseBody"] ?? "响应体"
-    let messagesTitle = strings["messages"] ?? "消息"
+    let requestBodyTitle = "Request Body"
+    let responseBodyTitle = "Response Body"
+    let messagesTitle = "Messages"
     if title == requestBodyTitle || title == responseBodyTitle || title == messagesTitle {
       return Self.maxScrollableSectionHeight
     }
@@ -3201,7 +3362,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
     if presentation.usesCodeBlockStyle {
       bodyTextView.backgroundColor = UIColor(red: 0.985, green: 0.99, blue: 1.00, alpha: 1)
-      bodyTextView.textContainerInset = UIEdgeInsets(top: 12, left: 0, bottom: 12, right: 12)
+      bodyTextView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
       bodyTextView.layer.cornerRadius = 8
       bodyTextView.layer.borderWidth = 1
       bodyTextView.layer.borderColor = UIColor(red: 0.80, green: 0.87, blue: 1.00, alpha: 1).cgColor
