@@ -10,6 +10,7 @@ private final class InAppDebuggerNativeHTTPState {
   let id: String
   let origin: String
   let startedAt: Int
+  let timelineSequence: Int
   var method: String
   var url: String
   var state: String
@@ -22,6 +23,7 @@ private final class InAppDebuggerNativeHTTPState {
   var requestBody: String?
   var responseBody: String?
   var responsePreviewData = Data()
+  private var responseBodyDirty = false
   var responseBytesReceived = 0
   var responseType: String?
   var responseContentType: String?
@@ -35,11 +37,13 @@ private final class InAppDebuggerNativeHTTPState {
     method: String,
     url: String,
     startedAt: Int,
+    timelineSequence: Int,
     requestHeaders: [String: String],
     requestBody: String?
   ) {
     self.id = id
     self.origin = origin
+    self.timelineSequence = timelineSequence
     self.method = method
     self.url = url
     self.startedAt = startedAt
@@ -49,8 +53,25 @@ private final class InAppDebuggerNativeHTTPState {
     self.requestBody = requestBody
   }
 
+  func appendResponsePreview(_ data: Data) {
+    let remainingCapacity = max(inAppDebuggerNativeResponsePreviewLimit - responsePreviewData.count, 0)
+    guard remainingCapacity > 0 else {
+      return
+    }
+    responsePreviewData.append(data.prefix(remainingCapacity))
+    responseBodyDirty = true
+  }
+
+  func materializeResponseBody(using decoder: (Data, String?) -> String?) {
+    guard responseBodyDirty else {
+      return
+    }
+    responseBody = decoder(responsePreviewData, responseContentType)
+    responseBodyDirty = false
+  }
+
   func asEntry() -> DebugNetworkEntry {
-    DebugNetworkEntry(
+    return DebugNetworkEntry(
       id: id,
       kind: "http",
       method: method,
@@ -69,7 +90,8 @@ private final class InAppDebuggerNativeHTTPState {
       responseType: responseType,
       responseContentType: responseContentType,
       responseSize: responseSize,
-      error: error
+      error: error,
+      timelineSequence: timelineSequence
     )
   }
 }
@@ -80,6 +102,7 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
   let origin = "native"
   let kind = "websocket"
   let startedAt: Int
+  let timelineSequence: Int
   var method: String
   var url: String
   var state: String
@@ -103,6 +126,10 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
   var bytesOut = 0
   var eventsList: [String] = []
   var messagesList: [String] = []
+  private var cachedEvents: String?
+  private var cachedMessages: String?
+  private var eventsDirty = false
+  private var messagesDirty = false
   var lastStoreEmissionAt = 0
 
   init(
@@ -110,11 +137,13 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
     method: String,
     url: String,
     startedAt: Int,
+    timelineSequence: Int,
     requestHeaders: [String: String],
     requestedProtocols: String?
   ) {
     self.id = "native_ws_\(objectKey)"
     self.objectKey = objectKey
+    self.timelineSequence = timelineSequence
     self.method = method
     self.url = url
     self.startedAt = startedAt
@@ -124,8 +153,32 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
     self.requestedProtocols = requestedProtocols
   }
 
+  func appendEventLine(_ line: String) {
+    eventsList.append(line)
+    if eventsList.count > 120 {
+      eventsList.removeFirst(eventsList.count - 120)
+    }
+    eventsDirty = true
+  }
+
+  func appendMessageBlock(_ block: String) {
+    messagesList.append(block)
+    if messagesList.count > 100 {
+      messagesList.removeFirst(messagesList.count - 100)
+    }
+    messagesDirty = true
+  }
+
   func asEntry() -> DebugNetworkEntry {
-    DebugNetworkEntry(
+    if eventsDirty {
+      cachedEvents = eventsList.joined(separator: "\n")
+      eventsDirty = false
+    }
+    if messagesDirty {
+      cachedMessages = messagesList.joined(separator: "\n\n")
+      messagesDirty = false
+    }
+    return DebugNetworkEntry(
       id: id,
       kind: kind,
       method: method,
@@ -151,8 +204,9 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
       messageCountOut: messageCountOut,
       bytesIn: bytesIn,
       bytesOut: bytesOut,
-      events: eventsList.joined(separator: "\n"),
-      messages: messagesList.joined(separator: "\n\n")
+      events: cachedEvents,
+      messages: cachedMessages,
+      timelineSequence: timelineSequence
     )
   }
 }
@@ -305,6 +359,7 @@ final class InAppDebuggerNativeNetworkCapture {
     let entries: [DebugNetworkEntry] = lock.withLock {
       let httpEntries = activeHTTPRequests.values.map { state -> DebugNetworkEntry in
         state.lastStoreEmissionAt = timestamp
+        state.materializeResponseBody(using: decodeTextPreview(from:contentType:))
         return state.asEntry()
       }
       let webSocketEntries = activeNativeWebSockets.values.map { state -> DebugNetworkEntry in
@@ -312,11 +367,11 @@ final class InAppDebuggerNativeNetworkCapture {
         return state.asEntry()
       }
       return (httpEntries + webSocketEntries).sorted { lhs, rhs in
-        if lhs.updatedAt != rhs.updatedAt {
-          return lhs.updatedAt > rhs.updatedAt
-        }
         if lhs.startedAt != rhs.startedAt {
           return lhs.startedAt > rhs.startedAt
+        }
+        if (lhs.timelineSequence ?? 0) != (rhs.timelineSequence ?? 0) {
+          return (lhs.timelineSequence ?? 0) > (rhs.timelineSequence ?? 0)
         }
         return lhs.id > rhs.id
       }
@@ -340,7 +395,8 @@ final class InAppDebuggerNativeNetworkCapture {
     }
 
     let timestamp = currentTimestamp()
-    let requestID = "native_http_\(UUID().uuidString)"
+    let timelineSequence = InAppDebuggerStore.shared.nextNativeTimelineSequence()
+    let requestID = "native_http_\(timestamp)_\(String(timelineSequence, radix: 36))"
     let shouldCaptureBodyPreview = lock.withLock { panelActive }
     var entry: DebugNetworkEntry?
     let state = InAppDebuggerNativeHTTPState(
@@ -349,6 +405,7 @@ final class InAppDebuggerNativeNetworkCapture {
       method: request.httpMethod?.uppercased() ?? "GET",
       url: request.url?.absoluteString ?? "",
       startedAt: timestamp,
+      timelineSequence: timelineSequence,
       requestHeaders: request.allHTTPHeaderFields ?? [:],
       requestBody: shouldCaptureBodyPreview ? requestBodyPreview(for: request) : nil
     )
@@ -399,13 +456,7 @@ final class InAppDebuggerNativeNetworkCapture {
       state.responseBytesReceived += data.count
       state.responseSize = state.responseBytesReceived
       if panelActive, state.responsePreviewData.count < inAppDebuggerNativeResponsePreviewLimit {
-        let combinedData = appendPreviewData(
-          existing: state.responsePreviewData,
-          incoming: data,
-          contentType: state.responseContentType
-        )
-        state.responsePreviewData = combinedData.previewData
-        state.responseBody = combinedData.previewText
+        state.appendResponsePreview(data)
       }
       entry = preparedHTTPEntryLocked(state, timestamp: state.updatedAt, policy: .visibleThrottled)
     }
@@ -493,6 +544,7 @@ final class InAppDebuggerNativeNetworkCapture {
         method: method,
         url: url,
         startedAt: timestamp,
+        timelineSequence: InAppDebuggerStore.shared.nextNativeTimelineSequence(),
         requestHeaders: requestHeaders,
         requestedProtocols: protocolsDescription
       )
@@ -514,19 +566,19 @@ final class InAppDebuggerNativeNetworkCapture {
       state.cleanClose = nil
       state.requestedCloseCode = nil
       state.requestedCloseReason = nil
-      appendEvent("connect", to: state)
+      appendEvent("connect", to: state, at: state.updatedAt)
     }
   }
 
   fileprivate func nativeWebSocketDidSend(_ task: URLSessionWebSocketTask, message: AnyObject) {
     mutateNativeWebSocket(task, policy: .visibleThrottled) { state in
       hydrateNativeWebSocketHandshake(for: task, state: state)
-      openNativeWebSocketIfNeeded(state)
+      openNativeWebSocketIfNeeded(state, timestamp: state.updatedAt)
       let payload = describeWebSocketMessage(message, includeBody: panelActive)
       state.messageCountOut += 1
       state.bytesOut += payload.byteCount
       if panelActive {
-        appendMessage(direction: ">>", payload: payload, to: state)
+        appendMessage(direction: ">>", payload: payload, to: state, at: state.updatedAt)
       }
     }
   }
@@ -537,12 +589,12 @@ final class InAppDebuggerNativeNetworkCapture {
     }
     mutateNativeWebSocket(task, policy: .visibleThrottled) { state in
       hydrateNativeWebSocketHandshake(for: task, state: state)
-      openNativeWebSocketIfNeeded(state)
+      openNativeWebSocketIfNeeded(state, timestamp: state.updatedAt)
       let payload = describeWebSocketMessage(message, includeBody: panelActive)
       state.messageCountIn += 1
       state.bytesIn += payload.byteCount
       if panelActive {
-        appendMessage(direction: "<<", payload: payload, to: state)
+        appendMessage(direction: "<<", payload: payload, to: state, at: state.updatedAt)
       }
     }
   }
@@ -551,7 +603,7 @@ final class InAppDebuggerNativeNetworkCapture {
     finishNativeWebSocket(task, policy: .always) { state in
       state.state = "error"
       state.error = error.localizedDescription.nilIfEmpty ?? "WebSocket error"
-      appendEvent("error \(state.error ?? "WebSocket error")", to: state)
+      appendEvent("error \(state.error ?? "WebSocket error")", to: state, at: state.updatedAt)
     }
   }
 
@@ -563,7 +615,7 @@ final class InAppDebuggerNativeNetworkCapture {
     mutateNativeWebSocket(task, policy: .visibleThrottled) { state in
       hydrateNativeWebSocketHandshake(for: task, state: state)
       if panelActive {
-        appendEvent("ping", to: state)
+        appendEvent("ping", to: state, at: state.updatedAt)
       }
     }
   }
@@ -584,7 +636,8 @@ final class InAppDebuggerNativeNetworkCapture {
       state.requestedCloseReason = state.closeReason
       appendEvent(
         "close requested code=\(closeCode)\(state.closeReason?.nilIfEmpty.map { " reason=\(sanitizeInlineText($0))" } ?? "")",
-        to: state
+        to: state,
+        at: state.updatedAt
       )
     }
   }
@@ -650,6 +703,7 @@ final class InAppDebuggerNativeNetworkCapture {
       return nil
     }
     state.lastStoreEmissionAt = timestamp
+    state.materializeResponseBody(using: decodeTextPreview(from:contentType:))
     return state.asEntry()
   }
 
@@ -684,15 +738,18 @@ final class InAppDebuggerNativeNetworkCapture {
     }
   }
 
-  private func openNativeWebSocketIfNeeded(_ state: InAppDebuggerNativeURLSessionWebSocketState) {
+  private func openNativeWebSocketIfNeeded(
+    _ state: InAppDebuggerNativeURLSessionWebSocketState,
+    timestamp: Int
+  ) {
     guard state.state == "pending" || state.state == "connecting" else {
       return
     }
     state.state = "open"
     if let `protocol` = state.protocol?.nilIfEmpty {
-      appendEvent("open protocol=\(`protocol`)", to: state)
+      appendEvent("open protocol=\(`protocol`)", to: state, at: timestamp)
     } else {
-      appendEvent("open", to: state)
+      appendEvent("open", to: state, at: timestamp)
     }
   }
 
@@ -709,26 +766,25 @@ final class InAppDebuggerNativeNetworkCapture {
     state.url = response.url?.absoluteString ?? state.url
   }
 
-  private func appendEvent(_ text: String, to state: InAppDebuggerNativeURLSessionWebSocketState) {
-    state.eventsList.append("\(formatClock(currentTimestamp())) \(text)")
-    if state.eventsList.count > 120 {
-      state.eventsList.removeFirst(state.eventsList.count - 120)
-    }
+  private func appendEvent(
+    _ text: String,
+    to state: InAppDebuggerNativeURLSessionWebSocketState,
+    at timestamp: Int
+  ) {
+    state.appendEventLine("\(formatClock(timestamp)) \(text)")
   }
 
   private func appendMessage(
     direction: String,
     payload: (kind: String, body: String?, byteCount: Int),
-    to state: InAppDebuggerNativeURLSessionWebSocketState
+    to state: InAppDebuggerNativeURLSessionWebSocketState,
+    at timestamp: Int
   ) {
-    var lines = ["[\(formatClock(currentTimestamp()))] \(direction) \(payload.kind.uppercased())", formatByteCount(payload.byteCount)]
+    var lines = ["[\(formatClock(timestamp))] \(direction) \(payload.kind.uppercased())", formatByteCount(payload.byteCount)]
     if let body = payload.body?.nilIfEmpty {
       lines.append(body)
     }
-    state.messagesList.append(lines.joined(separator: "\n"))
-    if state.messagesList.count > 100 {
-      state.messagesList.removeFirst(state.messagesList.count - 100)
-    }
+    state.appendMessageBlock(lines.joined(separator: "\n"))
   }
 
   private func currentTimestamp() -> Int {

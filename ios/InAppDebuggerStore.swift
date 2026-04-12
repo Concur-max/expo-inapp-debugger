@@ -19,6 +19,19 @@ private let exportSnapshotISOFormatter: ISO8601DateFormatter = {
   return formatter
 }()
 
+let inAppDebuggerStoreChangeMaskUserInfoKey = "InAppDebuggerStoreChangeMask"
+let inAppDebuggerStoreChangedNetworkIDsUserInfoKey = "InAppDebuggerStoreChangedNetworkIDs"
+
+struct InAppDebuggerStoreChangeMask: OptionSet {
+  let rawValue: Int
+
+  static let config = InAppDebuggerStoreChangeMask(rawValue: 1 << 0)
+  static let logs = InAppDebuggerStoreChangeMask(rawValue: 1 << 1)
+  static let errors = InAppDebuggerStoreChangeMask(rawValue: 1 << 2)
+  static let network = InAppDebuggerStoreChangeMask(rawValue: 1 << 3)
+  static let all: InAppDebuggerStoreChangeMask = [.config, .logs, .errors, .network]
+}
+
 extension Notification.Name {
   static let inAppDebuggerStoreDidChange = Notification.Name("InAppDebuggerStoreDidChange")
 }
@@ -37,11 +50,18 @@ final class InAppDebuggerStore {
   )
   private var liveUpdatesEnabled = false
   private var notificationScheduled = false
+  private var pendingChangeMask: InAppDebuggerStoreChangeMask = []
+  private var pendingChangedNetworkIDs: Set<String> = []
+  private var nextNativeSequence = 0
+  private var cachedNativeTimestampSecond = -1
+  private var cachedNativeClockPrefix = ""
+  private var cachedNativeISOPrefix = ""
 
   private init() {}
 
   func update(config next: DebugConfig) {
     lock.lock()
+    let didConfigChange = next != config
     let shouldFlushPendingNativeLogs = next.enabled && !pendingNativeLogs.isEmpty
     config = next
     trimLocked()
@@ -49,7 +69,18 @@ final class InAppDebuggerStore {
       pendingNativeLogs.moveAll(to: logs)
     }
     lock.unlock()
-    notifyChanged()
+
+    var changeMask: InAppDebuggerStoreChangeMask = []
+    if didConfigChange {
+      changeMask.insert(.config)
+    }
+    if shouldFlushPendingNativeLogs {
+      changeMask.insert(.logs)
+    }
+    guard !changeMask.isEmpty else {
+      return
+    }
+    notifyChanged(changeMask)
   }
 
   func setLiveUpdatesEnabled(_ enabled: Bool) {
@@ -64,6 +95,12 @@ final class InAppDebuggerStore {
     return config
   }
 
+  func nextNativeTimelineSequence() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return nextNativeTimelineSequenceLocked()
+  }
+
   func shutdown() {
     lock.lock()
     config = DebugConfig()
@@ -76,6 +113,12 @@ final class InAppDebuggerStore {
     )
     liveUpdatesEnabled = false
     notificationScheduled = false
+    pendingChangeMask = []
+    pendingChangedNetworkIDs.removeAll(keepingCapacity: true)
+    nextNativeSequence = 0
+    cachedNativeTimestampSecond = -1
+    cachedNativeClockPrefix = ""
+    cachedNativeISOPrefix = ""
     lock.unlock()
   }
 
@@ -85,33 +128,61 @@ final class InAppDebuggerStore {
     return (config, logs.snapshot(), errors.snapshot(), network.snapshot())
   }
 
+  func snapshotLogs() -> [DebugLogEntry] {
+    lock.lock()
+    defer { lock.unlock() }
+    return logs.snapshot()
+  }
+
+  func snapshotNetwork() -> [DebugNetworkEntry] {
+    lock.lock()
+    defer { lock.unlock() }
+    return network.snapshot()
+  }
+
+  func snapshotAppInfo() -> ([DebugLogEntry], [DebugErrorEntry]) {
+    lock.lock()
+    defer { lock.unlock() }
+    return (logs.snapshot(), errors.snapshot())
+  }
+
   func ingest(batch: [[String: Any]]) {
     lock.lock()
+    var changeMask: InAppDebuggerStoreChangeMask = []
+    var changedNetworkIDs: Set<String> = []
     for item in batch {
       switch item["category"] as? String {
       case "log":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugLogEntry(map: entryMap) {
           logs.append(entry)
+          changeMask.insert(.logs)
         }
       case "error":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugErrorEntry(map: entryMap) {
           errors.append(entry)
+          changeMask.insert(.errors)
         }
       case "network":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugNetworkEntry(map: entryMap) {
           upsertNetworkLocked(entry)
+          changeMask.insert(.network)
+          changedNetworkIDs.insert(entry.id)
         }
       default:
         break
       }
     }
     lock.unlock()
-    notifyChanged()
+    guard !changeMask.isEmpty else {
+      return
+    }
+    notifyChanged(changeMask, changedNetworkIDs: changedNetworkIDs)
   }
 
   func ingestBatch(logs rawLogs: [[Any]]?, errors rawErrors: [[Any]]?, network rawNetwork: [[Any]]?) {
     lock.lock()
-    var didChange = false
+    var changeMask: InAppDebuggerStoreChangeMask = []
+    var changedNetworkIDs: Set<String> = []
 
     if let rawLogs {
       for item in rawLogs {
@@ -119,7 +190,7 @@ final class InAppDebuggerStore {
           continue
         }
         logs.append(entry)
-        didChange = true
+        changeMask.insert(.logs)
       }
     }
 
@@ -129,7 +200,7 @@ final class InAppDebuggerStore {
           continue
         }
         errors.append(entry)
-        didChange = true
+        changeMask.insert(.errors)
       }
     }
 
@@ -139,29 +210,34 @@ final class InAppDebuggerStore {
           continue
         }
         upsertNetworkLocked(entry)
-        didChange = true
+        changeMask.insert(.network)
+        changedNetworkIDs.insert(entry.id)
       }
     }
 
     lock.unlock()
 
-    guard didChange else {
+    guard !changeMask.isEmpty else {
       return
     }
-    notifyChanged()
+    notifyChanged(changeMask, changedNetworkIDs: changedNetworkIDs)
   }
 
   func appendNativeLog(type: String, message: String, stream: String, details: String? = nil, date: Date = Date()) {
     lock.lock()
+    let formatted = formattedNativeTimestampsLocked(for: date)
+    let timelineSequence = nextNativeTimelineSequenceLocked()
     let entry = DebugLogEntry(
-      id: "native_\(Int(date.timeIntervalSince1970 * 1000))_\(UUID().uuidString)",
+      id: "native_\(formatted.timestampMillis)_\(String(timelineSequence, radix: 36))",
       type: type,
       origin: "native",
       context: stream,
       details: details,
       message: message,
-      timestamp: nativeLogClockFormatter.string(from: date),
-      fullTimestamp: nativeLogISOFormatter.string(from: date)
+      timestamp: formatted.clock,
+      fullTimestamp: formatted.iso,
+      timelineTimestampMillis: formatted.timestampMillis,
+      timelineSequence: timelineSequence
     )
 
     if config.enabled {
@@ -172,34 +248,56 @@ final class InAppDebuggerStore {
       trimPendingNativeLogsLocked()
     }
     lock.unlock()
-    notifyChanged()
+    notifyChanged(.logs)
   }
 
   func clear(kind: String) {
     lock.lock()
+    var changeMask: InAppDebuggerStoreChangeMask = []
     switch kind {
     case "logs":
-      logs.clear()
-      pendingNativeLogs.clear()
+      if !logs.isEmpty || !pendingNativeLogs.isEmpty {
+        logs.clear()
+        pendingNativeLogs.clear()
+        changeMask.insert(.logs)
+      }
     case "errors":
-      errors.clear()
+      if !errors.isEmpty {
+        errors.clear()
+        changeMask.insert(.errors)
+      }
     case "network":
-      network.clear()
+      if network.count > 0 {
+        network.clear()
+        changeMask.insert(.network)
+      }
     default:
-      logs.clear()
-      pendingNativeLogs.clear()
-      errors.clear()
-      network.clear()
+      if !logs.isEmpty || !pendingNativeLogs.isEmpty {
+        logs.clear()
+        pendingNativeLogs.clear()
+        changeMask.insert(.logs)
+      }
+      if !errors.isEmpty {
+        errors.clear()
+        changeMask.insert(.errors)
+      }
+      if network.count > 0 {
+        network.clear()
+        changeMask.insert(.network)
+      }
     }
     lock.unlock()
-    notifyChanged()
+    guard !changeMask.isEmpty else {
+      return
+    }
+    notifyChanged(changeMask)
   }
 
   func upsertNetworkEntry(_ entry: DebugNetworkEntry) {
     lock.lock()
     upsertNetworkLocked(entry)
     lock.unlock()
-    notifyChanged()
+    notifyChanged(.network, changedNetworkIDs: [entry.id])
   }
 
   func networkEntry(withID id: String) -> DebugNetworkEntry? {
@@ -242,8 +340,40 @@ final class InAppDebuggerStore {
     network.resize(capacity: config.maxRequests)
   }
 
-  private func notifyChanged() {
+  private func nextNativeTimelineSequenceLocked() -> Int {
+    nextNativeSequence += 1
+    return nextNativeSequence
+  }
+
+  private func formattedNativeTimestampsLocked(for date: Date) -> (timestampMillis: Int, clock: String, iso: String) {
+    let timestampMillis = Int(date.timeIntervalSince1970 * 1000)
+    let secondBucket = timestampMillis / 1000
+    if secondBucket != cachedNativeTimestampSecond {
+      let secondDate = Date(timeIntervalSince1970: TimeInterval(secondBucket))
+      cachedNativeTimestampSecond = secondBucket
+      cachedNativeClockPrefix = String(nativeLogClockFormatter.string(from: secondDate).dropLast(3))
+      cachedNativeISOPrefix = String(nativeLogISOFormatter.string(from: secondDate).dropLast(4))
+    }
+
+    let millisecond = String(format: "%03d", max(0, timestampMillis - secondBucket * 1000))
+    return (
+      timestampMillis: timestampMillis,
+      clock: cachedNativeClockPrefix + millisecond,
+      iso: cachedNativeISOPrefix + millisecond + "Z"
+    )
+  }
+
+  private func notifyChanged(
+    _ changeMask: InAppDebuggerStoreChangeMask,
+    changedNetworkIDs: Set<String> = []
+  ) {
     lock.lock()
+    guard liveUpdatesEnabled || notificationScheduled else {
+      lock.unlock()
+      return
+    }
+    pendingChangeMask.formUnion(changeMask)
+    pendingChangedNetworkIDs.formUnion(changedNetworkIDs)
     guard liveUpdatesEnabled, !notificationScheduled else {
       lock.unlock()
       return
@@ -258,11 +388,21 @@ final class InAppDebuggerStore {
       self.lock.lock()
       self.notificationScheduled = false
       let shouldNotify = self.liveUpdatesEnabled
+      let pendingChangeMask = self.pendingChangeMask
+      let pendingChangedNetworkIDs = self.pendingChangedNetworkIDs
+      self.pendingChangeMask = []
+      self.pendingChangedNetworkIDs.removeAll(keepingCapacity: true)
       self.lock.unlock()
-      guard shouldNotify else {
+      guard shouldNotify, !pendingChangeMask.isEmpty else {
         return
       }
-      NotificationCenter.default.post(name: .inAppDebuggerStoreDidChange, object: nil)
+      var userInfo: [AnyHashable: Any] = [
+        inAppDebuggerStoreChangeMaskUserInfoKey: pendingChangeMask.rawValue,
+      ]
+      if !pendingChangedNetworkIDs.isEmpty {
+        userInfo[inAppDebuggerStoreChangedNetworkIDsUserInfoKey] = Array(pendingChangedNetworkIDs)
+      }
+      NotificationCenter.default.post(name: .inAppDebuggerStoreDidChange, object: nil, userInfo: userInfo)
     }
   }
 

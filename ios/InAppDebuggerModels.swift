@@ -20,6 +20,8 @@ struct DebugLogEntry: Equatable {
   let message: String
   let timestamp: String
   let fullTimestamp: String
+  let timelineTimestampMillis: Int?
+  let timelineSequence: Int?
 
   init?(map: [String: Any]) {
     guard let id = map.string("id") else {
@@ -33,6 +35,9 @@ struct DebugLogEntry: Equatable {
     self.message = map.string("message") ?? ""
     self.timestamp = map.string("timestamp") ?? ""
     self.fullTimestamp = map.string("fullTimestamp") ?? ""
+    self.timelineTimestampMillis =
+      map.int("timelineTimestampMillis") ?? resolveTimelineTimestampMillis(from: self.fullTimestamp)
+    self.timelineSequence = map.int("timelineSequence") ?? resolveTimelineSequence(from: id)
   }
 
   init?(wire: [Any]) {
@@ -47,6 +52,9 @@ struct DebugLogEntry: Equatable {
     self.message = wire.string(at: 5) ?? ""
     self.timestamp = wire.string(at: 6) ?? ""
     self.fullTimestamp = wire.string(at: 7) ?? ""
+    self.timelineTimestampMillis =
+      wire.int(at: 8) ?? resolveTimelineTimestampMillis(from: self.fullTimestamp)
+    self.timelineSequence = wire.int(at: 9) ?? resolveTimelineSequence(from: id)
   }
 
   init(
@@ -57,7 +65,9 @@ struct DebugLogEntry: Equatable {
     details: String?,
     message: String,
     timestamp: String,
-    fullTimestamp: String
+    fullTimestamp: String,
+    timelineTimestampMillis: Int? = nil,
+    timelineSequence: Int? = nil
   ) {
     self.id = id
     self.type = type
@@ -67,6 +77,9 @@ struct DebugLogEntry: Equatable {
     self.message = message
     self.timestamp = timestamp
     self.fullTimestamp = fullTimestamp
+    self.timelineTimestampMillis =
+      timelineTimestampMillis ?? resolveTimelineTimestampMillis(from: fullTimestamp)
+    self.timelineSequence = timelineSequence ?? resolveTimelineSequence(from: id)
   }
 
   func asDictionary() -> [String: Any] {
@@ -79,6 +92,8 @@ struct DebugLogEntry: Equatable {
       "message": message,
       "timestamp": timestamp,
       "fullTimestamp": fullTimestamp,
+      "timelineTimestampMillis": timelineTimestampMillis as Any,
+      "timelineSequence": timelineSequence as Any,
     ]
   }
 }
@@ -89,6 +104,8 @@ struct DebugErrorEntry: Equatable {
   let message: String
   let timestamp: String
   let fullTimestamp: String
+  let timelineTimestampMillis: Int?
+  let timelineSequence: Int?
 
   init?(map: [String: Any]) {
     guard let id = map.string("id") else {
@@ -99,6 +116,9 @@ struct DebugErrorEntry: Equatable {
     self.message = map.string("message") ?? ""
     self.timestamp = map.string("timestamp") ?? ""
     self.fullTimestamp = map.string("fullTimestamp") ?? ""
+    self.timelineTimestampMillis =
+      map.int("timelineTimestampMillis") ?? resolveTimelineTimestampMillis(from: self.fullTimestamp)
+    self.timelineSequence = map.int("timelineSequence") ?? resolveTimelineSequence(from: id)
   }
 
   init?(wire: [Any]) {
@@ -110,6 +130,28 @@ struct DebugErrorEntry: Equatable {
     self.message = wire.string(at: 2) ?? ""
     self.timestamp = wire.string(at: 3) ?? ""
     self.fullTimestamp = wire.string(at: 4) ?? ""
+    self.timelineTimestampMillis =
+      wire.int(at: 5) ?? resolveTimelineTimestampMillis(from: self.fullTimestamp)
+    self.timelineSequence = wire.int(at: 6) ?? resolveTimelineSequence(from: id)
+  }
+
+  init(
+    id: String,
+    source: String,
+    message: String,
+    timestamp: String,
+    fullTimestamp: String,
+    timelineTimestampMillis: Int? = nil,
+    timelineSequence: Int? = nil
+  ) {
+    self.id = id
+    self.source = source
+    self.message = message
+    self.timestamp = timestamp
+    self.fullTimestamp = fullTimestamp
+    self.timelineTimestampMillis =
+      timelineTimestampMillis ?? resolveTimelineTimestampMillis(from: fullTimestamp)
+    self.timelineSequence = timelineSequence ?? resolveTimelineSequence(from: id)
   }
 
   func asDictionary() -> [String: Any] {
@@ -119,6 +161,8 @@ struct DebugErrorEntry: Equatable {
       "message": message,
       "timestamp": timestamp,
       "fullTimestamp": fullTimestamp,
+      "timelineTimestampMillis": timelineTimestampMillis as Any,
+      "timelineSequence": timelineSequence as Any,
     ]
   }
 }
@@ -156,6 +200,7 @@ struct DebugNetworkEntry: Equatable {
   let bytesOut: Int?
   let events: String?
   let messages: String?
+  let timelineSequence: Int?
 
   init(
     id: String,
@@ -189,7 +234,8 @@ struct DebugNetworkEntry: Equatable {
     bytesIn: Int? = nil,
     bytesOut: Int? = nil,
     events: String? = nil,
-    messages: String? = nil
+    messages: String? = nil,
+    timelineSequence: Int? = nil
   ) {
     self.id = id
     self.kind = kind
@@ -223,6 +269,7 @@ struct DebugNetworkEntry: Equatable {
     self.bytesOut = bytesOut
     self.events = events
     self.messages = messages
+    self.timelineSequence = timelineSequence ?? resolveTimelineSequence(from: id)
   }
 
   init?(map: [String: Any]) {
@@ -261,6 +308,7 @@ struct DebugNetworkEntry: Equatable {
     self.bytesOut = map.int("bytesOut")
     self.events = map.string("events")
     self.messages = map.string("messages")
+    self.timelineSequence = map.int("timelineSequence") ?? resolveTimelineSequence(from: id)
   }
 
   init?(wire: [Any]) {
@@ -301,6 +349,7 @@ struct DebugNetworkEntry: Equatable {
     self.bytesOut = wire.int(at: 29)
     self.events = wire.string(at: 30)
     self.messages = wire.string(at: 31)
+    self.timelineSequence = wire.int(at: 32) ?? resolveTimelineSequence(from: id)
   }
 
   func asDictionary() -> [String: Any] {
@@ -337,6 +386,7 @@ struct DebugNetworkEntry: Equatable {
       "bytesOut": bytesOut as Any,
       "events": events as Any,
       "messages": messages as Any,
+      "timelineSequence": timelineSequence as Any,
     ]
   }
 }
@@ -453,5 +503,64 @@ private func wireStringDictionary(_ value: Any?) -> [String: String] {
     return result
   default:
     return [:]
+  }
+}
+
+private let debugTimelineISOFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter
+}()
+
+private func resolveTimelineTimestampMillis(from fullTimestamp: String) -> Int? {
+  guard !fullTimestamp.isEmpty else {
+    return nil
+  }
+  guard let date = debugTimelineISOFormatter.date(from: fullTimestamp) else {
+    return nil
+  }
+  return Int(date.timeIntervalSince1970 * 1000)
+}
+
+private func resolveTimelineSequence(from id: String) -> Int? {
+  guard let separatorIndex = id.lastIndex(of: "_") else {
+    return nil
+  }
+  let suffix = id[id.index(after: separatorIndex)...]
+  guard !suffix.isEmpty else {
+    return nil
+  }
+
+  if suffix.allSatisfy(\.isNumber) {
+    return Int(suffix)
+  }
+
+  var value = 0
+  for character in suffix.lowercased() {
+    guard let digit = character.wholeNumberValue ?? base36Digit(for: character) else {
+      return nil
+    }
+    let multiplied = value.multipliedReportingOverflow(by: 36)
+    guard !multiplied.overflow else {
+      return nil
+    }
+    let added = multiplied.partialValue.addingReportingOverflow(digit)
+    guard !added.overflow else {
+      return nil
+    }
+    value = added.partialValue
+  }
+  return value
+}
+
+private func base36Digit(for character: Character) -> Int? {
+  guard let ascii = character.asciiValue else {
+    return nil
+  }
+  switch ascii {
+  case 97...122:
+    return Int(ascii - 87)
+  default:
+    return nil
   }
 }

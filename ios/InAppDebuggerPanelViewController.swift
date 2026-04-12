@@ -1,10 +1,6 @@
 import Darwin
 import UIKit
 
-private enum PanelSection {
-  case main
-}
-
 private enum ActiveTab: Int {
   case logs
   case network
@@ -46,6 +42,31 @@ private struct PanelDetailItem {
     self.title = title
     self.content = content
     self.monospace = monospace
+  }
+}
+
+private struct StoreChangeSummary {
+  var mask: InAppDebuggerStoreChangeMask
+  var changedNetworkIDs: Set<String>
+
+  static let empty = StoreChangeSummary(mask: [], changedNetworkIDs: [])
+  static let full = StoreChangeSummary(mask: .all, changedNetworkIDs: [])
+
+  init(mask: InAppDebuggerStoreChangeMask, changedNetworkIDs: Set<String>) {
+    self.mask = mask
+    self.changedNetworkIDs = changedNetworkIDs
+  }
+
+  init(notification: Notification) {
+    let rawMask = notification.userInfo?[inAppDebuggerStoreChangeMaskUserInfoKey] as? Int ?? 0
+    let rawNetworkIDs = notification.userInfo?[inAppDebuggerStoreChangedNetworkIDsUserInfoKey] as? [String] ?? []
+    self.mask = InAppDebuggerStoreChangeMask(rawValue: rawMask)
+    self.changedNetworkIDs = Set(rawNetworkIDs)
+  }
+
+  mutating func merge(_ other: StoreChangeSummary) {
+    mask.formUnion(other.mask)
+    changedNetworkIDs.formUnion(other.changedNetworkIDs)
   }
 }
 
@@ -283,11 +304,20 @@ private enum PanelFilterPreferences {
   }
 }
 
-final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate {
+final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
   private enum ReloadReason {
     case full
     case dataOnly
   }
+
+  private enum TableUpdatePlan {
+    case none
+    case reloadData
+    case reloadRows([IndexPath])
+    case edgeMutation(deletions: [IndexPath], insertions: [IndexPath], reloads: [IndexPath])
+  }
+
+  private static let maxIncrementalTableMutationCount = 32
 
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
@@ -298,14 +328,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var sortAscending = true
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
-  private var displayedLogLookup: [String: DebugLogEntry] = [:]
-  private var displayedNetworkLookup: [String: DebugNetworkEntry] = [:]
   private var notificationObserver: NSObjectProtocol?
   private var currentConfig = DebugConfig()
   private var scheduledReloadWorkItem: DispatchWorkItem?
   private var scheduledSearchWorkItem: DispatchWorkItem?
+  private var pendingReloadChangeSummary = StoreChangeSummary.empty
+  private let filteringQueue = DispatchQueue(label: "expo.inappdebugger.panel.filtering", qos: .userInitiated)
+  private var visibleRenderGeneration = 0
   private var isSuspendingLiveUpdatesForScroll = false
   private var renderedAppInfoSignature = ""
+  private var renderedTableTab: ActiveTab?
 
   private lazy var closeButton: UIButton = {
     let button = UIButton(type: .close)
@@ -388,6 +420,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     table.backgroundColor = PanelColors.background
     table.separatorStyle = .none
     table.delegate = self
+    table.dataSource = self
     table.rowHeight = UITableView.automaticDimension
     table.estimatedRowHeight = 108
     table.keyboardDismissMode = .onDrag
@@ -415,39 +448,6 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private let emptyStateView = InAppDebuggerEmptyStateView()
 
-  private lazy var dataSource = UITableViewDiffableDataSource<PanelSection, String>(
-    tableView: tableView
-  ) { [weak self] tableView, indexPath, identifier in
-    guard let self else { return nil }
-
-    switch self.activeTab {
-    case .logs:
-      guard let entry = self.displayedLogLookup[identifier] else {
-        return UITableViewCell()
-      }
-      let cell = tableView.dequeueReusableCell(
-        withIdentifier: InAppDebuggerLogCell.reuseIdentifier,
-        for: indexPath
-      ) as? InAppDebuggerLogCell
-      cell?.configure(entry: entry, strings: self.strings) { [weak self] in
-        self?.copy(text: entry.message, successKey: "copySingleSuccess")
-      }
-      return cell
-    case .network:
-      guard let entry = self.displayedNetworkLookup[identifier] else {
-        return UITableViewCell()
-      }
-      let cell = tableView.dequeueReusableCell(
-        withIdentifier: InAppDebuggerNetworkCell.reuseIdentifier,
-        for: indexPath
-      ) as? InAppDebuggerNetworkCell
-      cell?.configure(entry: entry, strings: self.strings)
-      return cell
-    case .appInfo:
-      return UITableViewCell()
-    }
-  }
-
   private var strings: [String: String] {
     currentConfig.strings
   }
@@ -467,8 +467,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       forName: .inAppDebuggerStoreDidChange,
       object: nil,
       queue: .main
-    ) { [weak self] _ in
-      self?.scheduleReloadFromStore()
+    ) { [weak self] notification in
+      guard let self else {
+        return
+      }
+      self.scheduleReloadFromStore(changeSummary: StoreChangeSummary(notification: notification))
     }
   }
 
@@ -764,39 +767,139 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(shouldActivateNativeWebSocket)
   }
 
-  private func applySnapshot(reconfiguring identifiers: [String] = []) {
-    guard activeTab != .appInfo else {
-      return
-    }
-
-    var snapshot = NSDiffableDataSourceSnapshot<PanelSection, String>()
-    snapshot.appendSections([.main])
-    if activeTab == .logs {
-      snapshot.appendItems(displayedLogs.map(\.id))
-    } else {
-      snapshot.appendItems(displayedNetwork.map(\.id))
-    }
-
-    updateEmptyState()
-    if #available(iOS 15.0, *) {
-      if !identifiers.isEmpty {
-        snapshot.reconfigureItems(identifiers)
+  private func configuredCell(for tableView: UITableView, at indexPath: IndexPath) -> UITableViewCell {
+    switch activeTab {
+    case .logs:
+      guard displayedLogs.indices.contains(indexPath.row) else {
+        return UITableViewCell()
       }
-      dataSource.apply(snapshot, animatingDifferences: false)
-      return
+      let entry = displayedLogs[indexPath.row]
+      let cell = tableView.dequeueReusableCell(
+        withIdentifier: InAppDebuggerLogCell.reuseIdentifier,
+        for: indexPath
+      ) as? InAppDebuggerLogCell
+      cell?.configure(entry: entry, strings: strings) { [weak self] in
+        self?.copy(text: entry.message, successKey: "copySingleSuccess")
+      }
+      return cell ?? UITableViewCell()
+    case .network:
+      guard displayedNetwork.indices.contains(indexPath.row) else {
+        return UITableViewCell()
+      }
+      let entry = displayedNetwork[indexPath.row]
+      let cell = tableView.dequeueReusableCell(
+        withIdentifier: InAppDebuggerNetworkCell.reuseIdentifier,
+        for: indexPath
+      ) as? InAppDebuggerNetworkCell
+      cell?.configure(entry: entry, strings: strings)
+      return cell ?? UITableViewCell()
+    case .appInfo:
+      return UITableViewCell()
     }
-
-    if !identifiers.isEmpty {
-      snapshot.reloadItems(identifiers)
-    }
-    dataSource.apply(snapshot, animatingDifferences: false)
   }
 
-  private func reloadFromStore(reason: ReloadReason = .full) {
-    let state = InAppDebuggerStore.shared.snapshotState()
-    let shouldRefreshChrome = reason == .full || state.0 != currentConfig
+  private func reloadTableData() {
+    UIView.performWithoutAnimation {
+      tableView.reloadData()
+    }
+  }
+
+  private func applyTableUpdate(_ plan: TableUpdatePlan, for tab: ActiveTab) {
+    guard tab != .appInfo else {
+      return
+    }
+
+    renderedTableTab = tab
+    updateEmptyState()
+
+    switch plan {
+    case .none:
+      return
+    case .reloadData:
+      reloadTableData()
+    case .reloadRows(let indexPaths):
+      guard !indexPaths.isEmpty else {
+        return
+      }
+      UIView.performWithoutAnimation {
+        tableView.reloadRows(at: indexPaths, with: .none)
+      }
+    case .edgeMutation(let deletions, let insertions, let reloads):
+      guard !deletions.isEmpty || !insertions.isEmpty else {
+        guard !reloads.isEmpty else {
+          return
+        }
+        UIView.performWithoutAnimation {
+          tableView.reloadRows(at: reloads, with: .none)
+        }
+        return
+      }
+
+      UIView.performWithoutAnimation {
+        tableView.performBatchUpdates {
+          if !deletions.isEmpty {
+            tableView.deleteRows(at: deletions, with: .none)
+          }
+          if !insertions.isEmpty {
+            tableView.insertRows(at: insertions, with: .none)
+          }
+        } completion: { [weak self] _ in
+          guard let self, !reloads.isEmpty else {
+            return
+          }
+          UIView.performWithoutAnimation {
+            self.tableView.reloadRows(at: reloads, with: .none)
+          }
+        }
+      }
+    }
+  }
+
+  private func reloadFromStore(
+    reason: ReloadReason = .full,
+    changeSummary: StoreChangeSummary = .full
+  ) {
+    if reason == .full || changeSummary.mask.contains(.config) {
+      let state = InAppDebuggerStore.shared.snapshotState()
+      renderFromSnapshotState(
+        config: state.0,
+        logs: state.1,
+        errors: state.2,
+        network: state.3,
+        reason: reason,
+        changeSummary: changeSummary
+      )
+      return
+    }
+
+    switch activeTab {
+    case .logs:
+      renderLogs(
+        InAppDebuggerStore.shared.snapshotLogs(),
+        changeSummary: changeSummary
+      )
+    case .network:
+      renderNetwork(
+        InAppDebuggerStore.shared.snapshotNetwork(),
+        changeSummary: changeSummary
+      )
+    case .appInfo:
+      let state = InAppDebuggerStore.shared.snapshotAppInfo()
+      renderAppInfo(logs: state.0, errors: state.1)
+    }
+  }
+
+  private func renderFromSnapshotState(
+    config: DebugConfig,
+    logs: [DebugLogEntry],
+    errors: [DebugErrorEntry],
+    network: [DebugNetworkEntry],
+    reason: ReloadReason,
+    changeSummary: StoreChangeSummary
+  ) {
+    let shouldRefreshChrome = reason == .full || config != currentConfig
     if shouldRefreshChrome {
-      currentConfig = state.0
+      currentConfig = config
 
       if !currentConfig.enableNetworkTab && activeTab == .network {
         activeTab = .logs
@@ -820,115 +923,92 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
 
     if activeTab == .appInfo {
-      renderAppInfo(logs: state.1, errors: state.2)
+      renderAppInfo(logs: logs, errors: errors)
       return
     }
 
     if activeTab == .logs {
-      let previousLogLookup = displayedLogLookup
-      let nextLogs = filteredLogs(from: state.1)
-      let nextLogLookup = Dictionary(uniqueKeysWithValues: nextLogs.map { ($0.id, $0) })
-
-      displayedLogs = nextLogs
-      displayedLogLookup = nextLogLookup
-
-      let changedIdentifiers = changedIdentifiers(
-        orderedIDs: nextLogs.map(\.id),
-        previousLookup: previousLogLookup,
-        nextLookup: nextLogLookup
-      )
-      applySnapshot(reconfiguring: changedIdentifiers)
+      renderLogs(logs, changeSummary: changeSummary)
       return
     }
 
-    let previousNetworkLookup = displayedNetworkLookup
-    let nextNetwork = filteredNetwork(from: state.3)
-    let nextNetworkLookup = Dictionary(uniqueKeysWithValues: nextNetwork.map { ($0.id, $0) })
-
-    displayedNetwork = nextNetwork
-    displayedNetworkLookup = nextNetworkLookup
-
-    let changedIdentifiers = changedIdentifiers(
-      orderedIDs: nextNetwork.map(\.id),
-      previousLookup: previousNetworkLookup,
-      nextLookup: nextNetworkLookup
-    )
-    applySnapshot(reconfiguring: changedIdentifiers)
+    renderNetwork(network, changeSummary: changeSummary)
   }
 
-  private func filteredLogs(from source: [DebugLogEntry]) -> [DebugLogEntry] {
+  private func renderLogs(_ source: [DebugLogEntry], changeSummary: StoreChangeSummary) {
+    let generation = nextVisibleRenderGeneration()
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    var result: [DebugLogEntry] = []
-    result.reserveCapacity(source.count)
-    for entry in source {
-      guard selectedLogLevels.contains(entry.type), selectedLogOrigins.contains(entry.origin) else {
-        continue
+    let selectedLogLevels = selectedLogLevels
+    let selectedLogOrigins = selectedLogOrigins
+    let sortAscending = sortAscending
+
+    filteringQueue.async { [weak self] in
+      let nextLogs = autoreleasepool {
+        Self.filterLogs(
+          source,
+          query: query,
+          selectedLogLevels: selectedLogLevels,
+          selectedLogOrigins: selectedLogOrigins,
+          sortAscending: sortAscending
+        )
       }
-      if !query.isEmpty {
-        let matchesQuery =
-          entry.message.localizedCaseInsensitiveContains(query) ||
-          entry.type.localizedCaseInsensitiveContains(query) ||
-          entry.origin.localizedCaseInsensitiveContains(query) ||
-          (entry.context ?? "").localizedCaseInsensitiveContains(query) ||
-          (entry.details ?? "").localizedCaseInsensitiveContains(query)
-        guard matchesQuery else {
-          continue
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.visibleRenderGeneration == generation, self.activeTab == .logs else {
+          return
         }
+        self.applyRenderedLogs(nextLogs, changeSummary: changeSummary)
       }
-      result.append(entry)
     }
-    result.sort(by: logSortComparator)
-    return result
   }
 
-  private func filteredNetwork(from source: [DebugNetworkEntry]) -> [DebugNetworkEntry] {
+  private func renderNetwork(_ source: [DebugNetworkEntry], changeSummary: StoreChangeSummary) {
+    let generation = nextVisibleRenderGeneration()
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-    var result: [DebugNetworkEntry] = []
-    result.reserveCapacity(source.count)
-    for entry in source {
-      let normalizedKind = normalizedNetworkKind(entry.kind).rawValue
-      guard selectedNetworkOrigins.contains(entry.origin), selectedNetworkKinds.contains(normalizedKind) else {
-        continue
+    let selectedNetworkOrigins = selectedNetworkOrigins
+    let selectedNetworkKinds = selectedNetworkKinds
+    let sortAscending = sortAscending
+    let locale = currentConfig.locale
+
+    filteringQueue.async { [weak self] in
+      let nextNetwork = autoreleasepool {
+        Self.filterNetwork(
+          source,
+          query: query,
+          selectedNetworkOrigins: selectedNetworkOrigins,
+          selectedNetworkKinds: selectedNetworkKinds,
+          sortAscending: sortAscending,
+          locale: locale
+        )
       }
-      if !query.isEmpty {
-        let kindTitle = localizedNetworkKindTitle(entry.kind, locale: currentConfig.locale)
-        let matchesQuery =
-          entry.url.localizedCaseInsensitiveContains(query) ||
-          entry.origin.localizedCaseInsensitiveContains(query) ||
-          entry.kind.localizedCaseInsensitiveContains(query) ||
-          kindTitle.localizedCaseInsensitiveContains(query) ||
-          entry.method.localizedCaseInsensitiveContains(query) ||
-          entry.state.localizedCaseInsensitiveContains(query) ||
-          (entry.protocol ?? "").localizedCaseInsensitiveContains(query) ||
-          (entry.requestedProtocols ?? "").localizedCaseInsensitiveContains(query) ||
-          (entry.closeReason ?? "").localizedCaseInsensitiveContains(query) ||
-          (entry.error ?? "").localizedCaseInsensitiveContains(query) ||
-          (entry.events ?? "").localizedCaseInsensitiveContains(query) ||
-          (entry.messages ?? "").localizedCaseInsensitiveContains(query)
-        guard matchesQuery else {
-          continue
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.visibleRenderGeneration == generation, self.activeTab == .network else {
+          return
         }
+        self.applyRenderedNetwork(nextNetwork, changeSummary: changeSummary)
       }
-      result.append(entry)
     }
-    result.sort(by: networkSortComparator)
-    return result
   }
 
-  private func scheduleReloadFromStore() {
+  private func scheduleReloadFromStore(changeSummary: StoreChangeSummary = .full) {
     guard !isSuspendingLiveUpdatesForScroll else {
       return
     }
+    guard shouldReload(for: changeSummary) else {
+      return
+    }
+    pendingReloadChangeSummary.merge(changeSummary)
     scheduledReloadWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
       guard let self else {
         return
       }
+      let summary = self.pendingReloadChangeSummary
+      self.pendingReloadChangeSummary = .empty
       self.scheduledReloadWorkItem = nil
       if self.tableView.isDragging || self.tableView.isDecelerating {
         return
       }
-      self.reloadFromStore(reason: .dataOnly)
+      self.reloadFromStore(reason: .dataOnly, changeSummary: summary)
     }
     scheduledReloadWorkItem = workItem
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
@@ -941,7 +1021,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         return
       }
       self.scheduledSearchWorkItem = nil
-      self.reloadFromStore(reason: .dataOnly)
+      self.reloadFromStore(reason: .dataOnly, changeSummary: .empty)
     }
     scheduledSearchWorkItem = workItem
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
@@ -963,7 +1043,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
     isSuspendingLiveUpdatesForScroll = false
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(true)
-    reloadFromStore(reason: .dataOnly)
+    reloadFromStore(reason: .dataOnly, changeSummary: .empty)
   }
 
   private func updateToolbarTitles() {
@@ -1149,39 +1229,361 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return "未找到匹配的网络请求"
   }
 
-  private func changedIdentifiers<Entry: Equatable>(
-    orderedIDs: [String],
-    previousLookup: [String: Entry],
-    nextLookup: [String: Entry]
-  ) -> [String] {
-    orderedIDs.compactMap { identifier in
-      guard let nextEntry = nextLookup[identifier] else {
-        return nil
-      }
-      guard let previousEntry = previousLookup[identifier] else {
-        return identifier
-      }
-      return previousEntry == nextEntry ? nil : identifier
+  private func shouldReload(for changeSummary: StoreChangeSummary) -> Bool {
+    if changeSummary.mask.contains(.config) || changeSummary.mask == .all {
+      return true
+    }
+
+    switch activeTab {
+    case .logs:
+      return changeSummary.mask.contains(.logs)
+    case .network:
+      return changeSummary.mask.contains(.network)
+    case .appInfo:
+      return changeSummary.mask.contains(.logs) || changeSummary.mask.contains(.errors)
     }
   }
 
-  private func logSortComparator(_ lhs: DebugLogEntry, _ rhs: DebugLogEntry) -> Bool {
-    let lhsKey = lhs.fullTimestamp.isEmpty ? lhs.timestamp : lhs.fullTimestamp
-    let rhsKey = rhs.fullTimestamp.isEmpty ? rhs.timestamp : rhs.fullTimestamp
-    if lhsKey == rhsKey {
-      return sortAscending ? lhs.id < rhs.id : lhs.id > rhs.id
-    }
-    return sortAscending ? lhsKey < rhsKey : lhsKey > rhsKey
+  private func nextVisibleRenderGeneration() -> Int {
+    visibleRenderGeneration += 1
+    return visibleRenderGeneration
   }
 
-  private func networkSortComparator(_ lhs: DebugNetworkEntry, _ rhs: DebugNetworkEntry) -> Bool {
-    if lhs.startedAt != rhs.startedAt {
-      return sortAscending ? lhs.startedAt < rhs.startedAt : lhs.startedAt > rhs.startedAt
+  private func indexPaths(for ids: [String], matching targetIDs: Set<String>) -> [IndexPath] {
+    guard !ids.isEmpty, !targetIDs.isEmpty else {
+      return []
     }
-    if lhs.updatedAt != rhs.updatedAt {
-      return sortAscending ? lhs.updatedAt < rhs.updatedAt : lhs.updatedAt > rhs.updatedAt
+
+    var indexPaths: [IndexPath] = []
+    indexPaths.reserveCapacity(min(ids.count, targetIDs.count))
+    for (index, id) in ids.enumerated() where targetIDs.contains(id) {
+      indexPaths.append(IndexPath(row: index, section: 0))
     }
-    return sortAscending ? lhs.id < rhs.id : lhs.id > rhs.id
+    return indexPaths
+  }
+
+  private func indexPaths(forRowRange range: Range<Int>) -> [IndexPath] {
+    guard !range.isEmpty else {
+      return []
+    }
+
+    var indexPaths: [IndexPath] = []
+    indexPaths.reserveCapacity(range.count)
+    for row in range {
+      indexPaths.append(IndexPath(row: row, section: 0))
+    }
+    return indexPaths
+  }
+
+  private func suffixPrefixOverlapCount(_ previousIDs: [String], _ nextIDs: [String]) -> Int {
+    guard
+      !previousIDs.isEmpty,
+      !nextIDs.isEmpty,
+      let nextFirst = nextIDs.first,
+      let previousStart = previousIDs.firstIndex(of: nextFirst)
+    else {
+      return 0
+    }
+
+    let overlapCount = previousIDs.count - previousStart
+    guard overlapCount <= nextIDs.count else {
+      return 0
+    }
+
+    for offset in 0..<overlapCount where previousIDs[previousStart + offset] != nextIDs[offset] {
+      return 0
+    }
+    return overlapCount
+  }
+
+  private func prefixSuffixOverlapCount(_ previousIDs: [String], _ nextIDs: [String]) -> Int {
+    guard
+      !previousIDs.isEmpty,
+      !nextIDs.isEmpty,
+      let previousFirst = previousIDs.first,
+      let nextStart = nextIDs.firstIndex(of: previousFirst)
+    else {
+      return 0
+    }
+
+    let overlapCount = nextIDs.count - nextStart
+    guard overlapCount <= previousIDs.count else {
+      return 0
+    }
+
+    for offset in 0..<overlapCount where previousIDs[offset] != nextIDs[nextStart + offset] {
+      return 0
+    }
+    return overlapCount
+  }
+
+  private func edgeMutationPlan(
+    previousIDs: [String],
+    nextIDs: [String],
+    reloadIDs: Set<String>,
+    overlapCount: Int,
+    deletesFromHead: Bool
+  ) -> TableUpdatePlan? {
+    let deletionCount = previousIDs.count - overlapCount
+    let insertionCount = nextIDs.count - overlapCount
+    guard deletionCount + insertionCount <= Self.maxIncrementalTableMutationCount else {
+      return nil
+    }
+
+    let deletions = deletesFromHead
+      ? indexPaths(forRowRange: 0..<deletionCount)
+      : indexPaths(forRowRange: overlapCount..<previousIDs.count)
+    let insertions = deletesFromHead
+      ? indexPaths(forRowRange: overlapCount..<nextIDs.count)
+      : indexPaths(forRowRange: 0..<insertionCount)
+    let insertedIDs = Set(
+      deletesFromHead
+        ? nextIDs.suffix(insertionCount)
+        : nextIDs.prefix(insertionCount)
+    )
+    let reloads = indexPaths(for: nextIDs, matching: reloadIDs.subtracting(insertedIDs))
+
+    if deletions.isEmpty, insertions.isEmpty {
+      guard !reloads.isEmpty else {
+        return TableUpdatePlan.none
+      }
+      return .reloadRows(reloads)
+    }
+    return .edgeMutation(deletions: deletions, insertions: insertions, reloads: reloads)
+  }
+
+  private func tableUpdatePlan(
+    previousIDs: [String],
+    nextIDs: [String],
+    reloadIDs: Set<String>,
+    tab: ActiveTab
+  ) -> TableUpdatePlan {
+    guard renderedTableTab == tab else {
+      return .reloadData
+    }
+
+    if previousIDs == nextIDs {
+      let reloads = indexPaths(for: nextIDs, matching: reloadIDs)
+      guard !reloads.isEmpty else {
+        return .none
+      }
+      return reloads.count >= nextIDs.count ? .reloadData : .reloadRows(reloads)
+    }
+
+    let forwardOverlap = suffixPrefixOverlapCount(previousIDs, nextIDs)
+    let backwardOverlap = prefixSuffixOverlapCount(previousIDs, nextIDs)
+
+    if forwardOverlap >= backwardOverlap,
+       let plan = edgeMutationPlan(
+         previousIDs: previousIDs,
+         nextIDs: nextIDs,
+         reloadIDs: reloadIDs,
+         overlapCount: forwardOverlap,
+         deletesFromHead: true
+       ) {
+      return plan
+    }
+
+    if let plan = edgeMutationPlan(
+      previousIDs: previousIDs,
+      nextIDs: nextIDs,
+      reloadIDs: reloadIDs,
+      overlapCount: backwardOverlap,
+      deletesFromHead: false
+    ) {
+      return plan
+    }
+
+    return .reloadData
+  }
+
+  private func applyRenderedLogs(_ nextLogs: [DebugLogEntry], changeSummary: StoreChangeSummary) {
+    let previousLogs = displayedLogs
+    let shouldReconfigureAll = changeSummary.mask.contains(.config)
+    displayedLogs = nextLogs
+    let reloadIDs = shouldReconfigureAll ? Set(nextLogs.map(\.id)) : []
+    let plan = tableUpdatePlan(
+      previousIDs: previousLogs.map(\.id),
+      nextIDs: nextLogs.map(\.id),
+      reloadIDs: reloadIDs,
+      tab: .logs
+    )
+    applyTableUpdate(plan, for: .logs)
+  }
+
+  private func applyRenderedNetwork(_ nextNetwork: [DebugNetworkEntry], changeSummary: StoreChangeSummary) {
+    let previousNetwork = displayedNetwork
+    displayedNetwork = nextNetwork
+
+    let shouldReconfigureAll = changeSummary.mask.contains(.config) || (changeSummary.mask.isEmpty && !nextNetwork.isEmpty)
+    if changeSummary.mask.isEmpty, previousNetwork == nextNetwork, renderedTableTab == .network {
+      applyTableUpdate(.none, for: .network)
+      return
+    }
+
+    let reloadIDs: Set<String>
+    if shouldReconfigureAll {
+      reloadIDs = Set(nextNetwork.map(\.id))
+    } else if changeSummary.changedNetworkIDs.isEmpty {
+      reloadIDs = []
+    } else {
+      reloadIDs = Set(
+        nextNetwork.compactMap { entry in
+          changeSummary.changedNetworkIDs.contains(entry.id) ? entry.id : nil
+        }
+      )
+    }
+
+    let plan = tableUpdatePlan(
+      previousIDs: previousNetwork.map(\.id),
+      nextIDs: nextNetwork.map(\.id),
+      reloadIDs: reloadIDs,
+      tab: .network
+    )
+    applyTableUpdate(plan, for: .network)
+  }
+
+  private static func filterLogs(
+    _ source: [DebugLogEntry],
+    query: String,
+    selectedLogLevels: Set<String>,
+    selectedLogOrigins: Set<String>,
+    sortAscending: Bool
+  ) -> [DebugLogEntry] {
+    var result: [DebugLogEntry] = []
+    result.reserveCapacity(source.count)
+    if sortAscending {
+      for entry in source {
+        guard selectedLogLevels.contains(entry.type), selectedLogOrigins.contains(entry.origin) else {
+          continue
+        }
+        if !query.isEmpty {
+          let matchesQuery =
+            entry.message.localizedCaseInsensitiveContains(query) ||
+            entry.type.localizedCaseInsensitiveContains(query) ||
+            entry.origin.localizedCaseInsensitiveContains(query) ||
+            (entry.context ?? "").localizedCaseInsensitiveContains(query) ||
+            (entry.details ?? "").localizedCaseInsensitiveContains(query)
+          guard matchesQuery else {
+            continue
+          }
+        }
+        result.append(entry)
+      }
+      return result
+    }
+
+    for entry in source.reversed() {
+      guard selectedLogLevels.contains(entry.type), selectedLogOrigins.contains(entry.origin) else {
+        continue
+      }
+      if !query.isEmpty {
+        let matchesQuery =
+          entry.message.localizedCaseInsensitiveContains(query) ||
+          entry.type.localizedCaseInsensitiveContains(query) ||
+          entry.origin.localizedCaseInsensitiveContains(query) ||
+          (entry.context ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.details ?? "").localizedCaseInsensitiveContains(query)
+        guard matchesQuery else {
+          continue
+        }
+      }
+      result.append(entry)
+    }
+    return result
+  }
+
+  private static func filterNetwork(
+    _ source: [DebugNetworkEntry],
+    query: String,
+    selectedNetworkOrigins: Set<String>,
+    selectedNetworkKinds: Set<String>,
+    sortAscending: Bool,
+    locale: String
+  ) -> [DebugNetworkEntry] {
+    var result: [DebugNetworkEntry] = []
+    result.reserveCapacity(source.count)
+
+    func matches(_ entry: DebugNetworkEntry) -> Bool {
+      let normalizedKind = normalizedNetworkKind(entry.kind).rawValue
+      guard selectedNetworkOrigins.contains(entry.origin), selectedNetworkKinds.contains(normalizedKind) else {
+        return false
+      }
+      if !query.isEmpty {
+        let kindTitle = localizedNetworkKindTitle(entry.kind, locale: locale)
+        let matchesQuery =
+          entry.url.localizedCaseInsensitiveContains(query) ||
+          entry.origin.localizedCaseInsensitiveContains(query) ||
+          entry.kind.localizedCaseInsensitiveContains(query) ||
+          kindTitle.localizedCaseInsensitiveContains(query) ||
+          entry.method.localizedCaseInsensitiveContains(query) ||
+          entry.state.localizedCaseInsensitiveContains(query) ||
+          (entry.protocol ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.requestedProtocols ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.closeReason ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.error ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.events ?? "").localizedCaseInsensitiveContains(query) ||
+          (entry.messages ?? "").localizedCaseInsensitiveContains(query)
+        return matchesQuery
+      }
+      return true
+    }
+
+    if isNetworkSourceTimelineOrdered(source) {
+      if sortAscending {
+        for entry in source where matches(entry) {
+          result.append(entry)
+        }
+      } else {
+        for entry in source.reversed() where matches(entry) {
+          result.append(entry)
+        }
+      }
+      return result
+    }
+
+    for entry in source where matches(entry) {
+      result.append(entry)
+    }
+    result.sort {
+      if $0.startedAt != $1.startedAt {
+        return sortAscending ? $0.startedAt < $1.startedAt : $0.startedAt > $1.startedAt
+      }
+      if ($0.timelineSequence ?? 0) != ($1.timelineSequence ?? 0) {
+        return sortAscending
+          ? ($0.timelineSequence ?? 0) < ($1.timelineSequence ?? 0)
+          : ($0.timelineSequence ?? 0) > ($1.timelineSequence ?? 0)
+      }
+      return sortAscending ? $0.id < $1.id : $0.id > $1.id
+    }
+    return result
+  }
+
+  private static func isNetworkSourceTimelineOrdered(_ source: [DebugNetworkEntry]) -> Bool {
+    guard var previous = source.first else {
+      return true
+    }
+
+    for entry in source.dropFirst() {
+      if previous.startedAt > entry.startedAt {
+        return false
+      }
+
+      if previous.startedAt == entry.startedAt {
+        let previousSequence = previous.timelineSequence ?? 0
+        let nextSequence = entry.timelineSequence ?? 0
+        if previousSequence > nextSequence {
+          return false
+        }
+        if previousSequence == nextSequence, previous.id > entry.id {
+          return false
+        }
+      }
+
+      previous = entry
+    }
+
+    return true
   }
 
   private func logDetailBody(for entry: DebugLogEntry) -> String {
@@ -1488,6 +1890,20 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore()
   }
 
+  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+    switch activeTab {
+    case .logs:
+      return displayedLogs.count
+    case .network:
+      return displayedNetwork.count
+    case .appInfo:
+      return 0
+    }
+  }
+
+  func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    configuredCell(for: tableView, at: indexPath)
+  }
 
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)

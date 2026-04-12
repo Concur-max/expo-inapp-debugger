@@ -90,6 +90,82 @@ private func inAppDebuggerHandleUncaughtException(_ exception: NSException) {
   InAppDebuggerNativeLogCapture.shared.handleUncaughtException(exception)
 }
 
+private let inAppDebuggerWhitespaceAndNewlineCharacterSet = CharacterSet.whitespacesAndNewlines
+private let inAppDebuggerErrorLevelKeywords: [[UInt8]] = [
+  Array("fatal".utf8),
+  Array("fault".utf8),
+  Array("error".utf8),
+  Array("exception".utf8),
+  Array("crash".utf8),
+]
+private let inAppDebuggerWarnLevelKeyword = Array("warn".utf8)
+private let inAppDebuggerDebugLevelKeyword = Array("debug".utf8)
+private let inAppDebuggerInfoLevelKeyword = Array("info".utf8)
+
+private func inAppDebuggerTrimmedMessage(_ value: String) -> String {
+  guard !value.isEmpty else {
+    return value
+  }
+
+  var start = value.startIndex
+  var end = value.endIndex
+
+  while start < end, inAppDebuggerIsWhitespaceOrNewline(value[start]) {
+    start = value.index(after: start)
+  }
+  while start < end {
+    let previousEnd = value.index(before: end)
+    guard inAppDebuggerIsWhitespaceOrNewline(value[previousEnd]) else {
+      break
+    }
+    end = previousEnd
+  }
+
+  guard start != value.startIndex || end != value.endIndex else {
+    return value
+  }
+  return String(value[start..<end])
+}
+
+private func inAppDebuggerIsWhitespaceOrNewline(_ character: Character) -> Bool {
+  character.unicodeScalars.allSatisfy(inAppDebuggerWhitespaceAndNewlineCharacterSet.contains)
+}
+
+private func inAppDebuggerLowercasedASCII(_ byte: UInt8) -> UInt8 {
+  switch byte {
+  case 65...90:
+    return byte &+ 32
+  default:
+    return byte
+  }
+}
+
+private func inAppDebuggerContainsASCIIKeyword(_ value: String, keyword: [UInt8]) -> Bool {
+  guard !value.isEmpty, !keyword.isEmpty else {
+    return false
+  }
+
+  let bytes = value.utf8
+  var start = bytes.startIndex
+  while start != bytes.endIndex {
+    var current = start
+    var keywordIndex = 0
+
+    while current != bytes.endIndex,
+      keywordIndex < keyword.count,
+      inAppDebuggerLowercasedASCII(bytes[current]) == keyword[keywordIndex] {
+      bytes.formIndex(after: &current)
+      keywordIndex += 1
+    }
+
+    if keywordIndex == keyword.count {
+      return true
+    }
+    bytes.formIndex(after: &start)
+  }
+  return false
+}
+
 final class InAppDebuggerNativeLogCapture {
   static let shared = InAppDebuggerNativeLogCapture()
 
@@ -112,6 +188,9 @@ final class InAppDebuggerNativeLogCapture {
   private var didLogSessionStart = false
   private var lifecycleObservers: [NSObjectProtocol] = []
   private var diagnosticObservers: [NSObjectProtocol] = []
+  private let processName = ProcessInfo.processInfo.processName
+  private let processIdentifier = ProcessInfo.processInfo.processIdentifier
+  private var streamMetadataCache: [String: (context: String, details: String?)] = [:]
 
   private init() {}
 
@@ -820,10 +899,9 @@ final class InAppDebuggerNativeLogCapture {
   }
 
   private func drainBuffer(_ buffer: inout Data, stream: String) {
-    let newline = Data([0x0A])
-    while let range = buffer.firstRange(of: newline) {
-      var lineData = buffer.subdata(in: 0..<range.lowerBound)
-      buffer.removeSubrange(0..<range.upperBound)
+    while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+      var lineData = Data(buffer[..<newlineIndex])
+      buffer.removeSubrange(...newlineIndex)
       if lineData.last == 0x0D {
         lineData.removeLast()
       }
@@ -842,23 +920,17 @@ final class InAppDebuggerNativeLogCapture {
       return
     }
 
-    let message = String(data: lineData, encoding: .utf8)
-      ?? String(decoding: lineData, as: UTF8.self)
-    let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
+    let message = inAppDebuggerTrimmedMessage(String(decoding: lineData, as: UTF8.self))
+    guard !message.isEmpty else {
       return
     }
 
-    let processInfo = ProcessInfo.processInfo
+    let metadata = streamMetadata(for: stream)
     InAppDebuggerStore.shared.appendNativeLog(
-      type: inferLevel(from: trimmed),
-      message: trimmed,
-      stream: nativeContext(stream: stream),
-      details: buildDetailsString([
-        ("collector", stream),
-        ("process", processInfo.processName),
-        ("pid", "\(processInfo.processIdentifier)"),
-      ]),
+      type: inferLevel(from: message),
+      message: message,
+      stream: metadata.context,
+      details: metadata.details,
       date: Date()
     )
   }
@@ -867,7 +939,7 @@ final class InAppDebuggerNativeLogCapture {
     guard captureEnabled, panelActive else {
       return
     }
-    let message = entry.composedMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+    let message = inAppDebuggerTrimmedMessage(entry.composedMessage)
     guard !message.isEmpty else {
       return
     }
@@ -994,29 +1066,35 @@ final class InAppDebuggerNativeLogCapture {
   }
 
   private func inferLevel(from message: String) -> String {
-    let lowercased = message.lowercased()
-    if lowercased.contains("fatal") ||
-      lowercased.contains("fault") ||
-      lowercased.contains("error") ||
-      lowercased.contains("exception") ||
-      lowercased.contains("crash") {
+    if inAppDebuggerErrorLevelKeywords.contains(where: { inAppDebuggerContainsASCIIKeyword(message, keyword: $0) }) {
       return "error"
     }
-    if lowercased.contains("warn") {
+    if inAppDebuggerContainsASCIIKeyword(message, keyword: inAppDebuggerWarnLevelKeyword) {
       return "warn"
     }
-    if lowercased.contains("debug") {
+    if inAppDebuggerContainsASCIIKeyword(message, keyword: inAppDebuggerDebugLevelKeyword) {
       return "debug"
     }
-    if lowercased.contains("info") {
+    if inAppDebuggerContainsASCIIKeyword(message, keyword: inAppDebuggerInfoLevelKeyword) {
       return "info"
     }
     return "log"
   }
 
-  private func nativeContext(stream: String) -> String {
-    let processInfo = ProcessInfo.processInfo
-    return "\(stream) · \(processInfo.processName)(\(processInfo.processIdentifier))"
+  private func streamMetadata(for stream: String) -> (context: String, details: String?) {
+    if let metadata = streamMetadataCache[stream] {
+      return metadata
+    }
+    let metadata = (
+      context: "\(stream) · \(processName)(\(processIdentifier))",
+      details: buildDetailsString([
+        ("collector", stream),
+        ("process", processName),
+        ("pid", "\(processIdentifier)"),
+      ])
+    )
+    streamMetadataCache[stream] = metadata
+    return metadata
   }
 
   private func applicationStateDescription(_ state: UIApplication.State) -> String {
@@ -1171,6 +1249,7 @@ private struct PendingWebSocketMetadata {
 private final class TrackedWebSocketState {
   let id: String
   let socketId: Int
+  let timelineSequence: Int
   var kind = "websocket"
   var method: String
   var url: String
@@ -1197,10 +1276,15 @@ private final class TrackedWebSocketState {
   var bytesOut = 0
   var eventsList: [String] = []
   var messagesList: [String] = []
+  private var cachedEvents: String?
+  private var cachedMessages: String?
+  private var eventsDirty = false
+  private var messagesDirty = false
   var lastStoreEmissionAt = 0
 
   init(
     socketId: Int,
+    timelineSequence: Int,
     method: String,
     url: String,
     state: String,
@@ -1210,6 +1294,7 @@ private final class TrackedWebSocketState {
   ) {
     self.id = "ws_\(socketId)"
     self.socketId = socketId
+    self.timelineSequence = timelineSequence
     self.method = method
     self.url = url
     self.state = state
@@ -1219,8 +1304,32 @@ private final class TrackedWebSocketState {
     self.requestedProtocols = requestedProtocols
   }
 
+  func appendEventLine(_ line: String) {
+    eventsList.append(line)
+    if eventsList.count > 120 {
+      eventsList.removeFirst(eventsList.count - 120)
+    }
+    eventsDirty = true
+  }
+
+  func appendMessageBlock(_ block: String) {
+    messagesList.append(block)
+    if messagesList.count > 100 {
+      messagesList.removeFirst(messagesList.count - 100)
+    }
+    messagesDirty = true
+  }
+
   func asEntry() -> DebugNetworkEntry {
-    DebugNetworkEntry(
+    if eventsDirty {
+      cachedEvents = eventsList.joined(separator: "\n")
+      eventsDirty = false
+    }
+    if messagesDirty {
+      cachedMessages = messagesList.joined(separator: "\n\n")
+      messagesDirty = false
+    }
+    return DebugNetworkEntry(
       id: id,
       kind: kind,
       method: method,
@@ -1246,8 +1355,9 @@ private final class TrackedWebSocketState {
       messageCountOut: messageCountOut,
       bytesIn: bytesIn,
       bytesOut: bytesOut,
-      events: eventsList.joined(separator: "\n"),
-      messages: messagesList.joined(separator: "\n\n")
+      events: cachedEvents,
+      messages: cachedMessages,
+      timelineSequence: timelineSequence
     )
   }
 }
@@ -1289,7 +1399,15 @@ final class InAppDebuggerNativeWebSocketCapture {
     shouldRefresh = panelActive
     if panelActive {
       snapshots = trackedSockets.values
-        .sorted { $0.startedAt > $1.startedAt }
+        .sorted {
+          if $0.startedAt != $1.startedAt {
+            return $0.startedAt > $1.startedAt
+          }
+          if $0.timelineSequence != $1.timelineSequence {
+            return $0.timelineSequence > $1.timelineSequence
+          }
+          return $0.id > $1.id
+        }
         .map { tracked in
           tracked.lastStoreEmissionAt = timestamp
           return tracked.asEntry()
@@ -1313,7 +1431,15 @@ final class InAppDebuggerNativeWebSocketCapture {
     lock.lock()
     if enabled {
       snapshots = trackedSockets.values
-        .sorted { $0.startedAt > $1.startedAt }
+        .sorted {
+          if $0.startedAt != $1.startedAt {
+            return $0.startedAt > $1.startedAt
+          }
+          if $0.timelineSequence != $1.timelineSequence {
+            return $0.timelineSequence > $1.timelineSequence
+          }
+          return $0.id > $1.id
+        }
         .map { tracked in
           tracked.lastStoreEmissionAt = timestamp
           return tracked.asEntry()
@@ -1567,6 +1693,7 @@ final class InAppDebuggerNativeWebSocketCapture {
     let url = metadata?.url.nilIfEmpty ?? socketURL(for: socketObject) ?? ""
     let tracked = TrackedWebSocketState(
       socketId: socketId,
+      timelineSequence: InAppDebuggerStore.shared.nextNativeTimelineSequence(),
       method: metadata?.method ?? webSocketMethod(for: url),
       url: url,
       state: defaultState,
@@ -1610,10 +1737,7 @@ private extension InAppDebuggerNativeWebSocketCapture {
   }
 
   func appendEvent(_ text: String, to tracked: TrackedWebSocketState, at timestamp: Int) {
-    tracked.eventsList.append("\(formatClock(timestamp)) \(text)")
-    if tracked.eventsList.count > 120 {
-      tracked.eventsList.removeFirst(tracked.eventsList.count - 120)
-    }
+    tracked.appendEventLine("\(formatClock(timestamp)) \(text)")
   }
 
   func appendMessage(
@@ -1628,10 +1752,7 @@ private extension InAppDebuggerNativeWebSocketCapture {
     if let payload = payload?.nilIfEmpty {
       lines.append(payload)
     }
-    tracked.messagesList.append(lines.joined(separator: "\n"))
-    if tracked.messagesList.count > 100 {
-      tracked.messagesList.removeFirst(tracked.messagesList.count - 100)
-    }
+    tracked.appendMessageBlock(lines.joined(separator: "\n"))
   }
 
   func formatClock(_ timestamp: Int) -> String {
