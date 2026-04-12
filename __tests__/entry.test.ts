@@ -60,9 +60,12 @@ describe('package entry lazy loading', () => {
     expect(providerFactory).not.toHaveBeenCalled();
     expect(boundaryFactory).not.toHaveBeenCalled();
 
+    entry.InAppDebugRoot({ enabled: false, children: null });
+    expect(providerFactory).toHaveBeenCalledTimes(1);
+    expect(boundaryFactory).toHaveBeenCalledTimes(1);
+
     entry.InAppDebugProvider({ enabled: false, children: null });
     expect(providerFactory).toHaveBeenCalledTimes(1);
     expect(providerImpl).not.toHaveBeenCalled();
-    expect(boundaryFactory).not.toHaveBeenCalled();
   });
 });

@@ -167,6 +167,9 @@ export type InAppDebugBoundaryProps = {
   showDebugInfo?: boolean;
 };
 
+export type InAppDebugRootProps = InAppDebugProviderProps &
+  Omit<InAppDebugBoundaryProps, 'children'>;
+
 export type ResolvedInAppDebugConfig = {
   enabled: boolean;
   initialVisible: boolean;

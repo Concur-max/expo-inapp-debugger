@@ -1,4 +1,8 @@
-export type { InAppDebugBoundaryProps, InAppDebugProviderProps } from './types';
+export type {
+  InAppDebugBoundaryProps,
+  InAppDebugProviderProps,
+  InAppDebugRootProps,
+} from './types';
 export type {
   AndroidLogcatBuffer,
   AndroidLogcatScope,
@@ -74,6 +78,24 @@ export function InAppDebugBoundary(props: import('./types').InAppDebugBoundaryPr
 }
 
 InAppDebugBoundary.displayName = 'InAppDebugBoundary';
+
+export function InAppDebugRoot(props: import('./types').InAppDebugRootProps) {
+  const React = loadReact();
+  const { children, onError, fallback, showDebugInfo, ...providerProps } = props;
+
+  return React.createElement(
+    loadInAppDebugProvider(),
+    providerProps as import('./types').InAppDebugProviderProps,
+    React.createElement(loadInAppDebugBoundary(), {
+      children,
+      onError,
+      fallback,
+      showDebugInfo,
+    })
+  );
+}
+
+InAppDebugRoot.displayName = 'InAppDebugRoot';
 
 export const InAppDebugController: InAppDebugControllerApi = {
   show() {

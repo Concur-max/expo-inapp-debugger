@@ -36,21 +36,18 @@ npx expo run:android
 在应用根部包一层 `InAppDebugProvider`。建议开发期启用，生产环境谨慎开启。
 
 ```tsx
-import {
-  InAppDebugBoundary,
-  InAppDebugProvider,
-} from 'expo-inapp-debugger';
+import { InAppDebugRoot } from 'expo-inapp-debugger';
 
 export default function Root() {
   return (
-    <InAppDebugProvider enabled={__DEV__} locale="zh-CN">
-      <InAppDebugBoundary>
-        <App />
-      </InAppDebugBoundary>
-    </InAppDebugProvider>
+    <InAppDebugRoot enabled={__DEV__} locale="zh-CN">
+      <App />
+    </InAppDebugRoot>
   );
 }
 ```
+
+`InAppDebugRoot` 是默认推荐接入方式，内部等价于 `InAppDebugProvider + InAppDebugBoundary`。如果你已经有自己的 Error Boundary，或者只想接 Provider，也可以继续分别使用这两个组件。
 
 `InAppDebugProvider` 默认是关闭的。只要挂载了 `InAppDebugProvider`，`enabled` 就是启停调试器的唯一权威开关。只有它变成 `true`，库才会创建运行时并安装 JS / native 采集 hook。
 
@@ -59,21 +56,16 @@ export default function Root() {
 如果你希望把库随生产包一起发布，但只给少量内部同学或测试账号开启，推荐把 `enabled` 绑定到业务开关，而不是直接跟 `__DEV__` 绑定：
 
 ```tsx
-import {
-  InAppDebugBoundary,
-  InAppDebugProvider,
-} from 'expo-inapp-debugger';
+import { InAppDebugRoot } from 'expo-inapp-debugger';
 
 export default function Root() {
   const debuggerEnabled =
     isInternalDeveloper && remoteConfig.inAppDebuggerEnabled;
 
   return (
-    <InAppDebugProvider enabled={debuggerEnabled} locale="zh-CN">
-      <InAppDebugBoundary>
-        <App />
-      </InAppDebugBoundary>
-    </InAppDebugProvider>
+    <InAppDebugRoot enabled={debuggerEnabled} locale="zh-CN">
+      <App />
+    </InAppDebugRoot>
   );
 }
 ```
