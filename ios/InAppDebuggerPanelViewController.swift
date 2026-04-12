@@ -1450,6 +1450,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     selectedLogOrigins: Set<String>,
     sortAscending: Bool
   ) -> [DebugLogEntry] {
+    guard !source.isEmpty, !selectedLogLevels.isEmpty, !selectedLogOrigins.isEmpty else {
+      return []
+    }
+
+    if query.isEmpty &&
+      selectedLogLevels == PanelFilterPreferences.allLevels &&
+      selectedLogOrigins == PanelFilterPreferences.allOrigins {
+      return sortAscending ? source : Array(source.reversed())
+    }
+
     var result: [DebugLogEntry] = []
     result.reserveCapacity(source.count)
     if sortAscending {
@@ -1501,6 +1511,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     sortAscending: Bool,
     locale: String
   ) -> [DebugNetworkEntry] {
+    guard !source.isEmpty, !selectedNetworkOrigins.isEmpty, !selectedNetworkKinds.isEmpty else {
+      return []
+    }
+
+    if query.isEmpty &&
+      selectedNetworkOrigins == PanelFilterPreferences.allOrigins &&
+      selectedNetworkKinds == PanelFilterPreferences.allNetworkKinds {
+      return sortAscending ? source : Array(source.reversed())
+    }
+
     var result: [DebugNetworkEntry] = []
     result.reserveCapacity(source.count)
 
@@ -1529,61 +1549,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       return true
     }
 
-    if isNetworkSourceTimelineOrdered(source) {
-      if sortAscending {
-        for entry in source where matches(entry) {
-          result.append(entry)
-        }
-      } else {
-        for entry in source.reversed() where matches(entry) {
-          result.append(entry)
-        }
+    if sortAscending {
+      for entry in source where matches(entry) {
+        result.append(entry)
       }
-      return result
+    } else {
+      for entry in source.reversed() where matches(entry) {
+        result.append(entry)
+      }
     }
 
-    for entry in source where matches(entry) {
-      result.append(entry)
-    }
-    result.sort {
-      if $0.startedAt != $1.startedAt {
-        return sortAscending ? $0.startedAt < $1.startedAt : $0.startedAt > $1.startedAt
-      }
-      if ($0.timelineSequence ?? 0) != ($1.timelineSequence ?? 0) {
-        return sortAscending
-          ? ($0.timelineSequence ?? 0) < ($1.timelineSequence ?? 0)
-          : ($0.timelineSequence ?? 0) > ($1.timelineSequence ?? 0)
-      }
-      return sortAscending ? $0.id < $1.id : $0.id > $1.id
-    }
     return result
-  }
-
-  private static func isNetworkSourceTimelineOrdered(_ source: [DebugNetworkEntry]) -> Bool {
-    guard var previous = source.first else {
-      return true
-    }
-
-    for entry in source.dropFirst() {
-      if previous.startedAt > entry.startedAt {
-        return false
-      }
-
-      if previous.startedAt == entry.startedAt {
-        let previousSequence = previous.timelineSequence ?? 0
-        let nextSequence = entry.timelineSequence ?? 0
-        if previousSequence > nextSequence {
-          return false
-        }
-        if previousSequence == nextSequence, previous.id > entry.id {
-          return false
-        }
-      }
-
-      previous = entry
-    }
-
-    return true
   }
 
   private func logDetailBody(for entry: DebugLogEntry) -> String {

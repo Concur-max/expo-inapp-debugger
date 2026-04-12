@@ -5,6 +5,49 @@ private let inAppDebuggerNativeRequestHandledKey = "expo.inappdebugger.native-ne
 private let inAppDebuggerNativeRequestOriginKey = "expo.inappdebugger.native-network.origin"
 private let inAppDebuggerNativeJSOriginValue = "js"
 private let inAppDebuggerNativeResponsePreviewLimit = 32_000
+let nativeNetworkEventHistoryLimit = 120
+let nativeNetworkMessageHistoryLimit = 100
+
+final class InAppDebuggerCappedStringBuffer {
+  private var storage: [String?]
+  private var head = 0
+  private var count = 0
+
+  init(capacity: Int) {
+    storage = Array(repeating: nil, count: max(0, capacity))
+  }
+
+  func append(_ value: String) {
+    guard !storage.isEmpty else {
+      return
+    }
+
+    if count < storage.count {
+      storage[(head + count) % storage.count] = value
+      count += 1
+      return
+    }
+
+    storage[head] = value
+    head = (head + 1) % storage.count
+  }
+
+  func makeJoinedString(separator: String) -> String? {
+    guard count > 0 else {
+      return nil
+    }
+
+    var parts: [String] = []
+    parts.reserveCapacity(count)
+    for offset in 0..<count {
+      let index = (head + offset) % storage.count
+      if let value = storage[index] {
+        parts.append(value)
+      }
+    }
+    return parts.joined(separator: separator)
+  }
+}
 
 private final class InAppDebuggerNativeHTTPState {
   let id: String
@@ -124,8 +167,8 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
   var messageCountOut = 0
   var bytesIn = 0
   var bytesOut = 0
-  var eventsList: [String] = []
-  var messagesList: [String] = []
+  var eventsBuffer = InAppDebuggerCappedStringBuffer(capacity: nativeNetworkEventHistoryLimit)
+  var messagesBuffer = InAppDebuggerCappedStringBuffer(capacity: nativeNetworkMessageHistoryLimit)
   private var cachedEvents: String?
   private var cachedMessages: String?
   private var eventsDirty = false
@@ -154,28 +197,22 @@ private final class InAppDebuggerNativeURLSessionWebSocketState {
   }
 
   func appendEventLine(_ line: String) {
-    eventsList.append(line)
-    if eventsList.count > 120 {
-      eventsList.removeFirst(eventsList.count - 120)
-    }
+    eventsBuffer.append(line)
     eventsDirty = true
   }
 
   func appendMessageBlock(_ block: String) {
-    messagesList.append(block)
-    if messagesList.count > 100 {
-      messagesList.removeFirst(messagesList.count - 100)
-    }
+    messagesBuffer.append(block)
     messagesDirty = true
   }
 
   func asEntry() -> DebugNetworkEntry {
     if eventsDirty {
-      cachedEvents = eventsList.joined(separator: "\n")
+      cachedEvents = eventsBuffer.makeJoinedString(separator: "\n")
       eventsDirty = false
     }
     if messagesDirty {
-      cachedMessages = messagesList.joined(separator: "\n\n")
+      cachedMessages = messagesBuffer.makeJoinedString(separator: "\n\n")
       messagesDirty = false
     }
     return DebugNetworkEntry(
@@ -357,24 +394,25 @@ final class InAppDebuggerNativeNetworkCapture {
   func refreshVisibleEntries() {
     let timestamp = currentTimestamp()
     let entries: [DebugNetworkEntry] = lock.withLock {
-      let httpEntries = activeHTTPRequests.values.map { state -> DebugNetworkEntry in
+      guard enabled, panelActive, (!activeHTTPRequests.isEmpty || !activeNativeWebSockets.isEmpty) else {
+        return []
+      }
+
+      var entries: [DebugNetworkEntry] = []
+      entries.reserveCapacity(activeHTTPRequests.count + activeNativeWebSockets.count)
+
+      for state in activeHTTPRequests.values {
         state.lastStoreEmissionAt = timestamp
         state.materializeResponseBody(using: decodeTextPreview(from:contentType:))
-        return state.asEntry()
+        entries.append(state.asEntry())
       }
-      let webSocketEntries = activeNativeWebSockets.values.map { state -> DebugNetworkEntry in
+
+      for state in activeNativeWebSockets.values {
         state.lastStoreEmissionAt = timestamp
-        return state.asEntry()
+        entries.append(state.asEntry())
       }
-      return (httpEntries + webSocketEntries).sorted { lhs, rhs in
-        if lhs.startedAt != rhs.startedAt {
-          return lhs.startedAt > rhs.startedAt
-        }
-        if (lhs.timelineSequence ?? 0) != (rhs.timelineSequence ?? 0) {
-          return (lhs.timelineSequence ?? 0) > (rhs.timelineSequence ?? 0)
-        }
-        return lhs.id > rhs.id
-      }
+
+      return entries
     }
     entries.forEach { InAppDebuggerStore.shared.upsertNetworkEntry($0) }
   }

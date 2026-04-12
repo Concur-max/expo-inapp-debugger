@@ -35,8 +35,47 @@ type NetworkCollectorOptions = {
   onDiagnostic?: (component: string, message: string) => void;
 };
 
+const MAX_WEBSOCKET_MESSAGE_HISTORY = 100;
+
+class CappedStringBuffer {
+  private readonly storage: Array<string | undefined>;
+  private head = 0;
+  private count = 0;
+
+  constructor(capacity: number) {
+    this.storage = new Array(Math.max(0, capacity));
+  }
+
+  append(value: string) {
+    if (this.storage.length === 0) {
+      return;
+    }
+
+    if (this.count < this.storage.length) {
+      this.storage[(this.head + this.count) % this.storage.length] = value;
+      this.count += 1;
+      return;
+    }
+
+    this.storage[this.head] = value;
+    this.head = (this.head + 1) % this.storage.length;
+  }
+
+  join(separator: string) {
+    if (this.count === 0) {
+      return '';
+    }
+
+    const parts = new Array<string>(this.count);
+    for (let index = 0; index < this.count; index += 1) {
+      parts[index] = this.storage[(this.head + index) % this.storage.length] ?? '';
+    }
+    return parts.join(separator);
+  }
+}
+
 type MutableNetworkEntry = DebugNetworkEntry & {
-  messagesList?: string[];
+  messagesBuffer?: CappedStringBuffer;
   messagesDirty?: boolean;
 };
 
@@ -182,8 +221,6 @@ export class NetworkCollector {
         state: 'pending',
         startedAt: timestamp,
         updatedAt: timestamp,
-        requestHeaders: {},
-        responseHeaders: {},
         timelineSequence: this.nextTimelineSequence(),
       };
       this.requests.set(requestId, entry);
@@ -288,7 +325,7 @@ export class NetworkCollector {
           state: 'connecting',
           startedAt: timestamp,
           updatedAt: timestamp,
-          messagesList: [],
+          messagesBuffer: new CappedStringBuffer(MAX_WEBSOCKET_MESSAGE_HISTORY),
           messagesDirty: false,
           timelineSequence: this.nextTimelineSequence(),
         };
@@ -367,12 +404,9 @@ export class NetworkCollector {
   private appendMessage(socketId: number, message: string) {
     const entry = this.requests.get(`ws_${socketId}`);
     if (!entry) return;
-    const messagesList = entry.messagesList ?? [];
-    messagesList.push(message);
-    if (messagesList.length > 100) {
-      messagesList.splice(0, messagesList.length - 100);
-    }
-    entry.messagesList = messagesList;
+    const messagesBuffer = entry.messagesBuffer ?? new CappedStringBuffer(MAX_WEBSOCKET_MESSAGE_HISTORY);
+    messagesBuffer.append(message);
+    entry.messagesBuffer = messagesBuffer;
     entry.messagesDirty = true;
     entry.updatedAt = now();
     this.emit(entry);
@@ -438,13 +472,13 @@ export class NetworkCollector {
 
 export function materializeNetworkEntry(entry: DebugNetworkEntry): DebugNetworkEntry {
   const mutableEntry = entry as MutableNetworkEntry;
-  const messagesList = mutableEntry.messagesList;
-  if (!messagesList) {
+  const messagesBuffer = mutableEntry.messagesBuffer;
+  if (!messagesBuffer) {
     return entry;
   }
 
   if (mutableEntry.messagesDirty) {
-    mutableEntry.messages = messagesList.join('\n');
+    mutableEntry.messages = messagesBuffer.join('\n');
     mutableEntry.messagesDirty = false;
   }
 

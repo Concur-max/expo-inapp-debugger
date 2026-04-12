@@ -36,6 +36,23 @@ extension Notification.Name {
   static let inAppDebuggerStoreDidChange = Notification.Name("InAppDebuggerStoreDidChange")
 }
 
+private func compareDebugNetworkEntries(_ lhs: DebugNetworkEntry, _ rhs: DebugNetworkEntry) -> Int {
+  if lhs.startedAt != rhs.startedAt {
+    return lhs.startedAt < rhs.startedAt ? -1 : 1
+  }
+
+  let lhsSequence = lhs.timelineSequence ?? 0
+  let rhsSequence = rhs.timelineSequence ?? 0
+  if lhsSequence != rhsSequence {
+    return lhsSequence < rhsSequence ? -1 : 1
+  }
+
+  if lhs.id == rhs.id {
+    return 0
+  }
+  return lhs.id < rhs.id ? -1 : 1
+}
+
 final class InAppDebuggerStore {
   static let shared = InAppDebuggerStore()
 
@@ -46,7 +63,8 @@ final class InAppDebuggerStore {
   private var errors = InAppDebuggerRingBuffer<DebugErrorEntry>(capacity: DebugConfig().maxErrors)
   private var network = InAppDebuggerKeyedRingBuffer<String, DebugNetworkEntry>(
     capacity: DebugConfig().maxRequests,
-    key: \.id
+    key: \.id,
+    order: compareDebugNetworkEntries
   )
   private var liveUpdatesEnabled = false
   private var notificationScheduled = false
@@ -109,7 +127,8 @@ final class InAppDebuggerStore {
     errors = InAppDebuggerRingBuffer<DebugErrorEntry>(capacity: DebugConfig().maxErrors)
     network = InAppDebuggerKeyedRingBuffer<String, DebugNetworkEntry>(
       capacity: DebugConfig().maxRequests,
-      key: \.id
+      key: \.id,
+      order: compareDebugNetworkEntries
     )
     liveUpdatesEnabled = false
     notificationScheduled = false
@@ -526,67 +545,75 @@ private final class InAppDebuggerRingBuffer<Element> {
 }
 
 private final class InAppDebuggerKeyedRingBuffer<Key: Hashable, Element> {
-  private var storage: [Element?]
-  private var keys: [Key?]
+  private var capacity: Int
+  private var itemsByKey: [Key: Element] = [:]
+  private var orderedKeys: [Key] = []
   private var indexByKey: [Key: Int] = [:]
-  private var head = 0
   private let key: KeyPath<Element, Key>
-  private(set) var count = 0
+  private let order: (Element, Element) -> Int
 
-  init(capacity: Int, key: KeyPath<Element, Key>) {
-    let normalizedCapacity = max(0, capacity)
-    storage = Array(repeating: nil, count: normalizedCapacity)
-    keys = Array(repeating: nil, count: normalizedCapacity)
+  var count: Int {
+    orderedKeys.count
+  }
+
+  init(capacity: Int, key: KeyPath<Element, Key>, order: @escaping (Element, Element) -> Int) {
+    self.capacity = max(0, capacity)
     self.key = key
+    self.order = order
+    itemsByKey.reserveCapacity(max(16, self.capacity))
+    indexByKey.reserveCapacity(max(16, self.capacity))
+    orderedKeys.reserveCapacity(self.capacity)
   }
 
   @discardableResult
   func upsert(_ element: Element) -> Bool {
-    guard !storage.isEmpty else {
+    guard capacity > 0 else {
       return false
     }
 
     let elementKey = element[keyPath: key]
-    if let index = indexByKey[elementKey], storage.indices.contains(index) {
-      storage[index] = element
-      return true
+    let existed = itemsByKey[elementKey] != nil
+
+    if !existed, orderedKeys.count >= capacity,
+       let oldestKey = orderedKeys.first,
+       let oldestElement = itemsByKey[oldestKey],
+       order(element, oldestElement) <= 0 {
+      return false
     }
 
-    let index: Int
-    if count < storage.count {
-      index = (head + count) % storage.count
-      count += 1
-    } else {
-      index = head
-      if let staleKey = keys[index] {
-        indexByKey.removeValue(forKey: staleKey)
-      }
-      head = (head + 1) % storage.count
+    if let existingIndex = indexByKey[elementKey] {
+      orderedKeys.remove(at: existingIndex)
+      indexByKey.removeValue(forKey: elementKey)
+      reindexRange(start: existingIndex)
     }
 
-    storage[index] = element
-    keys[index] = elementKey
-    indexByKey[elementKey] = index
+    if !existed, orderedKeys.count >= capacity {
+      let removedKey = orderedKeys.removeFirst()
+      itemsByKey.removeValue(forKey: removedKey)
+      indexByKey.removeValue(forKey: removedKey)
+      reindexRange(start: 0)
+    }
+
+    itemsByKey[elementKey] = element
+    let insertionIndex = insertionIndex(for: element)
+    orderedKeys.insert(elementKey, at: insertionIndex)
+    reindexRange(start: insertionIndex)
     return true
   }
 
   func value(forKey key: Key) -> Element? {
-    guard let index = indexByKey[key], storage.indices.contains(index) else {
-      return nil
-    }
-    return storage[index]
+    itemsByKey[key]
   }
 
   func snapshot() -> [Element] {
-    guard count > 0 else {
+    guard !orderedKeys.isEmpty else {
       return []
     }
 
     var result: [Element] = []
-    result.reserveCapacity(count)
-    for offset in 0..<count {
-      let index = (head + offset) % storage.count
-      if let element = storage[index] {
+    result.reserveCapacity(orderedKeys.count)
+    for key in orderedKeys {
+      if let element = itemsByKey[key] {
         result.append(element)
       }
     }
@@ -594,50 +621,68 @@ private final class InAppDebuggerKeyedRingBuffer<Key: Hashable, Element> {
   }
 
   func clear() {
-    guard count > 0 else {
+    guard !orderedKeys.isEmpty else {
       return
     }
 
-    for index in storage.indices {
-      storage[index] = nil
-    }
-    for index in keys.indices {
-      keys[index] = nil
-    }
+    itemsByKey.removeAll(keepingCapacity: true)
+    orderedKeys.removeAll(keepingCapacity: true)
     indexByKey.removeAll(keepingCapacity: true)
-    head = 0
-    count = 0
   }
 
   func resize(capacity: Int) {
     let nextCapacity = max(0, capacity)
-    guard nextCapacity != storage.count else {
+    guard nextCapacity != self.capacity else {
       return
     }
 
-    var nextStorage = Array<Element?>(repeating: nil, count: nextCapacity)
-    var nextKeys = Array<Key?>(repeating: nil, count: nextCapacity)
-    var nextIndexByKey: [Key: Int] = [:]
-    nextIndexByKey.reserveCapacity(max(16, nextCapacity))
+    self.capacity = nextCapacity
+    trimToCapacity()
+  }
 
-    let elementsToKeep = min(count, nextCapacity)
-    if elementsToKeep > 0, !storage.isEmpty {
-      let startOffset = count - elementsToKeep
-      for position in 0..<elementsToKeep {
-        let sourceIndex = (head + startOffset + position) % storage.count
-        guard let element = storage[sourceIndex], let elementKey = keys[sourceIndex] else {
-          continue
-        }
-        nextStorage[position] = element
-        nextKeys[position] = elementKey
-        nextIndexByKey[elementKey] = position
+  private func trimToCapacity() {
+    guard capacity > 0 else {
+      clear()
+      return
+    }
+
+    while orderedKeys.count > capacity {
+      let removedKey = orderedKeys.removeFirst()
+      itemsByKey.removeValue(forKey: removedKey)
+      indexByKey.removeValue(forKey: removedKey)
+      reindexRange(start: 0)
+    }
+  }
+
+  private func insertionIndex(for element: Element) -> Int {
+    var low = 0
+    var high = orderedKeys.count
+
+    while low < high {
+      let mid = (low + high) / 2
+      let midKey = orderedKeys[mid]
+      guard let current = itemsByKey[midKey] else {
+        high = mid
+        continue
+      }
+
+      if order(current, element) <= 0 {
+        low = mid + 1
+      } else {
+        high = mid
       }
     }
 
-    storage = nextStorage
-    keys = nextKeys
-    indexByKey = nextIndexByKey
-    head = 0
-    count = elementsToKeep
+    return low
+  }
+
+  private func reindexRange(start: Int) {
+    guard start < orderedKeys.count else {
+      return
+    }
+
+    for index in start..<orderedKeys.count {
+      indexByKey[orderedKeys[index]] = index
+    }
   }
 }

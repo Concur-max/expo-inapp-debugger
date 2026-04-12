@@ -201,6 +201,31 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     expect(latestEntry()?.endedAt).toEqual(expect.any(Number));
   });
 
+  it('keeps only the latest websocket messages while preserving order', () => {
+    const { NetworkCollector, callbacks, materializeNetworkEntry } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const latestEntry = () => materializeNetworkEntry(entries[entries.length - 1] as any);
+
+    collector.enable();
+
+    callbacks.connect?.('wss://echo.example/socket', null, null, 11);
+    callbacks.onOpen?.(11);
+    for (let index = 0; index < 105; index += 1) {
+      callbacks.send?.(`msg-${index}`, 11);
+    }
+
+    const messages = latestEntry()?.messages?.split('\n');
+    expect(messages).toHaveLength(100);
+    expect(messages?.[0]).toBe('>> msg-5');
+    expect(messages?.[99]).toBe('>> msg-104');
+  });
+
   it('normalizes Android XHR raw response headers into a header map', () => {
     const { NetworkCollector, xhrCallbacks, xhrInterceptor } = loadNetworkCollector();
     const entries: Array<Record<string, unknown>> = [];

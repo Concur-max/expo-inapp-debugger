@@ -3185,17 +3185,28 @@ private class SearchTextCache<T>(
   private val keySelector: (T) -> String,
   private val searchTextBuilder: (T) -> String
 ) {
-  private val texts = object : LinkedHashMap<String, String>(capacity, 0.75f, true) {
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+  private data class CachedSearchText<T>(
+    val entry: T,
+    val text: String
+  )
+
+  private val texts = object : LinkedHashMap<String, CachedSearchText<T>>(capacity, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSearchText<T>>?): Boolean {
       return size > capacity
     }
   }
 
   fun matches(entry: T, query: String): Boolean {
     val key = keySelector(entry)
-    val searchText = texts[key] ?: searchTextBuilder(entry).also { built ->
-      texts[key] = built
-    }
+    val cached = texts[key]
+    val searchText =
+      if (cached?.entry === entry) {
+        cached.text
+      } else {
+        searchTextBuilder(entry).also { built ->
+          texts[key] = CachedSearchText(entry = entry, text = built)
+        }
+      }
     return searchText.contains(query, ignoreCase = true)
   }
 }

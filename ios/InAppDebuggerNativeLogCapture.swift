@@ -1274,8 +1274,8 @@ private final class TrackedWebSocketState {
   var messageCountOut = 0
   var bytesIn = 0
   var bytesOut = 0
-  var eventsList: [String] = []
-  var messagesList: [String] = []
+  var eventsBuffer = InAppDebuggerCappedStringBuffer(capacity: nativeNetworkEventHistoryLimit)
+  var messagesBuffer = InAppDebuggerCappedStringBuffer(capacity: nativeNetworkMessageHistoryLimit)
   private var cachedEvents: String?
   private var cachedMessages: String?
   private var eventsDirty = false
@@ -1305,28 +1305,22 @@ private final class TrackedWebSocketState {
   }
 
   func appendEventLine(_ line: String) {
-    eventsList.append(line)
-    if eventsList.count > 120 {
-      eventsList.removeFirst(eventsList.count - 120)
-    }
+    eventsBuffer.append(line)
     eventsDirty = true
   }
 
   func appendMessageBlock(_ block: String) {
-    messagesList.append(block)
-    if messagesList.count > 100 {
-      messagesList.removeFirst(messagesList.count - 100)
-    }
+    messagesBuffer.append(block)
     messagesDirty = true
   }
 
   func asEntry() -> DebugNetworkEntry {
     if eventsDirty {
-      cachedEvents = eventsList.joined(separator: "\n")
+      cachedEvents = eventsBuffer.makeJoinedString(separator: "\n")
       eventsDirty = false
     }
     if messagesDirty {
-      cachedMessages = messagesList.joined(separator: "\n\n")
+      cachedMessages = messagesBuffer.makeJoinedString(separator: "\n\n")
       messagesDirty = false
     }
     return DebugNetworkEntry(
@@ -1398,20 +1392,11 @@ final class InAppDebuggerNativeWebSocketCapture {
     panelActive = enabled && active
     shouldRefresh = panelActive
     if panelActive {
-      snapshots = trackedSockets.values
-        .sorted {
-          if $0.startedAt != $1.startedAt {
-            return $0.startedAt > $1.startedAt
-          }
-          if $0.timelineSequence != $1.timelineSequence {
-            return $0.timelineSequence > $1.timelineSequence
-          }
-          return $0.id > $1.id
-        }
-        .map { tracked in
-          tracked.lastStoreEmissionAt = timestamp
-          return tracked.asEntry()
-        }
+      snapshots.reserveCapacity(trackedSockets.count)
+      for tracked in trackedSockets.values {
+        tracked.lastStoreEmissionAt = timestamp
+        snapshots.append(tracked.asEntry())
+      }
     }
     lock.unlock()
 
@@ -1430,20 +1415,11 @@ final class InAppDebuggerNativeWebSocketCapture {
 
     lock.lock()
     if enabled {
-      snapshots = trackedSockets.values
-        .sorted {
-          if $0.startedAt != $1.startedAt {
-            return $0.startedAt > $1.startedAt
-          }
-          if $0.timelineSequence != $1.timelineSequence {
-            return $0.timelineSequence > $1.timelineSequence
-          }
-          return $0.id > $1.id
-        }
-        .map { tracked in
-          tracked.lastStoreEmissionAt = timestamp
-          return tracked.asEntry()
-        }
+      snapshots.reserveCapacity(trackedSockets.count)
+      for tracked in trackedSockets.values {
+        tracked.lastStoreEmissionAt = timestamp
+        snapshots.append(tracked.asEntry())
+      }
     }
     lock.unlock()
 
