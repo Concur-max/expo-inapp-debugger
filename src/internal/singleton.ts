@@ -1,4 +1,5 @@
 import type { ResolvedInAppDebugConfig } from '../types';
+import { resolveProviderConfig } from './config';
 import type { DebugRuntime as DebugRuntimeInstance } from './runtime';
 
 type RuntimeModule = typeof import('./runtime');
@@ -6,6 +7,7 @@ type NativeModule = typeof import('../InAppDebugModule');
 
 let debugRuntime: DebugRuntimeInstance | null = null;
 let pendingProviderConfig: ResolvedInAppDebugConfig | null = null;
+let providerRegistered = false;
 
 export function getDebugRuntime() {
   if (!debugRuntime) {
@@ -28,6 +30,7 @@ export function getDebugRuntimeIfCreated() {
 }
 
 export async function registerProviderConfig(config: ResolvedInAppDebugConfig) {
+  providerRegistered = true;
   pendingProviderConfig = config;
   if (!config.enabled && !debugRuntime) {
     return;
@@ -37,6 +40,7 @@ export async function registerProviderConfig(config: ResolvedInAppDebugConfig) {
 }
 
 export async function unregisterProviderConfig() {
+  providerRegistered = false;
   pendingProviderConfig = null;
   if (debugRuntime) {
     await debugRuntime.unregisterProvider();
@@ -44,15 +48,29 @@ export async function unregisterProviderConfig() {
 }
 
 export async function enableDebugRuntime() {
-  const runtime = getDebugRuntime();
-  if (pendingProviderConfig) {
-    runtime.primeProviderConfig(pendingProviderConfig);
+  if (providerRegistered) {
+    return;
   }
-  await runtime.enable();
+
+  const nextConfig = {
+    ...(pendingProviderConfig ?? resolveProviderConfig({})),
+    enabled: true,
+  };
+  pendingProviderConfig = nextConfig;
+  await getDebugRuntime().registerProvider(nextConfig);
 }
 
 export async function disableDebugRuntime() {
+  if (providerRegistered) {
+    return;
+  }
+
+  const nextConfig = {
+    ...(pendingProviderConfig ?? resolveProviderConfig({})),
+    enabled: false,
+  };
+  pendingProviderConfig = nextConfig;
   if (debugRuntime) {
-    await debugRuntime.disable();
+    await debugRuntime.registerProvider(nextConfig);
   }
 }

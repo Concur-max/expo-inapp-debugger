@@ -17,7 +17,12 @@ import type {
   ResolvedAndroidNativeLogsConfig,
   ResolvedInAppDebugConfig,
 } from '../types';
-import { defaultStrings, resolveStrings } from './strings';
+import {
+  normalizeAndroidNativeLogsOverride,
+  resolveAndroidNativeLogsConfig,
+  resolveProviderConfig,
+} from './config';
+import { defaultStrings } from './strings';
 import { materializeNetworkEntry, NetworkCollector } from './network';
 
 type ConsoleLike = Pick<typeof console, 'log' | 'info' | 'warn' | 'error' | 'debug'>;
@@ -56,14 +61,6 @@ type RuntimeNativeModule = {
 const FLUSH_DELAY_MS = 64;
 const MAX_BUFFERED_BATCH_SIZE = 120;
 const JS_PIPELINE_DIAGNOSTICS_ENABLED = false;
-const DEFAULT_ANDROID_LOGCAT_BUFFERS: AndroidLogcatBuffer[] = ['main', 'system', 'crash'];
-const VALID_ANDROID_LOGCAT_BUFFERS = new Set<AndroidLogcatBuffer>([
-  'main',
-  'system',
-  'crash',
-  'events',
-  'radio',
-]);
 let runtimeEntryCounter = 0;
 let cachedTimestampSecond = -1;
 let cachedTimestampPrefix = '';
@@ -159,86 +156,7 @@ function toNativeConfig(config: ResolvedInAppDebugConfig): NativeConfig {
   };
 }
 
-function resolveAndroidNativeLogsConfig(
-  input?: AndroidNativeLogsConfig
-): ResolvedAndroidNativeLogsConfig {
-  return {
-    enabled: input?.enabled ?? true,
-    captureLogcat: input?.captureLogcat ?? true,
-    captureStdoutStderr: input?.captureStdoutStderr ?? true,
-    captureUncaughtExceptions: input?.captureUncaughtExceptions ?? true,
-    logcatScope: input?.logcatScope === 'device' ? 'device' : 'app',
-    rootMode: input?.rootMode === 'auto' ? 'auto' : 'off',
-    buffers: sanitizeAndroidLogcatBuffers(input?.buffers),
-  };
-}
-
-function normalizeAndroidNativeLogsOverride(
-  input: Partial<AndroidNativeLogsConfig>
-): Partial<ResolvedAndroidNativeLogsConfig> {
-  const next: Partial<ResolvedAndroidNativeLogsConfig> = {};
-
-  if (typeof input.enabled === 'boolean') {
-    next.enabled = input.enabled;
-  }
-  if (typeof input.captureLogcat === 'boolean') {
-    next.captureLogcat = input.captureLogcat;
-  }
-  if (typeof input.captureStdoutStderr === 'boolean') {
-    next.captureStdoutStderr = input.captureStdoutStderr;
-  }
-  if (typeof input.captureUncaughtExceptions === 'boolean') {
-    next.captureUncaughtExceptions = input.captureUncaughtExceptions;
-  }
-  if (input.logcatScope != null) {
-    next.logcatScope = input.logcatScope === 'device' ? 'device' : 'app';
-  }
-  if (input.rootMode != null) {
-    next.rootMode = input.rootMode === 'auto' ? 'auto' : 'off';
-  }
-  if (input.buffers != null) {
-    next.buffers = sanitizeAndroidLogcatBuffers(input.buffers);
-  }
-
-  return next;
-}
-
-function sanitizeAndroidLogcatBuffers(
-  buffers: AndroidNativeLogsConfig['buffers']
-): AndroidLogcatBuffer[] {
-  const values = buffers?.filter((buffer): buffer is AndroidLogcatBuffer =>
-    VALID_ANDROID_LOGCAT_BUFFERS.has(buffer)
-  );
-  if (!values?.length) {
-    return [...DEFAULT_ANDROID_LOGCAT_BUFFERS];
-  }
-  return [...new Set(values)];
-}
-
-export function resolveProviderConfig(input: {
-  enabled?: boolean;
-  initialVisible?: boolean;
-  enableNetworkTab?: boolean;
-  maxLogs?: number;
-  maxErrors?: number;
-  maxRequests?: number;
-  androidNativeLogs?: AndroidNativeLogsConfig;
-  locale?: 'auto' | 'en-US' | 'zh-CN' | 'zh-TW' | 'ja';
-  strings?: Partial<InAppDebugStrings>;
-}): ResolvedInAppDebugConfig {
-  const resolved = resolveStrings(input.locale ?? 'zh-CN', input.strings);
-  return {
-    enabled: input.enabled ?? false,
-    initialVisible: input.initialVisible ?? true,
-    enableNetworkTab: input.enableNetworkTab ?? true,
-    maxLogs: input.maxLogs ?? 2000,
-    maxErrors: input.maxErrors ?? 100,
-    maxRequests: input.maxRequests ?? 100,
-    androidNativeLogs: resolveAndroidNativeLogsConfig(input.androidNativeLogs),
-    locale: resolved.locale,
-    strings: resolved.strings,
-  };
-}
+export { resolveProviderConfig } from './config';
 
 export class DebugRuntime {
   private readonly now: () => number;
@@ -262,7 +180,6 @@ export class DebugRuntime {
     strings: defaultStrings,
   };
   private androidNativeLogsOverride: Partial<ResolvedAndroidNativeLogsConfig> | null = null;
-  private manualEnabledOverride: boolean | null = null;
   private logQueue: NativeLogWireEntry[] = [];
   private errorQueue: NativeErrorWireEntry[] = [];
   private networkQueue = new Map<string, DebugNetworkEntry>();
@@ -326,7 +243,6 @@ export class DebugRuntime {
   }
 
   async unregisterProvider() {
-    this.manualEnabledOverride = null;
     this.providerConfig = {
       ...this.providerConfig,
       enabled: false,
@@ -335,13 +251,17 @@ export class DebugRuntime {
   }
 
   async enable() {
-    this.manualEnabledOverride = true;
-    await this.applyConfig();
+    await this.registerProvider({
+      ...this.providerConfig,
+      enabled: true,
+    });
   }
 
   async disable() {
-    this.manualEnabledOverride = false;
-    await this.applyConfig();
+    await this.registerProvider({
+      ...this.providerConfig,
+      enabled: false,
+    });
   }
 
   async configureAndroidNativeLogs(options: Partial<AndroidNativeLogsConfig>) {
@@ -437,10 +357,9 @@ export class DebugRuntime {
 
   private async applyConfig() {
     const mergedConfig = this.getMergedConfig();
-    const resolvedEnabled = this.manualEnabledOverride ?? mergedConfig.enabled;
     const nextConfig = {
       ...mergedConfig,
-      enabled: resolvedEnabled,
+      enabled: mergedConfig.enabled,
     };
     if (this.configured && this.lastAppliedConfig && areResolvedConfigsEqual(this.lastAppliedConfig, nextConfig)) {
       return;
@@ -449,7 +368,7 @@ export class DebugRuntime {
     if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
       this.emitDiagnostic(
         'JSRuntime',
-        `applyConfig start enabled=${resolvedEnabled} network=${nextConfig.enableNetworkTab} ` +
+        `applyConfig start enabled=${nextConfig.enabled} network=${nextConfig.enableNetworkTab} ` +
           `initialVisible=${nextConfig.initialVisible}`
       );
     }
@@ -460,7 +379,7 @@ export class DebugRuntime {
       this.emitDiagnostic('JSRuntime', 'applyConfig native configure resolved');
     }
 
-    if (resolvedEnabled) {
+    if (nextConfig.enabled) {
       this.installCollectors(nextConfig.enableNetworkTab);
       if (nextConfig.initialVisible) {
         await this.dependencies.nativeModule.show();
@@ -582,7 +501,7 @@ export class DebugRuntime {
   }
 
   private enqueueLog(entry: DebugLogEntry) {
-    if (!this.configured || !(this.manualEnabledOverride ?? this.providerConfig.enabled)) {
+    if (!this.configured || !this.providerConfig.enabled) {
       return;
     }
     this.logQueue.push(encodeLogEntry(entry))
@@ -590,7 +509,7 @@ export class DebugRuntime {
   }
 
   private enqueueError(entry: DebugErrorEntry) {
-    if (!this.configured || !(this.manualEnabledOverride ?? this.providerConfig.enabled)) {
+    if (!this.configured || !this.providerConfig.enabled) {
       return;
     }
     this.errorQueue.push(encodeErrorEntry(entry))
@@ -598,7 +517,7 @@ export class DebugRuntime {
   }
 
   private enqueueNetwork(entry: DebugNetworkEntry) {
-    if (!this.configured || !(this.manualEnabledOverride ?? this.providerConfig.enabled)) {
+    if (!this.configured || !this.providerConfig.enabled) {
       return;
     }
 

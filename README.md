@@ -52,7 +52,7 @@ export default function Root() {
 }
 ```
 
-`InAppDebugProvider` 默认是关闭的。只有传入 `enabled={true}`，或运行时调用 `InAppDebugController.enable()` 后，库才会创建运行时并安装 JS / native 采集 hook。
+`InAppDebugProvider` 默认是关闭的。只要挂载了 `InAppDebugProvider`，`enabled` 就是启停调试器的唯一权威开关。只有它变成 `true`，库才会创建运行时并安装 JS / native 采集 hook。
 
 ## 生产环境按需开启
 
@@ -80,9 +80,11 @@ export default function Root() {
 
 建议尽量在应用启动早期完成这个判断。这样命中的内部人员可以拿到更完整的启动期信息，而绝大部分 `enabled={false}` 的用户会保持休眠态。
 
+库内部也会尽量延迟加载公共实现：如果只是 `import 'expo-inapp-debugger'`，但还没有实际渲染 `InAppDebugProvider` / `InAppDebugBoundary`，也没有调用 `InAppDebugController` / `inAppDebug`，入口不会立刻把对应实现模块全部求值。
+
 ## 关闭状态对宿主的影响
 
-如果明确传入 `enabled={false}`，并且没有再调用 `InAppDebugController.enable()` / `show()` / `exportSnapshot()` 这类运行时 API，调试器会保持休眠：
+如果明确传入 `enabled={false}`，并且没有主动去挂载启用态的 Provider，调试器会保持休眠：
 
 - 不 patch `console`、全局错误处理、Promise rejection 或 JS 网络拦截器。
 - 不显示原生浮动按钮或调试面板。
@@ -91,7 +93,9 @@ export default function Root() {
 
 这里的“关闭”指运行期不介入宿主逻辑。只要依赖仍然安装并被原生工程链接，它仍然会带来不可避免的包体、编译产物和 Expo module 注册成本。生产环境如果要求完全零体积、零注册成本，建议用 dev-only 入口或构建变体让生产包不安装 / 不导入这个库。
 
-如果曾经启用过再调用 `disable()`，从 `0.3.0` 开始库会停止采集、隐藏 UI，并尽量释放已占用的 store / overlay / native log 资源；不过已经安装过的底层网络 hook 会进入快速跳过路径，这仍然和“进程启动后从未启用”不是同一个零介入状态。
+即使包入口已经被 `import`，只要还没有真正使用这些公共 API，JS 侧也会尽量保持惰性加载；但如果你已经真实挂载了 `InAppDebugProvider` / `InAppDebugBoundary`，仍然会有少量不可避免的 React 渲染与 Context 成本。要把关闭态开销压到最低，最推荐的仍然是先完成账号 / 远端开关判断，再决定是否导入并挂载这些组件。
+
+如果曾经启用过，再把 Provider 的 `enabled` 切回 `false`，库会停止采集、隐藏 UI，并尽量释放已占用的 store / overlay / native log 资源；不过已经安装过的底层网络 hook 会进入快速跳过路径，这仍然和“进程启动后从未启用”不是同一个零介入状态。
 
 ## 面板说明
 
@@ -202,8 +206,6 @@ import { InAppDebugController } from 'expo-inapp-debugger';
 
 await InAppDebugController.show();
 await InAppDebugController.hide();
-await InAppDebugController.enable();
-await InAppDebugController.disable();
 
 await InAppDebugController.clear('logs');
 await InAppDebugController.clear('network');
@@ -212,6 +214,10 @@ await InAppDebugController.clear('all');
 const snapshot = await InAppDebugController.exportSnapshot();
 console.log(snapshot.logs, snapshot.errors, snapshot.network);
 ```
+
+如果你已经挂载了 `InAppDebugProvider`，请优先通过它的 `enabled` prop 控制启停，不要再混用 `InAppDebugController.enable()` / `disable()`。
+
+`enable()` / `disable()` 仅作为“不挂 Provider 时”的兼容入口保留；一旦 Provider 已经挂载，这两个方法会让位给 Provider，不再覆盖它的状态。
 
 `exportSnapshot()` 会返回：
 

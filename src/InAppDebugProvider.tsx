@@ -1,7 +1,7 @@
 import * as React from 'react';
 import type { InAppDebugProviderProps } from './types';
+import { resolveProviderConfig } from './internal/config';
 import { registerProviderConfig, unregisterProviderConfig } from './internal/singleton';
-import { resolveProviderConfig } from './internal/runtime';
 import { InAppDebugStringsContext } from './internal/strings';
 
 export function InAppDebugProvider({
