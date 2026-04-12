@@ -88,6 +88,7 @@ final class InAppDebuggerOverlayManager {
   static let shared = InAppDebuggerOverlayManager()
 
   private var debugWindow: PassThroughWindow?
+  private weak var presentedPanelController: UIViewController?
   private let rootViewController = UIViewController()
   private var floatingButton: InAppDebuggerFloatingButtonView?
   private var visible = false
@@ -132,7 +133,8 @@ final class InAppDebuggerOverlayManager {
   func hide() {
     DispatchQueue.main.async {
       self.visible = false
-      self.rootViewController.dismiss(animated: false)
+      self.presentedPanelController?.dismiss(animated: false)
+      self.presentedPanelController = nil
       self.floatingButton?.removeFromSuperview()
       self.floatingButton = nil
       self.debugWindow?.isHidden = true
@@ -142,7 +144,8 @@ final class InAppDebuggerOverlayManager {
   func shutdown() {
     DispatchQueue.main.async {
       self.visible = false
-      self.rootViewController.dismiss(animated: false)
+      self.presentedPanelController?.dismiss(animated: false)
+      self.presentedPanelController = nil
       self.floatingButton?.removeFromSuperview()
       self.floatingButton = nil
       self.debugWindow?.isHidden = true
@@ -153,14 +156,34 @@ final class InAppDebuggerOverlayManager {
 
   func presentPanel() {
     DispatchQueue.main.async {
-      guard self.visible, self.rootViewController.presentedViewController == nil else {
+      guard self.visible, self.presentedPanelController == nil else {
         return
       }
       self.refreshForCurrentScene()
+      guard let presenter = self.topPresentingViewController() else {
+        return
+      }
       let panel = InAppDebuggerPanelViewController()
       let nav = UINavigationController(rootViewController: panel)
       nav.modalPresentationStyle = .fullScreen
-      self.rootViewController.present(nav, animated: true)
+      self.presentedPanelController = nav
+      self.debugWindow?.isHidden = true
+      // Present from the app's real view-controller stack instead of the overlay window.
+      // System text selection menus depend on the normal app window/responder environment.
+      presenter.present(nav, animated: true)
+    }
+  }
+
+  func panelDidDismiss() {
+    DispatchQueue.main.async {
+      self.presentedPanelController = nil
+      guard self.visible, InAppDebuggerStore.shared.currentConfig().enabled else {
+        self.debugWindow?.isHidden = true
+        return
+      }
+      self.refreshForCurrentScene()
+      self.debugWindow?.isHidden = false
+      self.ensureFloatingButton()
     }
   }
 
@@ -231,5 +254,39 @@ final class InAppDebuggerOverlayManager {
     UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
       .first(where: { $0.activationState == .foregroundActive })
+  }
+
+  private func topPresentingViewController() -> UIViewController? {
+    guard let scene = activeWindowScene() else {
+      return nil
+    }
+    let appWindows = scene.windows.filter { window in
+      window !== debugWindow &&
+      !window.isHidden &&
+      window.alpha > 0.01 &&
+      window.rootViewController != nil
+    }
+
+    let preferredWindow = appWindows.first(where: { $0.isKeyWindow })
+      ?? appWindows.sorted(by: { $0.windowLevel.rawValue > $1.windowLevel.rawValue }).first
+
+    return topViewController(from: preferredWindow?.rootViewController)
+  }
+
+  private func topViewController(from controller: UIViewController?) -> UIViewController? {
+    if let navigationController = controller as? UINavigationController {
+      return topViewController(from: navigationController.visibleViewController)
+    }
+    if let tabBarController = controller as? UITabBarController {
+      return topViewController(from: tabBarController.selectedViewController)
+    }
+    if let splitViewController = controller as? UISplitViewController,
+       let lastController = splitViewController.viewControllers.last {
+      return topViewController(from: lastController)
+    }
+    if let presentedController = controller?.presentedViewController {
+      return topViewController(from: presentedController)
+    }
+    return controller
   }
 }

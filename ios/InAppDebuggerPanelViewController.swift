@@ -501,6 +501,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     InAppDebuggerNativeNetworkCapture.shared.setPanelActive(false)
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
     isSuspendingLiveUpdatesForScroll = false
+    InAppDebuggerOverlayManager.shared.panelDidDismiss()
   }
 
   deinit {
@@ -2335,13 +2336,15 @@ final class InAppDebuggerTextDetailViewController: UIViewController {
       action: #selector(copyTapped)
     )
 
-    let textView = UITextView()
+    let textView = InAppDebuggerSelectableTextView()
     textView.text = bodyText
+    textView.overrideCopyText = bodyText
     textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
     textView.textColor = PanelColors.text
     textView.backgroundColor = PanelColors.card
-    textView.isEditable = false
+    textView.isScrollEnabled = true
     textView.alwaysBounceVertical = true
+    textView.showsVerticalScrollIndicator = true
     textView.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
     textView.layer.cornerRadius = 8
     textView.layer.borderColor = PanelColors.border.cgColor
@@ -2415,6 +2418,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
 
     stack.axis = .vertical
     stack.spacing = 10
+    scrollView.delaysContentTouches = false
     view.addSubview(scrollView)
     scrollView.addSubview(stack)
     scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -3222,6 +3226,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private func makeSectionBodyView(body: String, monospace: Bool, scrollable: Bool = false) -> UIView {
     let bodyTextView = InAppDebuggerSelectableTextView()
     let presentation = sectionBodyPresentation(body: body, monospace: monospace)
+    bodyTextView.presentsSelectionMenuAutomatically = true
     bodyTextView.font = monospace
       ? .monospacedSystemFont(ofSize: 12, weight: .regular)
       : .systemFont(ofSize: 13, weight: .regular)
@@ -3304,10 +3309,12 @@ private extension String {
   }
 }
 
-private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate {
+private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate, UIEditMenuInteractionDelegate {
   private var lastMeasuredWidth: CGFloat = 0
   private var hasScheduledSelectionMenu = false
+  private var selectionMenuTargetRect: CGRect = .null
   var overrideCopyText: String?
+  var presentsSelectionMenuAutomatically = false
 
   override var text: String! {
     didSet {
@@ -3333,10 +3340,6 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
       lastMeasuredWidth = bounds.width
       invalidateIntrinsicContentSize()
     }
-  }
-
-  override var canBecomeFirstResponder: Bool {
-    true
   }
 
   override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
@@ -3369,6 +3372,9 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     dataDetectorTypes = []
     adjustsFontForContentSizeCategory = true
     delegate = self
+    if #available(iOS 16.0, *) {
+      addInteraction(UIEditMenuInteraction(delegate: self))
+    }
   }
 
   required init?(coder: NSCoder) {
@@ -3376,8 +3382,13 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
   }
 
   func textViewDidChangeSelection(_ textView: UITextView) {
+    guard presentsSelectionMenuAutomatically else {
+      return
+    }
+
     guard selectedRange.length > 0 else {
       hasScheduledSelectionMenu = false
+      dismissSelectionMenu()
       return
     }
     guard !hasScheduledSelectionMenu else {
@@ -3400,17 +3411,49 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     }
     becomeFirstResponder()
 
-    let targetRect: CGRect
+    selectionMenuTargetRect = currentSelectionMenuTargetRect()
+
+    if #available(iOS 16.0, *) {
+      let configuration = UIEditMenuConfiguration(
+        identifier: nil,
+        sourcePoint: CGPoint(
+          x: selectionMenuTargetRect.midX,
+          y: selectionMenuTargetRect.midY
+        )
+      )
+      editMenuInteraction?.presentEditMenu(with: configuration)
+    } else {
+      UIMenuController.shared.showMenu(from: self, rect: selectionMenuTargetRect)
+    }
+  }
+
+  private func dismissSelectionMenu() {
+    if #available(iOS 16.0, *) {
+      editMenuInteraction?.dismissMenu()
+    }
+  }
+
+  private func currentSelectionMenuTargetRect() -> CGRect {
     if let selectedTextRange {
       let rect = firstRect(for: selectedTextRange)
-      targetRect = rect.isNull || rect.isInfinite || rect.isEmpty
-        ? bounds.insetBy(dx: 8, dy: 8)
-        : rect
-    } else {
-      targetRect = bounds.insetBy(dx: 8, dy: 8)
+      if !rect.isNull && !rect.isInfinite && !rect.isEmpty {
+        return rect
+      }
     }
+    return bounds.insetBy(dx: 8, dy: 8)
+  }
 
-    UIMenuController.shared.showMenu(from: self, rect: targetRect)
+  @available(iOS 16.0, *)
+  func editMenuInteraction(
+    _ interaction: UIEditMenuInteraction,
+    targetRectFor configuration: UIEditMenuConfiguration
+  ) -> CGRect {
+    selectionMenuTargetRect
+  }
+
+  @available(iOS 16.0, *)
+  private var editMenuInteraction: UIEditMenuInteraction? {
+    interactions.first(where: { $0 is UIEditMenuInteraction }) as? UIEditMenuInteraction
   }
 }
 
