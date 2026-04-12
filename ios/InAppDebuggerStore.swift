@@ -452,11 +452,23 @@ private final class InAppDebuggerRingBuffer<Element> {
 
   @discardableResult
   func moveAll(to target: InAppDebuggerRingBuffer<Element>) -> Bool {
-    var didChange = false
-    for element in snapshot() {
-      didChange = target.append(element) || didChange
+    guard count > 0 else {
+      return false
     }
-    clear()
+
+    var didChange = false
+    if !storage.isEmpty {
+      for offset in 0..<count {
+        let index = (head + offset) % storage.count
+        if let element = storage[index] {
+          didChange = target.append(element) || didChange
+          storage[index] = nil
+        }
+      }
+    }
+
+    head = 0
+    count = 0
     return didChange
   }
 
@@ -477,7 +489,16 @@ private final class InAppDebuggerRingBuffer<Element> {
   }
 
   func clear() {
-    storage = Array(repeating: nil, count: storage.count)
+    guard count > 0 else {
+      return
+    }
+
+    if !storage.isEmpty {
+      for offset in 0..<count {
+        let index = (head + offset) % storage.count
+        storage[index] = nil
+      }
+    }
     head = 0
     count = 0
   }
@@ -488,15 +509,19 @@ private final class InAppDebuggerRingBuffer<Element> {
       return
     }
 
-    let current = snapshot()
-    storage = Array(repeating: nil, count: nextCapacity)
-    head = 0
-    count = 0
-    guard nextCapacity > 0 else {
-      return
+    var nextStorage = Array<Element?>(repeating: nil, count: nextCapacity)
+    let elementsToKeep = min(count, nextCapacity)
+    if elementsToKeep > 0, !storage.isEmpty {
+      let startOffset = count - elementsToKeep
+      for position in 0..<elementsToKeep {
+        let sourceIndex = (head + startOffset + position) % storage.count
+        nextStorage[position] = storage[sourceIndex]
+      }
     }
 
-    append(contentsOf: Array(current.suffix(nextCapacity)))
+    storage = nextStorage
+    head = 0
+    count = elementsToKeep
   }
 }
 
@@ -569,8 +594,16 @@ private final class InAppDebuggerKeyedRingBuffer<Key: Hashable, Element> {
   }
 
   func clear() {
-    storage = Array(repeating: nil, count: storage.count)
-    keys = Array(repeating: nil, count: keys.count)
+    guard count > 0 else {
+      return
+    }
+
+    for index in storage.indices {
+      storage[index] = nil
+    }
+    for index in keys.indices {
+      keys[index] = nil
+    }
     indexByKey.removeAll(keepingCapacity: true)
     head = 0
     count = 0
@@ -582,18 +615,29 @@ private final class InAppDebuggerKeyedRingBuffer<Key: Hashable, Element> {
       return
     }
 
-    let current = snapshot()
-    storage = Array(repeating: nil, count: nextCapacity)
-    keys = Array(repeating: nil, count: nextCapacity)
-    indexByKey.removeAll(keepingCapacity: true)
-    head = 0
-    count = 0
-    guard nextCapacity > 0 else {
-      return
+    var nextStorage = Array<Element?>(repeating: nil, count: nextCapacity)
+    var nextKeys = Array<Key?>(repeating: nil, count: nextCapacity)
+    var nextIndexByKey: [Key: Int] = [:]
+    nextIndexByKey.reserveCapacity(max(16, nextCapacity))
+
+    let elementsToKeep = min(count, nextCapacity)
+    if elementsToKeep > 0, !storage.isEmpty {
+      let startOffset = count - elementsToKeep
+      for position in 0..<elementsToKeep {
+        let sourceIndex = (head + startOffset + position) % storage.count
+        guard let element = storage[sourceIndex], let elementKey = keys[sourceIndex] else {
+          continue
+        }
+        nextStorage[position] = element
+        nextKeys[position] = elementKey
+        nextIndexByKey[elementKey] = position
+      }
     }
 
-    for element in current.suffix(nextCapacity) {
-      upsert(element)
-    }
+    storage = nextStorage
+    keys = nextKeys
+    indexByKey = nextIndexByKey
+    head = 0
+    count = elementsToKeep
   }
 }

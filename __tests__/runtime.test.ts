@@ -120,6 +120,59 @@ describe('DebugRuntime', () => {
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
   });
 
+  it('skips redundant native reconfiguration when the resolved config does not change', async () => {
+    const nativeModule = {
+      configure: jest.fn().mockResolvedValue(undefined),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => ({
+        enable: jest.fn(),
+        disable: jest.fn(),
+        updateOptions: jest.fn(),
+      }),
+      consoleRef: {
+        log: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    });
+
+    await runtime.registerProvider(
+      resolveProviderConfig({
+        enabled: true,
+        maxLogs: 128,
+        maxRequests: 32,
+        androidNativeLogs: {
+          enabled: true,
+          buffers: ['main', 'crash'],
+        },
+      })
+    );
+    await runtime.registerProvider(
+      resolveProviderConfig({
+        enabled: true,
+        maxLogs: 128,
+        maxRequests: 32,
+        androidNativeLogs: {
+          enabled: true,
+          buffers: ['main', 'crash'],
+        },
+      })
+    );
+
+    expect(nativeModule.configure).toHaveBeenCalledTimes(1);
+    expect(nativeModule.show).toHaveBeenCalledTimes(1);
+    expect(nativeModule.hide).not.toHaveBeenCalled();
+  });
+
   it('captures global errors and unhandled rejections', async () => {
     const nativeModule = {
       configure: jest.fn().mockResolvedValue(undefined),

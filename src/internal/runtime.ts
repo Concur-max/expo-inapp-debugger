@@ -270,6 +270,7 @@ export class DebugRuntime {
   private flushInFlight: Promise<void> | null = null;
   private configured = false;
   private consolePatched = false;
+  private lastAppliedConfig: ResolvedInAppDebugConfig | null = null;
   private originalGlobalHandler: ErrorUtilsHandler | null = null;
   private unhandledRejectionHandler: ((event: unknown) => void) | null = null;
 
@@ -313,11 +314,13 @@ export class DebugRuntime {
 
   async registerProvider(config: ResolvedInAppDebugConfig) {
     this.providerConfig = config;
-    this.emitDiagnostic(
-      'JSRuntime',
-      `registerProvider enabled=${config.enabled} network=${config.enableNetworkTab} ` +
-        `maxLogs=${config.maxLogs} maxRequests=${config.maxRequests}`
-    );
+    if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      this.emitDiagnostic(
+        'JSRuntime',
+        `registerProvider enabled=${config.enabled} network=${config.enableNetworkTab} ` +
+          `maxLogs=${config.maxLogs} maxRequests=${config.maxRequests}`
+      );
+    }
     this.networkCollector.updateOptions({ maxRequests: config.maxRequests });
     await this.applyConfig();
   }
@@ -439,15 +442,23 @@ export class DebugRuntime {
       ...mergedConfig,
       enabled: resolvedEnabled,
     };
-    this.emitDiagnostic(
-      'JSRuntime',
-      `applyConfig start enabled=${resolvedEnabled} network=${nextConfig.enableNetworkTab} ` +
-        `initialVisible=${nextConfig.initialVisible}`
-    );
+    if (this.configured && this.lastAppliedConfig && areResolvedConfigsEqual(this.lastAppliedConfig, nextConfig)) {
+      return;
+    }
+
+    if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      this.emitDiagnostic(
+        'JSRuntime',
+        `applyConfig start enabled=${resolvedEnabled} network=${nextConfig.enableNetworkTab} ` +
+          `initialVisible=${nextConfig.initialVisible}`
+      );
+    }
 
     await this.dependencies.nativeModule.configure(toNativeConfig(nextConfig));
     this.configured = true;
-    this.emitDiagnostic('JSRuntime', 'applyConfig native configure resolved');
+    if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      this.emitDiagnostic('JSRuntime', 'applyConfig native configure resolved');
+    }
 
     if (resolvedEnabled) {
       this.installCollectors(nextConfig.enableNetworkTab);
@@ -456,11 +467,13 @@ export class DebugRuntime {
       } else {
         await this.dependencies.nativeModule.hide();
       }
+      this.lastAppliedConfig = nextConfig;
       return;
     }
 
     this.removeCollectors();
     await this.dependencies.nativeModule.hide();
+    this.lastAppliedConfig = nextConfig;
   }
 
   private installCollectors(enableNetworkCapture: boolean) {
@@ -488,10 +501,12 @@ export class DebugRuntime {
       };
     }
 
-    this.emitDiagnostic(
-      'JSRuntime',
-      `installCollectors consolePatched=${this.consolePatched} network=${enableNetworkCapture}`
-    );
+    if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      this.emitDiagnostic(
+        'JSRuntime',
+        `installCollectors consolePatched=${this.consolePatched} network=${enableNetworkCapture}`
+      );
+    }
     this.installGlobalErrorHandler();
     this.installUnhandledRejectionHandler();
     if (enableNetworkCapture) {
@@ -644,10 +659,12 @@ export class DebugRuntime {
         encodeNetworkEntry(materializeNetworkEntry(entry))
       )
     }
-    this.emitDiagnostic(
-      'JSRuntime',
-      `flush logs=${this.logQueue.length} errors=${this.errorQueue.length} network=${queuedNetworkEntries.size}`
-    );
+    if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      this.emitDiagnostic(
+        'JSRuntime',
+        `flush logs=${this.logQueue.length} errors=${this.errorQueue.length} network=${queuedNetworkEntries.size}`
+      );
+    }
     this.logQueue = [];
     this.errorQueue = [];
     this.networkQueue = new Map<string, DebugNetworkEntry>();
@@ -658,9 +675,13 @@ export class DebugRuntime {
           batch.errors ?? null,
           batch.network ?? null
         );
-        this.emitDiagnostic('JSRuntime', 'flush ingestBatch resolved');
+        if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+          this.emitDiagnostic('JSRuntime', 'flush ingestBatch resolved');
+        }
       } catch (error) {
-        this.emitDiagnostic('JSRuntime', `flush ingestBatch failed error=${String(error)}`);
+        if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+          this.emitDiagnostic('JSRuntime', `flush ingestBatch failed error=${String(error)}`);
+        }
         this.internalWarn('Failed to ingest debug batch', error);
       }
     })();
@@ -678,7 +699,9 @@ export class DebugRuntime {
   }
 
   private internalWarn(message: string, error?: unknown) {
-    this.emitDiagnostic('JSRuntime', `warning message=${message} error=${String(error ?? '')}`);
+    if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
+      this.emitDiagnostic('JSRuntime', `warning message=${message} error=${String(error ?? '')}`);
+    }
     this.originalConsole.warn(`[expo-inapp-debugger] ${message}`, error ?? '');
   }
 
@@ -816,9 +839,81 @@ function encodeHeaderMap(headers: DebugNetworkEntry['requestHeaders']): string[]
     return null;
   }
 
-  const result: string[] = [];
+  const result = new Array<string>(entries.length * 2);
+  let writeIndex = 0;
   for (const [key, value] of entries) {
-    result.push(key, value);
+    result[writeIndex] = key;
+    result[writeIndex + 1] = value;
+    writeIndex += 2;
   }
   return result;
+}
+
+function areResolvedConfigsEqual(
+  lhs: ResolvedInAppDebugConfig,
+  rhs: ResolvedInAppDebugConfig
+): boolean {
+  return (
+    lhs.enabled === rhs.enabled &&
+    lhs.initialVisible === rhs.initialVisible &&
+    lhs.enableNetworkTab === rhs.enableNetworkTab &&
+    lhs.maxLogs === rhs.maxLogs &&
+    lhs.maxErrors === rhs.maxErrors &&
+    lhs.maxRequests === rhs.maxRequests &&
+    lhs.locale === rhs.locale &&
+    areAndroidNativeLogsConfigsEqual(lhs.androidNativeLogs, rhs.androidNativeLogs) &&
+    areStringRecordsEqual(lhs.strings, rhs.strings)
+  );
+}
+
+function areAndroidNativeLogsConfigsEqual(
+  lhs: ResolvedAndroidNativeLogsConfig,
+  rhs: ResolvedAndroidNativeLogsConfig
+): boolean {
+  return (
+    lhs.enabled === rhs.enabled &&
+    lhs.captureLogcat === rhs.captureLogcat &&
+    lhs.captureStdoutStderr === rhs.captureStdoutStderr &&
+    lhs.captureUncaughtExceptions === rhs.captureUncaughtExceptions &&
+    lhs.logcatScope === rhs.logcatScope &&
+    lhs.rootMode === rhs.rootMode &&
+    areStringArraysEqual(lhs.buffers, rhs.buffers)
+  );
+}
+
+function areStringRecordsEqual(lhs: Record<string, string>, rhs: Record<string, string>): boolean {
+  if (lhs === rhs) {
+    return true;
+  }
+
+  const lhsKeys = Object.keys(lhs);
+  if (lhsKeys.length !== Object.keys(rhs).length) {
+    return false;
+  }
+
+  for (const key of lhsKeys) {
+    if (lhs[key] !== rhs[key]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areStringArraysEqual(lhs: string[], rhs: string[]): boolean {
+  if (lhs === rhs) {
+    return true;
+  }
+
+  if (lhs.length !== rhs.length) {
+    return false;
+  }
+
+  for (let index = 0; index < lhs.length; index += 1) {
+    if (lhs[index] !== rhs[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
