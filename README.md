@@ -20,6 +20,8 @@ yarn add expo-inapp-debugger
 bun add expo-inapp-debugger
 ```
 
+仓库维护时如果需要发布 npm 新版本，可参考 [RELEASE.md](./RELEASE.md)。
+
 安装后需要重新构建原生 App：
 
 ```bash
