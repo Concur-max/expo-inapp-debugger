@@ -13,11 +13,6 @@ private let logsTabTitle = "log"
 private let networkTabTitle = "network"
 private let appInfoTabTitle = "app Info"
 
-private enum ToolbarButtonStyle {
-  case primary
-  case neutral
-}
-
 private enum PanelColors {
   static let background = UIColor.systemGroupedBackground
   static let card = UIColor.secondarySystemGroupedBackground
@@ -339,7 +334,7 @@ private func applyPanelNavigationItemAppearance(_ navigationItem: UINavigationIt
   }
 }
 
-final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource {
+final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, UITabBarDelegate, UISearchResultsUpdating {
   private enum ReloadReason {
     case full
     case dataOnly
@@ -353,10 +348,6 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private static let maxIncrementalTableMutationCount = 32
-  private static let topChromeHorizontalInset: CGFloat = 14
-  private static let topChromeTopInset: CGFloat = 10
-  private static let topChromeBottomInset: CGFloat = 14
-  private static let topChromeToContentSpacing: CGFloat = 0
   private static let tableBottomInset: CGFloat = 18
 
   private var activeTab: ActiveTab = .logs
@@ -378,37 +369,28 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var isSuspendingLiveUpdatesForScroll = false
   private var renderedAppInfoSignature = ""
   private var renderedTableTab: ActiveTab?
-  private var lastAppliedFloatingContentInsetTop: CGFloat = -1
+  private var lastAppliedBottomBarInset: CGFloat = -1
+  private var legacySearchFieldWidthConstraint: NSLayoutConstraint?
 
-  private lazy var closeButton: UIButton = {
-    let button = UIButton(type: .close)
-    button.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
-    button.translatesAutoresizingMaskIntoConstraints = false
-    NSLayoutConstraint.activate([
-      button.widthAnchor.constraint(equalToConstant: 30),
-      button.heightAnchor.constraint(equalToConstant: 30),
-    ])
-    return button
+  private lazy var panelSearchController: UISearchController = {
+    let controller = UISearchController(searchResultsController: nil)
+    controller.searchResultsUpdater = self
+    controller.obscuresBackgroundDuringPresentation = false
+    controller.hidesNavigationBarDuringPresentation = false
+    controller.automaticallyShowsCancelButton = false
+
+    let searchField = controller.searchBar.searchTextField
+    searchField.clearButtonMode = .whileEditing
+    searchField.autocapitalizationType = .none
+    searchField.autocorrectionType = .no
+    searchField.smartDashesType = .no
+    searchField.smartQuotesType = .no
+    searchField.smartInsertDeleteType = .no
+    searchField.returnKeyType = .done
+    return controller
   }()
 
-  private lazy var segmentedControl: UISegmentedControl = {
-    let control = UISegmentedControl(items: [logsTabTitle, networkTabTitle, appInfoTabTitle])
-    control.selectedSegmentIndex = 0
-    control.backgroundColor = PanelColors.controlBackground
-    control.selectedSegmentTintColor = PanelColors.card
-    control.setTitleTextAttributes([
-      .foregroundColor: PanelColors.mutedText,
-      .font: UIFont.systemFont(ofSize: 14, weight: .semibold),
-    ], for: .normal)
-    control.setTitleTextAttributes([
-      .foregroundColor: PanelColors.text,
-      .font: UIFont.systemFont(ofSize: 14, weight: .bold),
-    ], for: .selected)
-    control.addTarget(self, action: #selector(handleSegmentChange(_:)), for: .valueChanged)
-    return control
-  }()
-
-  private lazy var searchField: UISearchTextField = {
+  private lazy var legacySearchField: UISearchTextField = {
     let field = UISearchTextField()
     field.clearButtonMode = .whileEditing
     field.autocapitalizationType = .none
@@ -418,56 +400,79 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     field.smartInsertDeleteType = .no
     field.returnKeyType = .done
     field.addTarget(self, action: #selector(searchTextChanged(_:)), for: .editingChanged)
+    field.translatesAutoresizingMaskIntoConstraints = false
+    let widthConstraint = field.widthAnchor.constraint(equalToConstant: 220)
+    widthConstraint.isActive = true
+    legacySearchFieldWidthConstraint = widthConstraint
+    NSLayoutConstraint.activate([
+      field.heightAnchor.constraint(equalToConstant: 36),
+    ])
     return field
   }()
 
-  private lazy var clearButton: UIButton = {
-    let button = makeToolbarButton(
-      systemName: "trash",
-      foregroundColor: .systemRed
+  private lazy var clearBarButtonItem: UIBarButtonItem = {
+    let item = UIBarButtonItem(
+      image: UIImage(systemName: "trash"),
+      style: .plain,
+      target: self,
+      action: #selector(clearTapped)
     )
-    button.addTarget(self, action: #selector(clearTapped), for: .touchUpInside)
-    return button
+    return item
   }()
 
-  private lazy var filterButton: UIButton = {
-    let button = makeToolbarButton(
-      systemName: "line.3.horizontal.decrease",
-      foregroundColor: PanelColors.primary
+  private lazy var menuBarButtonItem: UIBarButtonItem = {
+    let item = UIBarButtonItem(
+      image: UIImage(systemName: "ellipsis.circle"),
+      style: .plain,
+      target: nil,
+      action: nil
     )
-    button.showsMenuAsPrimaryAction = true
-    return button
+    return item
   }()
 
-  private lazy var sortToggleButton: UIButton = {
-    let button = makeToolbarButton(
-      systemName: "arrow.down",
-      foregroundColor: PanelColors.text
+  private lazy var closeBarButtonItem: UIBarButtonItem = {
+    let item = UIBarButtonItem(
+      image: UIImage(systemName: "xmark"),
+      style: .plain,
+      target: self,
+      action: #selector(closeTapped)
     )
-    button.addTarget(self, action: #selector(sortToggleTapped), for: .touchUpInside)
-    return button
+    return item
   }()
 
-  private lazy var actionRow: UIStackView = {
-    let stack = UIStackView(arrangedSubviews: [searchField, filterButton, sortToggleButton, clearButton])
-    stack.axis = .horizontal
-    stack.alignment = .fill
-    stack.spacing = 8
-    return stack
+  private lazy var trailingButtonGroup: UIBarButtonItemGroup = {
+    UIBarButtonItemGroup(
+      barButtonItems: [clearBarButtonItem, menuBarButtonItem, closeBarButtonItem],
+      representativeItem: nil
+    )
   }()
 
-  private lazy var floatingControlsStack: UIStackView = {
-    let stack = UIStackView(arrangedSubviews: [segmentedControl, actionRow])
-    stack.axis = .vertical
-    stack.spacing = 12
-    return stack
-  }()
+  private lazy var logsTabBarItem = UITabBarItem(
+    title: logsTabTitle,
+    image: UIImage(systemName: "doc.text"),
+    tag: ActiveTab.logs.rawValue
+  )
 
-  private let floatingControlsContainer = InAppDebuggerPassThroughView()
-  private let floatingChromeBackgroundView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterial))
-  private let floatingChromeTintView = UIView()
-  private let floatingChromeMaskLayer = CAGradientLayer()
-  private let floatingChromeTintLayer = CAGradientLayer()
+  private lazy var networkTabBarItem = UITabBarItem(
+    title: networkTabTitle,
+    image: UIImage(systemName: "network"),
+    tag: ActiveTab.network.rawValue
+  )
+
+  private lazy var appInfoTabBarItem = UITabBarItem(
+    title: appInfoTabTitle,
+    image: UIImage(systemName: "info.circle"),
+    tag: ActiveTab.appInfo.rawValue
+  )
+
+  private lazy var tabBar: UITabBar = {
+    let bar = UITabBar()
+    bar.delegate = self
+    bar.itemPositioning = .fill
+    bar.items = [logsTabBarItem, networkTabBarItem, appInfoTabBarItem]
+    bar.selectedItem = logsTabBarItem
+    return bar
+  }()
 
   private lazy var tableView: UITableView = {
     let table = UITableView(frame: .zero, style: .plain)
@@ -513,6 +518,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     currentConfig = InAppDebuggerStore.shared.currentConfig()
     view.backgroundColor = PanelColors.background
     navigationItem.largeTitleDisplayMode = .never
+    definesPresentationContext = true
 
     configureNavigationBar()
     layoutUI()
@@ -545,9 +551,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
-    floatingChromeMaskLayer.frame = floatingChromeBackgroundView.bounds
-    floatingChromeTintLayer.frame = floatingChromeTintView.bounds
-    updateFloatingContentInsetsIfNeeded()
+    updateLegacySearchFieldWidthIfNeeded()
+    updateBottomContentInsetsIfNeeded()
   }
 
   override func viewDidDisappear(_ animated: Bool) {
@@ -580,58 +585,46 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func configureNavigationBar() {
-    title = panelTitle
-    closeButton.accessibilityLabel = strings["close"] ?? "关闭"
-    navigationItem.rightBarButtonItem = UIBarButtonItem(customView: closeButton)
+    if #available(iOS 26.0, *) {
+      title = nil
+      navigationItem.titleView = nil
+      navigationItem.searchController = panelSearchController
+      navigationItem.preferredSearchBarPlacement = .integrated
+      navigationItem.searchBarPlacementAllowsToolbarIntegration = false
+      navigationItem.pinnedTrailingGroup = trailingButtonGroup
+      navigationItem.rightBarButtonItems = nil
+    } else {
+      title = panelTitle
+      navigationItem.searchController = nil
+      navigationItem.titleView = legacySearchField
+      if #available(iOS 16.0, *) {
+        navigationItem.pinnedTrailingGroup = nil
+      }
+      navigationItem.rightBarButtonItems = [closeBarButtonItem, menuBarButtonItem, clearBarButtonItem]
+    }
+
+    updateTabBarState()
+    updateSearchPresentation()
+    updateFilterMenu()
+    updateBarButtonItems()
 
     guard let navigationBar = navigationController?.navigationBar else {
       return
     }
     navigationController?.navigationBar.prefersLargeTitles = false
     applyPanelNavigationBarAppearance(to: navigationBar)
-    navigationBar.tintColor = PanelColors.primary
   }
 
   private func layoutUI() {
     view.addSubview(tableView)
     view.addSubview(appInfoScrollView)
-    view.addSubview(floatingControlsContainer)
+    view.addSubview(tabBar)
     appInfoScrollView.addSubview(appInfoStackView)
-
-    floatingControlsContainer.addSubview(floatingChromeBackgroundView)
-    floatingControlsContainer.addSubview(floatingChromeTintView)
-    floatingControlsContainer.addSubview(floatingControlsStack)
 
     tableView.translatesAutoresizingMaskIntoConstraints = false
     appInfoScrollView.translatesAutoresizingMaskIntoConstraints = false
     appInfoStackView.translatesAutoresizingMaskIntoConstraints = false
-    floatingControlsContainer.translatesAutoresizingMaskIntoConstraints = false
-    floatingChromeBackgroundView.translatesAutoresizingMaskIntoConstraints = false
-    floatingChromeTintView.translatesAutoresizingMaskIntoConstraints = false
-    floatingControlsStack.translatesAutoresizingMaskIntoConstraints = false
-
-    floatingChromeBackgroundView.isUserInteractionEnabled = false
-    floatingChromeTintView.isUserInteractionEnabled = false
-    floatingChromeTintView.backgroundColor = .clear
-    floatingChromeMaskLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
-    floatingChromeMaskLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
-    floatingChromeMaskLayer.colors = [
-      UIColor.black.cgColor,
-      UIColor.black.cgColor,
-      UIColor.clear.cgColor,
-    ]
-    floatingChromeMaskLayer.locations = [0.0, 0.96, 1.0]
-    floatingChromeBackgroundView.layer.mask = floatingChromeMaskLayer
-
-    floatingChromeTintLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
-    floatingChromeTintLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
-    floatingChromeTintLayer.colors = [
-      UIColor.systemBackground.withAlphaComponent(0.78).cgColor,
-      UIColor.systemBackground.withAlphaComponent(0.78).cgColor,
-      UIColor.clear.cgColor,
-    ]
-    floatingChromeTintLayer.locations = [0.0, 0.96, 1.0]
-    floatingChromeTintView.layer.addSublayer(floatingChromeTintLayer)
+    tabBar.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
       tableView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -644,163 +637,105 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       appInfoScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       appInfoScrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-      floatingControlsContainer.topAnchor.constraint(equalTo: view.topAnchor),
-      floatingControlsContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      floatingControlsContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-
-      floatingChromeBackgroundView.topAnchor.constraint(equalTo: floatingControlsContainer.topAnchor),
-      floatingChromeBackgroundView.leadingAnchor.constraint(equalTo: floatingControlsContainer.leadingAnchor),
-      floatingChromeBackgroundView.trailingAnchor.constraint(equalTo: floatingControlsContainer.trailingAnchor),
-      floatingChromeBackgroundView.bottomAnchor.constraint(equalTo: floatingControlsContainer.bottomAnchor),
-
-      floatingChromeTintView.topAnchor.constraint(equalTo: floatingControlsContainer.topAnchor),
-      floatingChromeTintView.leadingAnchor.constraint(equalTo: floatingControlsContainer.leadingAnchor),
-      floatingChromeTintView.trailingAnchor.constraint(equalTo: floatingControlsContainer.trailingAnchor),
-      floatingChromeTintView.bottomAnchor.constraint(equalTo: floatingControlsContainer.bottomAnchor),
-
-      floatingControlsStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Self.topChromeTopInset),
-      floatingControlsStack.leadingAnchor.constraint(equalTo: floatingControlsContainer.leadingAnchor, constant: Self.topChromeHorizontalInset),
-      floatingControlsStack.trailingAnchor.constraint(equalTo: floatingControlsContainer.trailingAnchor, constant: -Self.topChromeHorizontalInset),
-      floatingControlsStack.bottomAnchor.constraint(equalTo: floatingControlsContainer.bottomAnchor, constant: -Self.topChromeBottomInset),
-
       appInfoStackView.topAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.topAnchor, constant: 4),
       appInfoStackView.leadingAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.leadingAnchor, constant: 14),
       appInfoStackView.trailingAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.trailingAnchor, constant: -14),
       appInfoStackView.bottomAnchor.constraint(equalTo: appInfoScrollView.contentLayoutGuide.bottomAnchor, constant: -18),
       appInfoStackView.widthAnchor.constraint(equalTo: appInfoScrollView.frameLayoutGuide.widthAnchor, constant: -28),
 
-      segmentedControl.heightAnchor.constraint(equalToConstant: 36),
-      searchField.heightAnchor.constraint(equalToConstant: 36),
-      filterButton.widthAnchor.constraint(equalToConstant: 36),
-      filterButton.heightAnchor.constraint(equalToConstant: 36),
-      sortToggleButton.widthAnchor.constraint(equalToConstant: 36),
-      sortToggleButton.heightAnchor.constraint(equalToConstant: 36),
-      clearButton.widthAnchor.constraint(equalToConstant: 36),
-      clearButton.heightAnchor.constraint(equalToConstant: 36),
+      tabBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      tabBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
   }
 
-  private func updateFloatingContentInsetsIfNeeded() {
-    let safeAreaTop = view.safeAreaLayoutGuide.layoutFrame.minY
-    let floatingHeight = max(
-      0,
-      floatingControlsContainer.frame.maxY - safeAreaTop + Self.topChromeToContentSpacing
-    )
-    guard abs(floatingHeight - lastAppliedFloatingContentInsetTop) > 0.5 else {
+  private func updateLegacySearchFieldWidthIfNeeded() {
+    guard navigationItem.titleView === legacySearchField else {
       return
     }
 
-    lastAppliedFloatingContentInsetTop = floatingHeight
-
-    tableView.contentInset = UIEdgeInsets(
-      top: floatingHeight + 4,
-      left: 0,
-      bottom: Self.tableBottomInset,
-      right: 0
-    )
-    tableView.scrollIndicatorInsets = UIEdgeInsets(
-      top: floatingHeight,
-      left: 0,
-      bottom: Self.tableBottomInset,
-      right: 0
-    )
-
-    appInfoScrollView.contentInset = UIEdgeInsets(
-      top: floatingHeight,
-      left: 0,
-      bottom: Self.tableBottomInset,
-      right: 0
-    )
-    appInfoScrollView.scrollIndicatorInsets = UIEdgeInsets(
-      top: floatingHeight,
-      left: 0,
-      bottom: Self.tableBottomInset,
-      right: 0
-    )
+    let reservedWidth: CGFloat = 156
+    let availableWidth = max(180, min(320, view.bounds.width - reservedWidth))
+    legacySearchFieldWidthConstraint?.constant = availableWidth
   }
 
-  private func makeToolbarButton(systemName: String, foregroundColor: UIColor) -> UIButton {
-    let button = UIButton(type: .system)
-    button.configuration = toolbarButtonConfiguration(
-      systemName: systemName,
-      foregroundColor: foregroundColor,
-      style: .neutral
-    )
-    button.setContentHuggingPriority(.required, for: .horizontal)
-    button.setContentCompressionResistancePriority(.required, for: .horizontal)
-    return button
-  }
-
-  private func toolbarButtonConfiguration(
-    systemName: String,
-    foregroundColor: UIColor,
-    style: ToolbarButtonStyle
-  ) -> UIButton.Configuration {
-    var config: UIButton.Configuration
-    switch style {
-    case .primary:
-      config = .tinted()
-      config.baseBackgroundColor = PanelColors.primary
-      config.baseForegroundColor = .white
-    case .neutral:
-      config = .gray()
-      config.baseForegroundColor = foregroundColor
+  private func updateBottomContentInsetsIfNeeded() {
+    let tabBarHeight = max(0, tabBar.bounds.height)
+    let bottomInset = tabBarHeight + Self.tableBottomInset
+    guard abs(bottomInset - lastAppliedBottomBarInset) > 0.5 else {
+      return
     }
-    config.image = UIImage(systemName: systemName)
-    config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
-      pointSize: 15,
-      weight: .semibold
-    )
-    config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
-    return config
+
+    lastAppliedBottomBarInset = bottomInset
+    tableView.contentInset.bottom = bottomInset
+    tableView.verticalScrollIndicatorInsets.bottom = bottomInset
+    appInfoScrollView.contentInset.bottom = bottomInset
+    appInfoScrollView.verticalScrollIndicatorInsets.bottom = bottomInset
+  }
+
+  private func currentSearchPlaceholder() -> String {
+    activeTab == .network ? localizedNetworkSearchPlaceholder() : panelSearchPlaceholder
+  }
+
+  private func updateSearchPresentation() {
+    let isEnabled = activeTab != .appInfo
+    let placeholder = currentSearchPlaceholder()
+
+    if #available(iOS 26.0, *) {
+      panelSearchController.searchBar.placeholder = placeholder
+      panelSearchController.searchBar.text = searchText
+      panelSearchController.searchBar.isEnabled = isEnabled
+    } else {
+      legacySearchField.placeholder = placeholder
+      legacySearchField.text = searchText
+      legacySearchField.isEnabled = isEnabled
+    }
   }
 
   private func updateFilterMenu() {
     guard activeTab != .appInfo else {
-      filterButton.menu = nil
-      filterButton.configuration = toolbarButtonConfiguration(
-        systemName: "line.3.horizontal.decrease",
-        foregroundColor: PanelColors.primary,
-        style: .neutral
-      )
+      menuBarButtonItem.menu = nil
       return
     }
 
+    let sortOptions = [
+      makePersistentMenuAction(title: localizedSortTitle(ascending: true), state: sortAscending ? .on : .off) { [weak self] in
+        self?.setSortAscending(true)
+      },
+      makePersistentMenuAction(title: localizedSortTitle(ascending: false), state: sortAscending ? .off : .on) { [weak self] in
+        self?.setSortAscending(false)
+      },
+    ]
+    let sortMenu = UIMenu(title: localizedSortMenuTitle(), options: .displayInline, children: sortOptions)
+
     let selectedOrigins = activeTab == .logs ? selectedLogOrigins : selectedNetworkOrigins
-    let originOptions = ["js", "native"].map { origin -> UIAction in
+    let originOptions = ["js", "native"].map { origin in
       let title = localizedOriginTitle(origin, strings: strings)
       let isSelected = selectedOrigins.contains(origin)
-      var attributes: UIMenuElement.Attributes = []
-      if #available(iOS 16.0, *) { attributes.insert(.keepsMenuPresented) }
-      return UIAction(title: title, attributes: attributes, state: isSelected ? .on : .off) { [weak self] _ in
+      return makePersistentMenuAction(title: title, state: isSelected ? .on : .off) { [weak self] in
         self?.toggleOrigin(origin)
       }
     }
 
     let originMenu = UIMenu(title: strings["origin"] ?? "来源", options: .displayInline, children: originOptions)
-    var menuChildren: [UIMenuElement] = [originMenu]
+    var menuChildren: [UIMenuElement] = [sortMenu, originMenu]
     if activeTab == .logs {
-      let levelOptions = ["log", "info", "warn", "error", "debug"].map { level -> UIAction in
+      let levelOptions = ["log", "info", "warn", "error", "debug"].map { level in
         let isSelected = selectedLogLevels.contains(level)
-        var attributes: UIMenuElement.Attributes = []
-        if #available(iOS 16.0, *) { attributes.insert(.keepsMenuPresented) }
-        return UIAction(title: level.uppercased(), attributes: attributes, state: isSelected ? .on : .off) { [weak self] _ in
+        return makePersistentMenuAction(title: level.uppercased(), state: isSelected ? .on : .off) { [weak self] in
           self?.toggleLevel(level)
         }
       }
       let levelMenu = UIMenu(title: strings["level"] ?? "级别", options: .displayInline, children: levelOptions)
       menuChildren.append(levelMenu)
     } else {
-      let kindOptions = NetworkKindFilter.allCases.map { kindFilter -> UIAction in
+      let kindOptions = NetworkKindFilter.allCases.map { kindFilter in
         let kind = kindFilter.rawValue
         let isSelected = selectedNetworkKinds.contains(kind)
-        var attributes: UIMenuElement.Attributes = []
-        if #available(iOS 16.0, *) { attributes.insert(.keepsMenuPresented) }
-        return UIAction(
+        return makePersistentMenuAction(
           title: localizedNetworkKindFilterTitle(kindFilter, locale: currentConfig.locale),
-          attributes: attributes,
           state: isSelected ? .on : .off
-        ) { [weak self] _ in
+        ) { [weak self] in
           self?.toggleNetworkKind(kind)
         }
       }
@@ -812,23 +747,74 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       menuChildren.append(kindMenu)
     }
 
-    filterButton.menu = UIMenu(title: strings["filter"] ?? "筛选", children: menuChildren)
-    
-    let hasFilters: Bool
-    if activeTab == .logs {
-      hasFilters =
-        selectedLogOrigins.count < PanelFilterPreferences.allOrigins.count ||
-        selectedLogLevels.count < PanelFilterPreferences.allLevels.count
-    } else {
-      hasFilters =
-        selectedNetworkOrigins.count < PanelFilterPreferences.allOrigins.count ||
-        selectedNetworkKinds.count < PanelFilterPreferences.allNetworkKinds.count
+    menuBarButtonItem.menu = UIMenu(title: localizedMenuTitle(), children: menuChildren)
+  }
+
+  private func makePersistentMenuAction(
+    title: String,
+    state: UIMenuElement.State = .off,
+    handler: @escaping () -> Void
+  ) -> UIAction {
+    var attributes: UIMenuElement.Attributes = []
+    if #available(iOS 16.0, *) {
+      attributes.insert(.keepsMenuPresented)
     }
-    filterButton.configuration = toolbarButtonConfiguration(
-      systemName: "line.3.horizontal.decrease",
-      foregroundColor: PanelColors.primary,
-      style: hasFilters ? .primary : .neutral
-    )
+    return UIAction(title: title, attributes: attributes, state: state) { _ in
+      handler()
+    }
+  }
+
+  private func updateTabBarState() {
+    logsTabBarItem.title = logsTabTitle
+    networkTabBarItem.title = networkTabTitle
+    appInfoTabBarItem.title = appInfoTabTitle
+    networkTabBarItem.isEnabled = currentConfig.enableNetworkTab
+    tabBar.selectedItem = tabBarItem(for: activeTab)
+  }
+
+  private func updateBarButtonItems() {
+    clearBarButtonItem.accessibilityLabel = strings["clear"] ?? "清空"
+    menuBarButtonItem.accessibilityLabel = localizedMenuTitle()
+    closeBarButtonItem.accessibilityLabel = strings["close"] ?? "关闭"
+
+    let areActionsEnabled = activeTab != .appInfo
+    clearBarButtonItem.isEnabled = areActionsEnabled
+    menuBarButtonItem.isEnabled = areActionsEnabled
+  }
+
+  private func tabBarItem(for tab: ActiveTab) -> UITabBarItem {
+    switch tab {
+    case .logs:
+      return logsTabBarItem
+    case .network:
+      return networkTabBarItem
+    case .appInfo:
+      return appInfoTabBarItem
+    }
+  }
+
+  private func setActiveTab(_ nextTab: ActiveTab) {
+    var resolvedTab = nextTab
+    if resolvedTab == .network && !currentConfig.enableNetworkTab {
+      resolvedTab = .logs
+    }
+    guard resolvedTab != activeTab else {
+      updateTabBarState()
+      return
+    }
+
+    activeTab = resolvedTab
+    view.endEditing(true)
+    if panelSearchController.isActive {
+      panelSearchController.isActive = false
+    }
+    syncNativeCaptureStates()
+    updateTabBarState()
+    updateSearchPresentation()
+    updateFilterMenu()
+    updateBarButtonItems()
+    updateContentVisibility()
+    reloadFromStore()
   }
 
   private func toggleOrigin(_ origin: String) {
@@ -1040,17 +1026,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
 
       configureNavigationBar()
-      segmentedControl.selectedSegmentIndex = activeTab.rawValue
-      segmentedControl.setTitle(logsTabTitle, forSegmentAt: 0)
-      segmentedControl.setTitle(networkTabTitle, forSegmentAt: 1)
-      segmentedControl.setTitle(appInfoTabTitle, forSegmentAt: 2)
-      segmentedControl.setEnabled(currentConfig.enableNetworkTab, forSegmentAt: 1)
-
-      searchField.placeholder = panelSearchPlaceholder
       updateContentVisibility()
-      updateToolbarTitles()
-      updateFilterMenu()
-      updateSortButton()
       if view.window != nil {
         syncNativeCaptureStates()
       }
@@ -1180,29 +1156,14 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     reloadFromStore(reason: .dataOnly, changeSummary: .empty)
   }
 
-  private func updateToolbarTitles() {
-    clearButton.accessibilityLabel = strings["clear"] ?? "清空"
-    filterButton.accessibilityLabel = strings["filter"] ?? "筛选"
-  }
-
   private func updateContentVisibility() {
     let showingAppInfo = activeTab == .appInfo
-    actionRow.isHidden = showingAppInfo
     tableView.isHidden = showingAppInfo
     appInfoScrollView.isHidden = !showingAppInfo
     if showingAppInfo {
       tableView.backgroundView = nil
     }
     view.setNeedsLayout()
-  }
-
-  private func updateSortButton() {
-    sortToggleButton.configuration = toolbarButtonConfiguration(
-      systemName: sortAscending ? "arrow.up" : "arrow.down",
-      foregroundColor: PanelColors.text,
-      style: .neutral
-    )
-    sortToggleButton.accessibilityLabel = localizedSortTitle(ascending: sortAscending)
   }
 
   private func updateEmptyState() {
@@ -1258,6 +1219,32 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       return ascending ? "時間升序" : "時間倒序"
     }
     return ascending ? "时间升序" : "时间倒序"
+  }
+
+  private func localizedSortMenuTitle() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Sort"
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "並び順"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "排序"
+    }
+    return "排序"
+  }
+
+  private func localizedMenuTitle() -> String {
+    if currentConfig.locale.hasPrefix("en") {
+      return "Menu"
+    }
+    if currentConfig.locale.hasPrefix("ja") {
+      return "メニュー"
+    }
+    if currentConfig.locale == "zh-TW" {
+      return "選單"
+    }
+    return "菜单"
   }
 
   private func localizedNetworkSearchPlaceholder() -> String {
@@ -1962,22 +1949,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     dismiss(animated: true)
   }
 
-  @objc private func handleSegmentChange(_ sender: UISegmentedControl) {
-    activeTab = ActiveTab(rawValue: sender.selectedSegmentIndex) ?? .logs
-    if activeTab == .network && !currentConfig.enableNetworkTab {
-      activeTab = .logs
-    }
-    syncNativeCaptureStates()
-    reloadFromStore()
+  func updateSearchResults(for searchController: UISearchController) {
+    applySearchText(searchController.searchBar.text ?? "")
   }
 
   @objc private func searchTextChanged(_ sender: UITextField) {
-    let nextSearchText = sender.text ?? ""
-    guard nextSearchText != searchText else {
-      return
-    }
-    searchText = nextSearchText
-    scheduleSearchReload()
+    applySearchText(sender.text ?? "")
   }
 
   @objc private func clearTapped() {
@@ -1996,9 +1973,28 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
   }
 
-  @objc private func sortToggleTapped() {
-    sortAscending.toggle()
+  private func applySearchText(_ nextSearchText: String) {
+    guard nextSearchText != searchText else {
+      return
+    }
+    searchText = nextSearchText
+    scheduleSearchReload()
+  }
+
+  private func setSortAscending(_ ascending: Bool) {
+    guard sortAscending != ascending else {
+      return
+    }
+    sortAscending = ascending
+    updateFilterMenu()
     reloadFromStore()
+  }
+
+  func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
+    guard let tab = ActiveTab(rawValue: item.tag) else {
+      return
+    }
+    setActiveTab(tab)
   }
 
   func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
@@ -2427,17 +2423,6 @@ private final class InAppDebuggerEmptyStateView: UIView {
     ])
   }
 }
-
-private final class InAppDebuggerPassThroughView: UIView {
-  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-    let hitView = super.hitTest(point, with: event)
-    if hitView === self || hitView is UIStackView {
-      return nil
-    }
-    return hitView
-  }
-}
-
 
 private final class InAppDebuggerPaddedLabel: UILabel {
   var contentInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)

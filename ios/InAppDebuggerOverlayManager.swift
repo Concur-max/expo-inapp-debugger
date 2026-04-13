@@ -26,9 +26,14 @@ final class InAppDebuggerFloatingButtonView: UIView {
   private var viewStart = CGPoint.zero
   private lazy var button: UIButton = {
     let button = UIButton(type: .system)
-    var config = UIButton.Configuration.filled()
-    config.baseBackgroundColor = UIColor(red: 0.12, green: 0.44, blue: 0.36, alpha: 1)
-    config.baseForegroundColor = .white
+    var config: UIButton.Configuration
+    if #available(iOS 26.0, *) {
+      config = .glass()
+    } else {
+      config = .filled()
+      config.baseBackgroundColor = UIColor(red: 0.12, green: 0.44, blue: 0.36, alpha: 1)
+      config.baseForegroundColor = .white
+    }
     config.cornerStyle = .capsule
     config.image = UIImage(systemName: "ladybug.fill")
     config.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 18, bottom: 18, trailing: 18)
@@ -41,10 +46,6 @@ final class InAppDebuggerFloatingButtonView: UIView {
     super.init(frame: frame)
     backgroundColor = .clear
     addSubview(button)
-    layer.shadowColor = UIColor.black.cgColor
-    layer.shadowOpacity = 0.18
-    layer.shadowRadius = 12
-    layer.shadowOffset = CGSize(width: 0, height: 8)
     addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
   }
 
