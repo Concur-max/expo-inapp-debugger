@@ -25,7 +25,8 @@
             "minSdkVersion": 24
           }
         }
-      ]
+      ],
+      "./native-plugins/fmt-xcode-compat-plugin/app.plugin.js"
     ]
   }
 }
