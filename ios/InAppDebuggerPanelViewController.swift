@@ -7,11 +7,11 @@ private enum ActiveTab: Int {
   case appInfo
 }
 
-private let panelTitle = "Debugging panel"
-private let panelSearchPlaceholder = "Please enter"
-private let logsTabTitle = "log"
-private let networkTabTitle = "network"
-private let appInfoTabTitle = "app Info"
+private let panelTitle = "Debugging Panel"
+private let panelSearchPlaceholder = "Search logs..."
+private let logsTabTitle = "Logs"
+private let networkTabTitle = "Network"
+private let appInfoTabTitle = "App Info"
 
 private enum PanelColors {
   static let background = UIColor.systemGroupedBackground
@@ -86,48 +86,33 @@ private func isWebSocketKind(_ kind: String) -> Bool {
   normalizedNetworkKind(kind) == .websocket
 }
 
-private func localizedNetworkTypeTitle(locale: String) -> String {
-  if locale.hasPrefix("en") {
-    return "Request type"
-  }
-  if locale.hasPrefix("ja") {
-    return "通信種別"
-  }
-  if locale == "zh-TW" {
-    return "請求類型"
-  }
-  return "请求类型"
+private func localizedNetworkTypeTitle() -> String {
+  "Request Type"
 }
 
-private func localizedNetworkKindFilterTitle(_ kind: NetworkKindFilter, locale: String) -> String {
+private func localizedNetworkKindFilterTitle(_ kind: NetworkKindFilter) -> String {
   switch kind {
   case .http:
     return "XHR/Fetch"
   case .websocket:
     return "WebSocket"
   case .other:
-    if locale.hasPrefix("en") {
-      return "Other"
-    }
-    if locale.hasPrefix("ja") {
-      return "その他"
-    }
-    return "其他"
+    return "Other"
   }
 }
 
-private func localizedNetworkKindTitle(_ rawKind: String, locale: String) -> String {
+private func localizedNetworkKindTitle(_ rawKind: String) -> String {
   let trimmedKind = rawKind.trimmingCharacters(in: .whitespacesAndNewlines)
   switch normalizedNetworkKind(trimmedKind) {
   case .http:
-    return localizedNetworkKindFilterTitle(.http, locale: locale)
+    return "XHR/Fetch"
   case .websocket:
-    return localizedNetworkKindFilterTitle(.websocket, locale: locale)
+    return "WebSocket"
   case .other:
     if !trimmedKind.isEmpty, trimmedKind.lowercased() != NetworkKindFilter.other.rawValue {
       return trimmedKind.uppercased()
     }
-    return localizedNetworkKindFilterTitle(.other, locale: locale)
+    return "Other"
   }
 }
 
@@ -213,11 +198,11 @@ private func isNativeOrigin(_ origin: String) -> Bool {
   origin.lowercased() == "native"
 }
 
-private func localizedOriginTitle(_ origin: String, strings: [String: String]) -> String {
+private func localizedOriginTitle(_ origin: String) -> String {
   if isNativeOrigin(origin) {
-    return strings["nativeLogOrigin"] ?? "native"
+    return "Native"
   }
-  return strings["jsLogOrigin"] ?? "JS"
+  return "JS"
 }
 
 private let panelByteCountFormatter: ByteCountFormatter = {
@@ -334,7 +319,7 @@ private func applyPanelNavigationItemAppearance(_ navigationItem: UINavigationIt
   }
 }
 
-final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, UITabBarDelegate, UISearchResultsUpdating {
+final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, UITabBarDelegate, UISearchResultsUpdating, UIGestureRecognizerDelegate {
   private enum ReloadReason {
     case full
     case dataOnly
@@ -371,6 +356,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var renderedTableTab: ActiveTab?
   private var lastAppliedBottomBarInset: CGFloat = -1
   private var legacySearchFieldWidthConstraint: NSLayoutConstraint?
+  private lazy var dismissKeyboardTapGestureRecognizer: UITapGestureRecognizer = {
+    let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap))
+    recognizer.cancelsTouchesInView = false
+    recognizer.delegate = self
+    return recognizer
+  }()
 
   private lazy var panelSearchController: UISearchController = {
     let controller = UISearchController(searchResultsController: nil)
@@ -509,10 +500,6 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private let emptyStateView = InAppDebuggerEmptyStateView()
 
-  private var strings: [String: String] {
-    currentConfig.strings
-  }
-
   override func viewDidLoad() {
     super.viewDidLoad()
     currentConfig = InAppDebuggerStore.shared.currentConfig()
@@ -522,6 +509,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
     configureNavigationBar()
     layoutUI()
+    installDismissKeyboardGestureIfNeeded()
     updateFilterMenu()
     reloadFromStore()
 
@@ -540,6 +528,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
     configureNavigationBar()
+    installDismissKeyboardGestureIfNeeded()
   }
 
   override func viewDidAppear(_ animated: Bool) {
@@ -553,6 +542,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     super.viewDidLayoutSubviews()
     updateLegacySearchFieldWidthIfNeeded()
     updateBottomContentInsetsIfNeeded()
+  }
+
+  override func viewWillDisappear(_ animated: Bool) {
+    super.viewWillDisappear(animated)
+    guard isBeingDismissed || navigationController?.isBeingDismissed == true || isMovingFromParent else {
+      return
+    }
+    InAppDebuggerOverlayManager.shared.panelWillDismiss(
+      using: transitionCoordinator ?? navigationController?.transitionCoordinator
+    )
   }
 
   override func viewDidDisappear(_ animated: Bool) {
@@ -575,6 +574,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   deinit {
     scheduledReloadWorkItem?.cancel()
     scheduledSearchWorkItem?.cancel()
+    dismissKeyboardTapGestureRecognizer.view?.removeGestureRecognizer(dismissKeyboardTapGestureRecognizer)
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(false)
     InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
     InAppDebuggerNativeNetworkCapture.shared.setPanelActive(false)
@@ -585,10 +585,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func configureNavigationBar() {
+    let shouldShowSearchControl = activeTab != .appInfo
     if #available(iOS 26.0, *) {
-      title = nil
+      title = shouldShowSearchControl ? nil : panelTitle
       navigationItem.titleView = nil
-      navigationItem.searchController = panelSearchController
+      navigationItem.searchController = shouldShowSearchControl ? panelSearchController : nil
       navigationItem.preferredSearchBarPlacement = .integrated
       navigationItem.searchBarPlacementAllowsToolbarIntegration = false
       navigationItem.pinnedTrailingGroup = trailingButtonGroup
@@ -596,7 +597,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     } else {
       title = panelTitle
       navigationItem.searchController = nil
-      navigationItem.titleView = legacySearchField
+      navigationItem.titleView = shouldShowSearchControl ? legacySearchField : nil
       if #available(iOS 16.0, *) {
         navigationItem.pinnedTrailingGroup = nil
       }
@@ -659,6 +660,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     legacySearchFieldWidthConstraint?.constant = availableWidth
   }
 
+  private func installDismissKeyboardGestureIfNeeded() {
+    guard let containerView = navigationController?.view ?? view else {
+      return
+    }
+    guard dismissKeyboardTapGestureRecognizer.view !== containerView else {
+      return
+    }
+    dismissKeyboardTapGestureRecognizer.view?.removeGestureRecognizer(dismissKeyboardTapGestureRecognizer)
+    containerView.addGestureRecognizer(dismissKeyboardTapGestureRecognizer)
+  }
+
   private func updateBottomContentInsetsIfNeeded() {
     let tabBarHeight = max(0, tabBar.bounds.height)
     let bottomInset = tabBarHeight + Self.tableBottomInset
@@ -678,17 +690,20 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateSearchPresentation() {
-    let isEnabled = activeTab != .appInfo
+    let shouldShowSearchControl = activeTab != .appInfo
     let placeholder = currentSearchPlaceholder()
 
     if #available(iOS 26.0, *) {
+      title = shouldShowSearchControl ? nil : panelTitle
+      navigationItem.searchController = shouldShowSearchControl ? panelSearchController : nil
       panelSearchController.searchBar.placeholder = placeholder
       panelSearchController.searchBar.text = searchText
-      panelSearchController.searchBar.isEnabled = isEnabled
+      panelSearchController.searchBar.isEnabled = shouldShowSearchControl
     } else {
+      navigationItem.titleView = shouldShowSearchControl ? legacySearchField : nil
       legacySearchField.placeholder = placeholder
       legacySearchField.text = searchText
-      legacySearchField.isEnabled = isEnabled
+      legacySearchField.isEnabled = shouldShowSearchControl
     }
   }
 
@@ -710,14 +725,14 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
     let selectedOrigins = activeTab == .logs ? selectedLogOrigins : selectedNetworkOrigins
     let originOptions = ["js", "native"].map { origin in
-      let title = localizedOriginTitle(origin, strings: strings)
+      let title = localizedOriginTitle(origin)
       let isSelected = selectedOrigins.contains(origin)
       return makePersistentMenuAction(title: title, state: isSelected ? .on : .off) { [weak self] in
         self?.toggleOrigin(origin)
       }
     }
 
-    let originMenu = UIMenu(title: strings["origin"] ?? "来源", options: .displayInline, children: originOptions)
+    let originMenu = UIMenu(title: "Origin", options: .displayInline, children: originOptions)
     var menuChildren: [UIMenuElement] = [sortMenu, originMenu]
     if activeTab == .logs {
       let levelOptions = ["log", "info", "warn", "error", "debug"].map { level in
@@ -726,21 +741,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
           self?.toggleLevel(level)
         }
       }
-      let levelMenu = UIMenu(title: strings["level"] ?? "级别", options: .displayInline, children: levelOptions)
+      let levelMenu = UIMenu(title: "Level", options: .displayInline, children: levelOptions)
       menuChildren.append(levelMenu)
     } else {
       let kindOptions = NetworkKindFilter.allCases.map { kindFilter in
         let kind = kindFilter.rawValue
         let isSelected = selectedNetworkKinds.contains(kind)
         return makePersistentMenuAction(
-          title: localizedNetworkKindFilterTitle(kindFilter, locale: currentConfig.locale),
+          title: localizedNetworkKindFilterTitle(kindFilter),
           state: isSelected ? .on : .off
         ) { [weak self] in
           self?.toggleNetworkKind(kind)
         }
       }
       let kindMenu = UIMenu(
-        title: localizedNetworkTypeTitle(locale: currentConfig.locale),
+        title: localizedNetworkTypeTitle(),
         options: .displayInline,
         children: kindOptions
       )
@@ -773,9 +788,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateBarButtonItems() {
-    clearBarButtonItem.accessibilityLabel = strings["clear"] ?? "清空"
+    clearBarButtonItem.accessibilityLabel = "Clear"
     menuBarButtonItem.accessibilityLabel = localizedMenuTitle()
-    closeBarButtonItem.accessibilityLabel = strings["close"] ?? "关闭"
+    closeBarButtonItem.accessibilityLabel = "Close"
 
     let areActionsEnabled = activeTab != .appInfo
     clearBarButtonItem.isEnabled = areActionsEnabled
@@ -804,10 +819,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
 
     activeTab = resolvedTab
-    view.endEditing(true)
-    if panelSearchController.isActive {
-      panelSearchController.isActive = false
-    }
+    deactivateSearchInput()
     syncNativeCaptureStates()
     updateTabBarState()
     updateSearchPresentation()
@@ -898,9 +910,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         withIdentifier: InAppDebuggerLogCell.reuseIdentifier,
         for: indexPath
       ) as? InAppDebuggerLogCell
-      cell?.configure(entry: entry, strings: strings) { [weak self] in
-        self?.copy(text: entry.message, successKey: "copySingleSuccess")
-      }
+      cell?.configure(entry: entry)
       return cell ?? UITableViewCell()
     case .network:
       guard displayedNetwork.indices.contains(indexPath.row) else {
@@ -911,7 +921,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         withIdentifier: InAppDebuggerNetworkCell.reuseIdentifier,
         for: indexPath
       ) as? InAppDebuggerNetworkCell
-      cell?.configure(entry: entry, strings: strings)
+      cell?.configure(entry: entry)
       return cell ?? UITableViewCell()
     case .appInfo:
       return UITableViewCell()
@@ -1077,7 +1087,6 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let selectedNetworkOrigins = selectedNetworkOrigins
     let selectedNetworkKinds = selectedNetworkKinds
     let sortAscending = sortAscending
-    let locale = currentConfig.locale
 
     filteringQueue.async { [weak self] in
       let nextNetwork = autoreleasepool {
@@ -1086,8 +1095,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
           query: query,
           selectedNetworkOrigins: selectedNetworkOrigins,
           selectedNetworkKinds: selectedNetworkKinds,
-          sortAscending: sortAscending,
-          locale: locale
+          sortAscending: sortAscending
         )
       }
       DispatchQueue.main.async { [weak self] in
@@ -1183,8 +1191,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let detail: String
     if activeTab == .logs {
       title = hasSearch || selectedLogLevels.isEmpty
-        ? strings["noSearchResult"] ?? "未找到匹配的日志"
-        : strings["noLogs"] ?? "暂无日志"
+        ? "No matching logs found"
+        : "No logs yet"
       detail = selectedLogOrigins.isEmpty
         ? localizedNoLogOriginHint()
         : (selectedLogLevels.isEmpty ? localizedNoLevelHint() : localizedEmptyHint())
@@ -1193,7 +1201,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       let isKindEmpty = selectedNetworkKinds.isEmpty
       title = hasSearch || isOriginEmpty || isKindEmpty
         ? localizedNoNetworkResultTitle()
-        : strings["noNetworkRequests"] ?? "暂无网络请求"
+        : "No network requests yet"
       if isOriginEmpty && isKindEmpty {
         detail = localizedNoNetworkFilterHint()
       } else if isOriginEmpty {
@@ -1209,146 +1217,47 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func localizedSortTitle(ascending: Bool) -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return ascending ? "Time Asc" : "Time Desc"
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return ascending ? "時間昇順" : "時間降順"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return ascending ? "時間升序" : "時間倒序"
-    }
-    return ascending ? "时间升序" : "时间倒序"
+    ascending ? "Time Asc" : "Time Desc"
   }
 
   private func localizedSortMenuTitle() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Sort"
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "並び順"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "排序"
-    }
-    return "排序"
+    "Sort"
   }
 
   private func localizedMenuTitle() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Menu"
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "メニュー"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "選單"
-    }
-    return "菜单"
+    "Menu"
   }
 
   private func localizedNetworkSearchPlaceholder() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Search network..."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "通信を検索..."
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "搜尋網路請求..."
-    }
-    return "搜索网络请求..."
+    "Search network requests..."
   }
 
   private func localizedEmptyHint() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Try another keyword or generate new events."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "別のキーワードを試すか、新しいイベントを生成してください。"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "換個關鍵字，或產生新的事件。"
-    }
-    return "换个关键词，或生成新的调试事件。"
+    "Try another keyword or generate new events."
   }
 
   private func localizedNoLevelHint() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Select at least one level to show logs."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "少なくとも 1 つのレベルを選択してください。"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "至少選擇一個級別。"
-    }
-    return "至少选择一个日志级别。"
+    "Select at least one level to show logs."
   }
 
   private func localizedNoLogOriginHint() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Select JS or native to show logs."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "JS または native を選択してください。"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "請選擇 JS 或 native 日誌。"
-    }
-    return "请选择 JS 或 native 日志。"
+    "Select JS or Native to show logs."
   }
 
   private func localizedNoNetworkOriginHint() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Select JS or native to show network entries."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "JS または native を選択してください。"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "請選擇 JS 或 native 網路請求。"
-    }
-    return "请选择 JS 或 native 网络请求。"
+    "Select JS or Native to show network entries."
   }
 
   private func localizedNoNetworkKindHint() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Select at least one request type to show network entries."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "少なくとも 1 つの通信種別を選択してください。"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "至少選擇一種請求類型。"
-    }
-    return "至少选择一种请求类型。"
+    "Select at least one request type to show network entries."
   }
 
   private func localizedNoNetworkFilterHint() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "Select at least one source and request type to show network entries."
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "少なくとも 1 つの送信元と通信種別を選択してください。"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "至少選擇一種來源與請求類型。"
-    }
-    return "至少选择一种来源和请求类型。"
+    "Select at least one source and request type to show network entries."
   }
 
   private func localizedNoNetworkResultTitle() -> String {
-    if currentConfig.locale.hasPrefix("en") {
-      return "No matching network requests found"
-    }
-    if currentConfig.locale.hasPrefix("ja") {
-      return "一致する通信が見つかりません"
-    }
-    if currentConfig.locale == "zh-TW" {
-      return "未找到符合的網路請求"
-    }
-    return "未找到匹配的网络请求"
+    "No matching network requests found"
   }
 
   private func shouldReload(for changeSummary: StoreChangeSummary) -> Bool {
@@ -1630,8 +1539,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     query: String,
     selectedNetworkOrigins: Set<String>,
     selectedNetworkKinds: Set<String>,
-    sortAscending: Bool,
-    locale: String
+    sortAscending: Bool
   ) -> [DebugNetworkEntry] {
     guard !source.isEmpty, !selectedNetworkOrigins.isEmpty, !selectedNetworkKinds.isEmpty else {
       return []
@@ -1652,7 +1560,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         return false
       }
       if !query.isEmpty {
-        let kindTitle = localizedNetworkKindTitle(entry.kind, locale: locale)
+        let kindTitle = localizedNetworkKindTitle(entry.kind)
         let matchesQuery =
           entry.url.localizedCaseInsensitiveContains(query) ||
           entry.origin.localizedCaseInsensitiveContains(query) ||
@@ -1997,6 +1905,20 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     setActiveTab(tab)
   }
 
+  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    guard gestureRecognizer === dismissKeyboardTapGestureRecognizer else {
+      return true
+    }
+    let touchedView = touch.view
+    if isView(touchedView, descendantOf: legacySearchField) {
+      return false
+    }
+    if isView(touchedView, descendantOf: panelSearchController.searchBar) {
+      return false
+    }
+    return true
+  }
+
   func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
     switch activeTab {
     case .logs:
@@ -2021,7 +1943,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       }
       let entry = displayedLogs[indexPath.row]
       let detail = InAppDebuggerTextDetailViewController(
-        titleText: "[\(localizedOriginTitle(entry.origin, strings: strings))] [\(entry.type.uppercased())] \(entry.timestamp)",
+        titleText: "[\(localizedOriginTitle(entry.origin))] [\(entry.type.uppercased())] \(entry.timestamp)",
         bodyText: logDetailBody(for: entry)
       )
       navigationController?.pushViewController(detail, animated: true)
@@ -2039,7 +1961,15 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
   }
 
+  @objc private func handleBackgroundTap() {
+    deactivateSearchInput()
+  }
+
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    guard scrollView === tableView || scrollView === appInfoScrollView else {
+      return
+    }
+    deactivateSearchInput()
     guard scrollView === tableView else {
       return
     }
@@ -2060,9 +1990,25 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     resumeLiveUpdatesAfterScrollIfNeeded()
   }
 
-  private func copy(text: String, successKey: String) {
-    UIPasteboard.general.string = text
-    showToast(message: strings[successKey] ?? "已复制")
+  private func deactivateSearchInput() {
+    navigationController?.view.endEditing(true)
+    view.endEditing(true)
+    legacySearchField.resignFirstResponder()
+    panelSearchController.searchBar.searchTextField.resignFirstResponder()
+    if panelSearchController.isActive {
+      panelSearchController.isActive = false
+    }
+  }
+
+  private func isView(_ view: UIView?, descendantOf ancestor: UIView) -> Bool {
+    var current = view
+    while let currentView = current {
+      if currentView === ancestor {
+        return true
+      }
+      current = currentView.superview
+    }
+    return false
   }
 }
 
@@ -2075,9 +2021,7 @@ private final class InAppDebuggerLogCell: UITableViewCell {
   private let levelLabel = InAppDebuggerPaddedLabel()
   private let timeLabel = UILabel()
   private let contextLabel = UILabel()
-  private let messageLabel = UILabel()
-  private let copyButton = UIButton(type: .system)
-  private var onCopy: (() -> Void)?
+  private let messageTextView = InAppDebuggerSelectableTextView()
 
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
     super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -2090,14 +2034,14 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
   override func prepareForReuse() {
     super.prepareForReuse()
-    onCopy = nil
+    messageTextView.selectedRange = NSRange(location: 0, length: 0)
+    messageTextView.overrideCopyText = nil
   }
 
-  func configure(entry: DebugLogEntry, strings: [String: String], onCopy: @escaping () -> Void) {
-    self.onCopy = onCopy
+  func configure(entry: DebugLogEntry) {
     let tone = toneForLogLevel(entry.type)
     accentView.backgroundColor = tone.foreground
-    originLabel.text = localizedOriginTitle(entry.origin, strings: strings)
+    originLabel.text = localizedOriginTitle(entry.origin)
     originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
     originLabel.backgroundColor = isNativeOrigin(entry.origin) ? PanelColors.primary : PanelColors.controlBackground
     levelLabel.text = entry.type.uppercased()
@@ -2107,9 +2051,7 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     let contextText = entry.context ?? ""
     contextLabel.text = contextText
     contextLabel.isHidden = entry.origin != "native" || contextText.isEmpty
-    messageLabel.text = entry.message
-    copyButton.tintColor = tone.foreground
-    copyButton.accessibilityLabel = strings["copySingleA11y"] ?? "复制该条日志"
+    messageTextView.text = entry.message
   }
 
   private func buildUI() {
@@ -2141,23 +2083,18 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     contextLabel.numberOfLines = 1
     contextLabel.lineBreakMode = .byTruncatingMiddle
 
-    messageLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-    messageLabel.textColor = PanelColors.text
-    messageLabel.numberOfLines = 4
-    messageLabel.lineBreakMode = .byTruncatingTail
+    messageTextView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+    messageTextView.textColor = PanelColors.text
+    messageTextView.presentsSelectionMenuAutomatically = true
+    messageTextView.textContainer.maximumNumberOfLines = 4
+    messageTextView.textContainer.lineBreakMode = .byTruncatingTail
 
-    var copyConfig = UIButton.Configuration.plain()
-    copyConfig.image = UIImage(systemName: "doc.on.doc")
-    copyConfig.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4)
-    copyButton.configuration = copyConfig
-    copyButton.addTarget(self, action: #selector(copyTapped), for: .touchUpInside)
-
-    let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView(), copyButton])
+    let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView()])
     headerStack.axis = .horizontal
     headerStack.alignment = .center
     headerStack.spacing = 8
 
-    let bodyStack = UIStackView(arrangedSubviews: [headerStack, contextLabel, messageLabel])
+    let bodyStack = UIStackView(arrangedSubviews: [headerStack, contextLabel, messageTextView])
     bodyStack.axis = .vertical
     bodyStack.spacing = 8
 
@@ -2167,7 +2104,6 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     cardView.translatesAutoresizingMaskIntoConstraints = false
     accentView.translatesAutoresizingMaskIntoConstraints = false
     bodyStack.translatesAutoresizingMaskIntoConstraints = false
-    copyButton.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
       cardView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5),
@@ -2184,14 +2120,7 @@ private final class InAppDebuggerLogCell: UITableViewCell {
       bodyStack.leadingAnchor.constraint(equalTo: accentView.trailingAnchor, constant: 12),
       bodyStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
       bodyStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
-
-      copyButton.widthAnchor.constraint(equalToConstant: 30),
-      copyButton.heightAnchor.constraint(equalToConstant: 30),
     ])
-  }
-
-  @objc private func copyTapped() {
-    onCopy?()
   }
 }
 
@@ -2217,10 +2146,10 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     nil
   }
 
-  func configure(entry: DebugNetworkEntry, strings: [String: String]) {
+  func configure(entry: DebugNetworkEntry) {
     let tone = toneForNetwork(entry)
     accentView.backgroundColor = tone.foreground
-    originLabel.text = localizedOriginTitle(entry.origin, strings: strings)
+    originLabel.text = localizedOriginTitle(entry.origin)
     originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
     originLabel.backgroundColor = isNativeOrigin(entry.origin) ? PanelColors.primary : PanelColors.controlBackground
     methodLabel.text = entry.method.uppercased()
@@ -2236,9 +2165,9 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
     if isWebSocketKind(entry.kind) {
       let incoming = entry.messageCountIn ?? 0
       let outgoing = entry.messageCountOut ?? 0
-      durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-") · IN \(incoming) / OUT \(outgoing)"
+      durationLabel.text = "Duration \(entry.durationMs.map { "\($0)ms" } ?? "-") · IN \(incoming) / OUT \(outgoing)"
     } else {
-      durationLabel.text = "\(strings["duration"] ?? "耗时") \(entry.durationMs.map { "\($0)ms" } ?? "-")"
+      durationLabel.text = "Duration \(entry.durationMs.map { "\($0)ms" } ?? "-")"
     }
   }
 
@@ -3886,37 +3815,5 @@ private final class InAppDebuggerIntrinsicScrollView: UIScrollView {
       lastMeasuredContentHeight = contentSize.height
       invalidateIntrinsicContentSize()
     }
-  }
-}
-
-private extension UIViewController {
-  func showToast(message: String) {
-    let label = UILabel()
-    label.text = message
-    label.textColor = .white
-    label.backgroundColor = UIColor.black.withAlphaComponent(0.76)
-    label.textAlignment = .center
-    label.font = .systemFont(ofSize: 14, weight: .semibold)
-    label.layer.cornerRadius = 8
-    label.layer.masksToBounds = true
-    label.alpha = 0
-    view.addSubview(label)
-    label.translatesAutoresizingMaskIntoConstraints = false
-    NSLayoutConstraint.activate([
-      label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-      label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
-      label.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
-      label.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
-      label.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
-    ])
-    UIView.animate(withDuration: 0.2, animations: {
-      label.alpha = 1
-    }, completion: { _ in
-      UIView.animate(withDuration: 0.2, delay: 1.1, options: [], animations: {
-        label.alpha = 0
-      }, completion: { _ in
-        label.removeFromSuperview()
-      })
-    })
   }
 }

@@ -13,11 +13,7 @@ public final class InAppDebuggerModule: Module {
         enableNetworkTab: rawConfig["enableNetworkTab"] as? Bool ?? true,
         maxLogs: (rawConfig["maxLogs"] as? NSNumber)?.intValue ?? 2000,
         maxErrors: (rawConfig["maxErrors"] as? NSNumber)?.intValue ?? 100,
-        maxRequests: (rawConfig["maxRequests"] as? NSNumber)?.intValue ?? 100,
-        locale: rawConfig["locale"] as? String ?? "en-US",
-        strings: (rawConfig["strings"] as? [String: Any])?.reduce(into: [:]) { partialResult, item in
-          partialResult[item.key] = item.value as? String ?? "\(item.value)"
-        } ?? [:]
+        maxRequests: (rawConfig["maxRequests"] as? NSNumber)?.intValue ?? 100
       )
       if !config.enabled && !inAppDebuggerNativeRuntimeActive {
         return

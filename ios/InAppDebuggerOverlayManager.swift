@@ -1,5 +1,7 @@
 import UIKit
 
+private let liquidGlassFloatingButtonAlpha: CGFloat = 0.86
+
 final class PassThroughWindow: UIWindow {
   override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
     guard let rootView = rootViewController?.view else {
@@ -29,6 +31,7 @@ final class InAppDebuggerFloatingButtonView: UIView {
     var config: UIButton.Configuration
     if #available(iOS 26.0, *) {
       config = .glass()
+      button.alpha = liquidGlassFloatingButtonAlpha
     } else {
       config = .filled()
       config.baseBackgroundColor = UIColor(red: 0.12, green: 0.44, blue: 0.36, alpha: 1)
@@ -93,6 +96,7 @@ final class InAppDebuggerOverlayManager {
   private let rootViewController = UIViewController()
   private var floatingButton: InAppDebuggerFloatingButtonView?
   private var visible = false
+  private var isRestoringFloatingButtonDuringDismissal = false
   private var observers: [NSObjectProtocol] = []
 
   private init() {
@@ -110,7 +114,7 @@ final class InAppDebuggerOverlayManager {
 
   func apply(config: DebugConfig) {
     InAppDebuggerStore.shared.update(config: config)
-    DispatchQueue.main.async {
+    performOnMain {
       if !config.enabled {
         self.visible = false
         self.hide()
@@ -123,17 +127,16 @@ final class InAppDebuggerOverlayManager {
   }
 
   func show() {
-    DispatchQueue.main.async {
+    performOnMain {
       self.visible = true
       self.refreshForCurrentScene()
-      self.debugWindow?.isHidden = false
-      self.ensureFloatingButton()
     }
   }
 
   func hide() {
-    DispatchQueue.main.async {
+    performOnMain {
       self.visible = false
+      self.isRestoringFloatingButtonDuringDismissal = false
       self.presentedPanelController?.dismiss(animated: false)
       self.presentedPanelController = nil
       self.floatingButton?.removeFromSuperview()
@@ -143,8 +146,9 @@ final class InAppDebuggerOverlayManager {
   }
 
   func shutdown() {
-    DispatchQueue.main.async {
+    performOnMain {
       self.visible = false
+      self.isRestoringFloatingButtonDuringDismissal = false
       self.presentedPanelController?.dismiss(animated: false)
       self.presentedPanelController = nil
       self.floatingButton?.removeFromSuperview()
@@ -156,7 +160,7 @@ final class InAppDebuggerOverlayManager {
   }
 
   func presentPanel() {
-    DispatchQueue.main.async {
+    performOnMain {
       guard self.visible, self.presentedPanelController == nil else {
         return
       }
@@ -167,29 +171,72 @@ final class InAppDebuggerOverlayManager {
       let panel = InAppDebuggerPanelViewController()
       let nav = UINavigationController(rootViewController: panel)
       nav.modalPresentationStyle = .fullScreen
+      self.ensureFloatingButton()
+      let floatingButton = self.floatingButton
+      floatingButton?.isHidden = false
+      floatingButton?.alpha = 1
+      floatingButton?.isUserInteractionEnabled = false
       self.presentedPanelController = nav
-      self.debugWindow?.isHidden = true
       // Present from the app's real view-controller stack instead of the overlay window.
       // System text selection menus depend on the normal app window/responder environment.
       presenter.present(nav, animated: true)
+      guard let transitionCoordinator = nav.transitionCoordinator ?? presenter.transitionCoordinator else {
+        self.applyOverlayState()
+        return
+      }
+      transitionCoordinator.animate(alongsideTransition: { _ in
+        floatingButton?.alpha = 0
+      }, completion: { context in
+        floatingButton?.alpha = 1
+        if context.isCancelled {
+          self.presentedPanelController = nil
+        }
+        self.applyOverlayState()
+      })
+    }
+  }
+
+  func panelWillDismiss(using transitionCoordinator: UIViewControllerTransitionCoordinator?) {
+    performOnMain {
+      guard self.visible, InAppDebuggerStore.shared.currentConfig().enabled, self.presentedPanelController != nil else {
+        return
+      }
+      self.isRestoringFloatingButtonDuringDismissal = true
+      self.refreshForCurrentScene()
+      self.floatingButton?.alpha = 0
+      self.floatingButton?.isUserInteractionEnabled = false
+      guard let transitionCoordinator else {
+        self.floatingButton?.alpha = 1
+        return
+      }
+      transitionCoordinator.animate(alongsideTransition: { _ in
+        self.floatingButton?.alpha = 1
+      }, completion: { context in
+        if context.isCancelled {
+          self.isRestoringFloatingButtonDuringDismissal = false
+          self.applyOverlayState()
+          return
+        }
+        self.floatingButton?.alpha = 1
+      })
     }
   }
 
   func panelDidDismiss() {
-    DispatchQueue.main.async {
+    performOnMain {
       self.presentedPanelController = nil
+      self.isRestoringFloatingButtonDuringDismissal = false
       guard self.visible, InAppDebuggerStore.shared.currentConfig().enabled else {
         self.debugWindow?.isHidden = true
         return
       }
       self.refreshForCurrentScene()
-      self.debugWindow?.isHidden = false
-      self.ensureFloatingButton()
     }
   }
 
   private func refreshForCurrentScene() {
     guard let scene = activeWindowScene(), InAppDebuggerStore.shared.currentConfig().enabled else {
+      debugWindow?.isHidden = true
       return
     }
     if debugWindow?.windowScene !== scene {
@@ -205,8 +252,7 @@ final class InAppDebuggerOverlayManager {
     }
     debugWindow?.frame = scene.coordinateSpace.bounds
     rootViewController.view.frame = debugWindow?.bounds ?? scene.coordinateSpace.bounds
-    debugWindow?.isHidden = !visible
-    updateFloatingButtonFrameIfNeeded()
+    applyOverlayState()
   }
 
   private func ensureFloatingButton() {
@@ -225,6 +271,28 @@ final class InAppDebuggerOverlayManager {
     }
     container.addSubview(button)
     floatingButton = button
+  }
+
+  private func applyOverlayState() {
+    let shouldKeepWindowVisible = visible && InAppDebuggerStore.shared.currentConfig().enabled
+    guard shouldKeepWindowVisible else {
+      floatingButton?.isHidden = true
+      floatingButton?.alpha = 1
+      floatingButton?.isUserInteractionEnabled = false
+      debugWindow?.isHidden = true
+      return
+    }
+
+    debugWindow?.isHidden = false
+    ensureFloatingButton()
+
+    let shouldShowFloatingButton = presentedPanelController == nil || isRestoringFloatingButtonDuringDismissal
+    floatingButton?.isHidden = !shouldShowFloatingButton
+    floatingButton?.alpha = 1
+    floatingButton?.isUserInteractionEnabled = shouldShowFloatingButton && presentedPanelController == nil
+    if shouldShowFloatingButton {
+      updateFloatingButtonFrameIfNeeded()
+    }
   }
 
   private func updateFloatingButtonFrameIfNeeded() {
@@ -289,5 +357,13 @@ final class InAppDebuggerOverlayManager {
       return topViewController(from: presentedController)
     }
     return controller
+  }
+
+  private func performOnMain(_ work: @escaping () -> Void) {
+    if Thread.isMainThread {
+      work()
+      return
+    }
+    DispatchQueue.main.async(execute: work)
   }
 }

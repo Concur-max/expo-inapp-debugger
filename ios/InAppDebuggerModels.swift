@@ -7,8 +7,6 @@ struct DebugConfig: Equatable {
   var maxLogs: Int = 2000
   var maxErrors: Int = 100
   var maxRequests: Int = 100
-  var locale: String = "zh-CN"
-  var strings: [String: String] = [:]
 }
 
 struct DebugLogEntry: Equatable {
