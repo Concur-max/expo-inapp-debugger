@@ -616,24 +616,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     floatingChromeMaskLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
     floatingChromeMaskLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
     floatingChromeMaskLayer.colors = [
-      UIColor.black.withAlphaComponent(1.0).cgColor,
-      UIColor.black.withAlphaComponent(1.0).cgColor,
-      UIColor.black.withAlphaComponent(0.93).cgColor,
-      UIColor.black.withAlphaComponent(0.48).cgColor,
+      UIColor.black.cgColor,
+      UIColor.black.cgColor,
       UIColor.clear.cgColor,
     ]
-    floatingChromeMaskLayer.locations = [0.0, 0.24, 0.62, 0.9, 1.0]
+    floatingChromeMaskLayer.locations = [0.0, 0.96, 1.0]
     floatingChromeBackgroundView.layer.mask = floatingChromeMaskLayer
 
     floatingChromeTintLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
     floatingChromeTintLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
     floatingChromeTintLayer.colors = [
       UIColor.systemBackground.withAlphaComponent(0.78).cgColor,
-      UIColor.systemBackground.withAlphaComponent(0.56).cgColor,
-      UIColor.systemBackground.withAlphaComponent(0.24).cgColor,
+      UIColor.systemBackground.withAlphaComponent(0.78).cgColor,
       UIColor.clear.cgColor,
     ]
-    floatingChromeTintLayer.locations = [0.0, 0.4, 0.8, 1.0]
+    floatingChromeTintLayer.locations = [0.0, 0.96, 1.0]
     floatingChromeTintView.layer.addSublayer(floatingChromeTintLayer)
 
     NSLayoutConstraint.activate([
@@ -3722,7 +3719,7 @@ private struct InAppDebuggerJSONPrettyPrinter {
   }
 }
 
-private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate, UIEditMenuInteractionDelegate {
+private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate {
   private var lastMeasuredWidth: CGFloat = 0
   private var hasScheduledSelectionMenu = false
   private var selectionMenuTargetRect: CGRect = .null
@@ -3856,7 +3853,10 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     return bounds.insetBy(dx: 8, dy: 8)
   }
 
-  @available(iOS 16.0, *)
+}
+
+@available(iOS 16.0, *)
+extension InAppDebuggerSelectableTextView: UIEditMenuInteractionDelegate {
   func editMenuInteraction(
     _ interaction: UIEditMenuInteraction,
     targetRectFor configuration: UIEditMenuConfiguration
@@ -3864,7 +3864,6 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     selectionMenuTargetRect
   }
 
-  @available(iOS 16.0, *)
   private var editMenuInteraction: UIEditMenuInteraction? {
     interactions.first(where: { $0 is UIEditMenuInteraction }) as? UIEditMenuInteraction
   }
