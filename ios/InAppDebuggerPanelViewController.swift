@@ -344,6 +344,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var sortAscending = true
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
+  private var currentLogRetentionState = DebugLogRetentionState.empty
   private var notificationObserver: NSObjectProtocol?
   private var currentConfig = DebugConfig()
   private var scheduledReloadWorkItem: DispatchWorkItem?
@@ -499,6 +500,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }()
 
   private let emptyStateView = InAppDebuggerEmptyStateView()
+  private let logRetentionNoticeView = InAppDebuggerTableNoticeView()
 
   override func viewDidLoad() {
     super.viewDidLoad()
@@ -542,6 +544,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     super.viewDidLayoutSubviews()
     updateLegacySearchFieldWidthIfNeeded()
     updateBottomContentInsetsIfNeeded()
+    updateLogRetentionNoticeIfNeeded()
   }
 
   override func viewWillDisappear(_ animated: Bool) {
@@ -996,6 +999,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         logs: state.1,
         errors: state.2,
         network: state.3,
+        logRetentionState: state.4,
         reason: reason,
         changeSummary: changeSummary
       )
@@ -1004,8 +1008,10 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
     switch activeTab {
     case .logs:
+      let state = InAppDebuggerStore.shared.snapshotLogsState()
       renderLogs(
-        InAppDebuggerStore.shared.snapshotLogs(),
+        state.0,
+        logRetentionState: state.1,
         changeSummary: changeSummary
       )
     case .network:
@@ -1024,6 +1030,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     logs: [DebugLogEntry],
     errors: [DebugErrorEntry],
     network: [DebugNetworkEntry],
+    logRetentionState: DebugLogRetentionState,
     reason: ReloadReason,
     changeSummary: StoreChangeSummary
   ) {
@@ -1048,14 +1055,18 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
 
     if activeTab == .logs {
-      renderLogs(logs, changeSummary: changeSummary)
+      renderLogs(logs, logRetentionState: logRetentionState, changeSummary: changeSummary)
       return
     }
 
     renderNetwork(network, changeSummary: changeSummary)
   }
 
-  private func renderLogs(_ source: [DebugLogEntry], changeSummary: StoreChangeSummary) {
+  private func renderLogs(
+    _ source: [DebugLogEntry],
+    logRetentionState: DebugLogRetentionState,
+    changeSummary: StoreChangeSummary
+  ) {
     let generation = nextVisibleRenderGeneration()
     let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     let selectedLogLevels = selectedLogLevels
@@ -1076,7 +1087,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         guard let self, self.visibleRenderGeneration == generation, self.activeTab == .logs else {
           return
         }
-        self.applyRenderedLogs(nextLogs, changeSummary: changeSummary)
+        self.applyRenderedLogs(
+          nextLogs,
+          logRetentionState: logRetentionState,
+          changeSummary: changeSummary
+        )
       }
     }
   }
@@ -1171,6 +1186,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     if showingAppInfo {
       tableView.backgroundView = nil
     }
+    updateLogRetentionNoticeIfNeeded()
     view.setNeedsLayout()
   }
 
@@ -1428,10 +1444,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return .reloadData
   }
 
-  private func applyRenderedLogs(_ nextLogs: [DebugLogEntry], changeSummary: StoreChangeSummary) {
+  private func applyRenderedLogs(
+    _ nextLogs: [DebugLogEntry],
+    logRetentionState: DebugLogRetentionState,
+    changeSummary: StoreChangeSummary
+  ) {
     let previousLogs = displayedLogs
     let shouldReconfigureAll = changeSummary.mask.contains(.config)
     displayedLogs = nextLogs
+    currentLogRetentionState = logRetentionState
+    updateLogRetentionNoticeIfNeeded()
     let reloadIDs = shouldReconfigureAll ? Set(nextLogs.map(\.id)) : []
     let plan = tableUpdatePlan(
       previousIDs: previousLogs.map(\.id),
@@ -1634,6 +1656,50 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       buildFatalErrorInfo(errors: errors),
       PanelDetailItem(title: "限制说明", content: buildLimitationsInfo()),
     ]
+  }
+
+  private func updateLogRetentionNoticeIfNeeded() {
+    let shouldShowNotice = activeTab == .logs && currentLogRetentionState.isTruncated
+    guard shouldShowNotice else {
+      if tableView.tableHeaderView != nil {
+        tableView.tableHeaderView = nil
+      }
+      return
+    }
+
+    logRetentionNoticeView.configure(
+      title: "Log Window Truncated",
+      detail: localizedLogRetentionNoticeDetail(currentLogRetentionState)
+    )
+
+    let targetWidth = max(0, tableView.bounds.width)
+    guard targetWidth > 0 else {
+      return
+    }
+
+    let targetSize = CGSize(width: targetWidth, height: UIView.layoutFittingCompressedSize.height)
+    let fittingHeight = logRetentionNoticeView.systemLayoutSizeFitting(
+      targetSize,
+      withHorizontalFittingPriority: .required,
+      verticalFittingPriority: .fittingSizeLevel
+    ).height
+    let resolvedHeight = max(1, fittingHeight)
+    let frame = CGRect(x: 0, y: 0, width: targetWidth, height: resolvedHeight)
+
+    if tableView.tableHeaderView !== logRetentionNoticeView || logRetentionNoticeView.frame != frame {
+      logRetentionNoticeView.frame = frame
+      tableView.tableHeaderView = logRetentionNoticeView
+    }
+  }
+
+  private func localizedLogRetentionNoticeDetail(_ state: DebugLogRetentionState) -> String {
+    guard state.maxCount > 0 else {
+      return "The log buffer reached its configured limit and older entries were discarded."
+    }
+
+    let droppedLabel = state.droppedCount == 1 ? "entry" : "entries"
+    let discardedVerb = state.droppedCount == 1 ? "was" : "were"
+    return "The buffer keeps at most \(state.maxCount) timeline-ordered logs. \(state.droppedCount) older \(droppedLabel) \(discardedVerb) discarded since the last clear."
   }
 
   private func buildHostRuntimeInfo() -> String {
@@ -2349,6 +2415,81 @@ private final class InAppDebuggerEmptyStateView: UIView {
       stack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -40),
       stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
       stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+    ])
+  }
+}
+
+private final class InAppDebuggerTableNoticeView: UIView {
+  private let cardView = UIView()
+  private let accentView = UIView()
+  private let titleLabel = UILabel()
+  private let detailLabel = UILabel()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(title: String, detail: String) {
+    titleLabel.text = title
+    detailLabel.text = detail
+  }
+
+  private func buildUI() {
+    backgroundColor = .clear
+
+    let warnTone = toneForLogLevel("warn")
+    cardView.backgroundColor = UIColor(
+      red: 1.0,
+      green: 0.98,
+      blue: 0.91,
+      alpha: 1.0
+    )
+    cardView.layer.cornerRadius = 8
+    cardView.layer.borderWidth = 1
+    cardView.layer.borderColor = warnTone.foreground.withAlphaComponent(0.24).cgColor
+    addSubview(cardView)
+
+    accentView.backgroundColor = warnTone.foreground
+    accentView.layer.cornerRadius = 2
+    cardView.addSubview(accentView)
+
+    titleLabel.font = .systemFont(ofSize: 13, weight: .bold)
+    titleLabel.textColor = PanelColors.text
+    titleLabel.numberOfLines = 1
+
+    detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
+    detailLabel.textColor = PanelColors.mutedText
+    detailLabel.numberOfLines = 0
+
+    let stack = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
+    stack.axis = .vertical
+    stack.spacing = 4
+    cardView.addSubview(stack)
+
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    accentView.translatesAutoresizingMaskIntoConstraints = false
+    stack.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      cardView.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+      cardView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      cardView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      cardView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+
+      accentView.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+      accentView.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+      accentView.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
+      accentView.widthAnchor.constraint(equalToConstant: 4),
+
+      stack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+      stack.leadingAnchor.constraint(equalTo: accentView.trailingAnchor, constant: 10),
+      stack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+      stack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
     ])
   }
 }

@@ -32,8 +32,93 @@ struct InAppDebuggerStoreChangeMask: OptionSet {
   static let all: InAppDebuggerStoreChangeMask = [.config, .logs, .errors, .network]
 }
 
+struct DebugLogRetentionState: Equatable {
+  let retainedCount: Int
+  let maxCount: Int
+  let droppedCount: Int
+
+  static let empty = DebugLogRetentionState(retainedCount: 0, maxCount: 0, droppedCount: 0)
+
+  var isTruncated: Bool {
+    droppedCount > 0
+  }
+}
+
 extension Notification.Name {
   static let inAppDebuggerStoreDidChange = Notification.Name("InAppDebuggerStoreDidChange")
+}
+
+private func compareTimeline(
+  lhsTimestampMillis: Int?,
+  lhsFullTimestamp: String,
+  lhsSequence: Int?,
+  lhsSource: String,
+  lhsID: String,
+  rhsTimestampMillis: Int?,
+  rhsFullTimestamp: String,
+  rhsSequence: Int?,
+  rhsSource: String,
+  rhsID: String
+) -> Int {
+  if let lhsTimestampMillis, let rhsTimestampMillis, lhsTimestampMillis != rhsTimestampMillis {
+    return lhsTimestampMillis < rhsTimestampMillis ? -1 : 1
+  }
+
+  if lhsTimestampMillis != nil || rhsTimestampMillis != nil {
+    if lhsTimestampMillis == nil {
+      return -1
+    }
+    if rhsTimestampMillis == nil {
+      return 1
+    }
+  }
+
+  if !lhsFullTimestamp.isEmpty, !rhsFullTimestamp.isEmpty, lhsFullTimestamp != rhsFullTimestamp {
+    return lhsFullTimestamp < rhsFullTimestamp ? -1 : 1
+  }
+
+  if lhsSource == rhsSource, let lhsSequence, let rhsSequence, lhsSequence != rhsSequence {
+    return lhsSequence < rhsSequence ? -1 : 1
+  }
+
+  if lhsSource != rhsSource {
+    return lhsSource < rhsSource ? -1 : 1
+  }
+
+  if lhsID == rhsID {
+    return 0
+  }
+  return lhsID < rhsID ? -1 : 1
+}
+
+private func compareDebugLogEntries(_ lhs: DebugLogEntry, _ rhs: DebugLogEntry) -> Int {
+  compareTimeline(
+    lhsTimestampMillis: lhs.timelineTimestampMillis,
+    lhsFullTimestamp: lhs.fullTimestamp,
+    lhsSequence: lhs.timelineSequence,
+    lhsSource: lhs.origin,
+    lhsID: lhs.id,
+    rhsTimestampMillis: rhs.timelineTimestampMillis,
+    rhsFullTimestamp: rhs.fullTimestamp,
+    rhsSequence: rhs.timelineSequence,
+    rhsSource: rhs.origin,
+    rhsID: rhs.id
+  )
+}
+
+private func compareDebugErrorEntries(_ lhs: DebugErrorEntry, _ rhs: DebugErrorEntry) -> Int {
+  compareTimeline(
+    lhsTimestampMillis: lhs.timelineTimestampMillis,
+    lhsFullTimestamp: lhs.fullTimestamp,
+    lhsSequence: lhs.timelineSequence,
+    lhsSource: lhs.source,
+    lhsID: lhs.id,
+    rhsTimestampMillis: rhs.timelineTimestampMillis,
+    rhsFullTimestamp: rhs.fullTimestamp,
+    rhsSequence: rhs.timelineSequence,
+    rhsSource: rhs.source,
+    rhsID: rhs.id
+  )
 }
 
 private func compareDebugNetworkEntries(_ lhs: DebugNetworkEntry, _ rhs: DebugNetworkEntry) -> Int {
@@ -58,9 +143,17 @@ final class InAppDebuggerStore {
 
   private let lock = NSLock()
   private var config = DebugConfig()
-  private var logs = InAppDebuggerRingBuffer<DebugLogEntry>(capacity: DebugConfig().maxLogs)
+  private var logs = InAppDebuggerKeyedRingBuffer<String, DebugLogEntry>(
+    capacity: DebugConfig().maxLogs,
+    key: \.id,
+    order: compareDebugLogEntries
+  )
   private var pendingNativeLogs = InAppDebuggerRingBuffer<DebugLogEntry>(capacity: DebugConfig().maxLogs)
-  private var errors = InAppDebuggerRingBuffer<DebugErrorEntry>(capacity: DebugConfig().maxErrors)
+  private var errors = InAppDebuggerKeyedRingBuffer<String, DebugErrorEntry>(
+    capacity: DebugConfig().maxErrors,
+    key: \.id,
+    order: compareDebugErrorEntries
+  )
   private var network = InAppDebuggerKeyedRingBuffer<String, DebugNetworkEntry>(
     capacity: DebugConfig().maxRequests,
     key: \.id,
@@ -70,6 +163,7 @@ final class InAppDebuggerStore {
   private var notificationScheduled = false
   private var pendingChangeMask: InAppDebuggerStoreChangeMask = []
   private var pendingChangedNetworkIDs: Set<String> = []
+  private var droppedLogCount = 0
   private var nextNativeSequence = 0
   private var cachedNativeTimestampSecond = -1
   private var cachedNativeClockPrefix = ""
@@ -81,10 +175,14 @@ final class InAppDebuggerStore {
     lock.lock()
     let didConfigChange = next != config
     let shouldFlushPendingNativeLogs = next.enabled && !pendingNativeLogs.isEmpty
+    let pendingNativeEntries = shouldFlushPendingNativeLogs ? pendingNativeLogs.snapshot() : []
     config = next
     trimLocked()
     if shouldFlushPendingNativeLogs {
-      pendingNativeLogs.moveAll(to: logs)
+      pendingNativeLogs.clear()
+      for entry in pendingNativeEntries {
+        _ = upsertLogLocked(entry)
+      }
     }
     lock.unlock()
 
@@ -122,9 +220,17 @@ final class InAppDebuggerStore {
   func shutdown() {
     lock.lock()
     config = DebugConfig()
-    logs = InAppDebuggerRingBuffer<DebugLogEntry>(capacity: DebugConfig().maxLogs)
+    logs = InAppDebuggerKeyedRingBuffer<String, DebugLogEntry>(
+      capacity: DebugConfig().maxLogs,
+      key: \.id,
+      order: compareDebugLogEntries
+    )
     pendingNativeLogs = InAppDebuggerRingBuffer<DebugLogEntry>(capacity: DebugConfig().maxLogs)
-    errors = InAppDebuggerRingBuffer<DebugErrorEntry>(capacity: DebugConfig().maxErrors)
+    errors = InAppDebuggerKeyedRingBuffer<String, DebugErrorEntry>(
+      capacity: DebugConfig().maxErrors,
+      key: \.id,
+      order: compareDebugErrorEntries
+    )
     network = InAppDebuggerKeyedRingBuffer<String, DebugNetworkEntry>(
       capacity: DebugConfig().maxRequests,
       key: \.id,
@@ -134,6 +240,7 @@ final class InAppDebuggerStore {
     notificationScheduled = false
     pendingChangeMask = []
     pendingChangedNetworkIDs.removeAll(keepingCapacity: true)
+    droppedLogCount = 0
     nextNativeSequence = 0
     cachedNativeTimestampSecond = -1
     cachedNativeClockPrefix = ""
@@ -141,16 +248,22 @@ final class InAppDebuggerStore {
     lock.unlock()
   }
 
-  func snapshotState() -> (DebugConfig, [DebugLogEntry], [DebugErrorEntry], [DebugNetworkEntry]) {
+  func snapshotState() -> (DebugConfig, [DebugLogEntry], [DebugErrorEntry], [DebugNetworkEntry], DebugLogRetentionState) {
     lock.lock()
     defer { lock.unlock() }
-    return (config, logs.snapshot(), errors.snapshot(), network.snapshot())
+    return (config, logs.snapshot(), errors.snapshot(), network.snapshot(), logsRetentionStateLocked())
   }
 
   func snapshotLogs() -> [DebugLogEntry] {
     lock.lock()
     defer { lock.unlock() }
     return logs.snapshot()
+  }
+
+  func snapshotLogsState() -> ([DebugLogEntry], DebugLogRetentionState) {
+    lock.lock()
+    defer { lock.unlock() }
+    return (logs.snapshot(), logsRetentionStateLocked())
   }
 
   func snapshotNetwork() -> [DebugNetworkEntry] {
@@ -173,19 +286,22 @@ final class InAppDebuggerStore {
       switch item["category"] as? String {
       case "log":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugLogEntry(map: entryMap) {
-          logs.append(entry)
-          changeMask.insert(.logs)
+          if upsertLogLocked(entry) {
+            changeMask.insert(.logs)
+          }
         }
       case "error":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugErrorEntry(map: entryMap) {
-          errors.append(entry)
-          changeMask.insert(.errors)
+          if upsertErrorLocked(entry) {
+            changeMask.insert(.errors)
+          }
         }
       case "network":
         if let entryMap = item["entry"] as? [String: Any], let entry = DebugNetworkEntry(map: entryMap) {
-          upsertNetworkLocked(entry)
-          changeMask.insert(.network)
-          changedNetworkIDs.insert(entry.id)
+          if upsertNetworkLocked(entry) {
+            changeMask.insert(.network)
+            changedNetworkIDs.insert(entry.id)
+          }
         }
       default:
         break
@@ -208,8 +324,9 @@ final class InAppDebuggerStore {
         guard let entry = DebugLogEntry(wire: item) else {
           continue
         }
-        logs.append(entry)
-        changeMask.insert(.logs)
+        if upsertLogLocked(entry) {
+          changeMask.insert(.logs)
+        }
       }
     }
 
@@ -218,8 +335,9 @@ final class InAppDebuggerStore {
         guard let entry = DebugErrorEntry(wire: item) else {
           continue
         }
-        errors.append(entry)
-        changeMask.insert(.errors)
+        if upsertErrorLocked(entry) {
+          changeMask.insert(.errors)
+        }
       }
     }
 
@@ -228,9 +346,10 @@ final class InAppDebuggerStore {
         guard let entry = DebugNetworkEntry(wire: item) else {
           continue
         }
-        upsertNetworkLocked(entry)
-        changeMask.insert(.network)
-        changedNetworkIDs.insert(entry.id)
+        if upsertNetworkLocked(entry) {
+          changeMask.insert(.network)
+          changedNetworkIDs.insert(entry.id)
+        }
       }
     }
 
@@ -259,14 +378,20 @@ final class InAppDebuggerStore {
       timelineSequence: timelineSequence
     )
 
+    let didChange: Bool
     if config.enabled {
-      logs.append(entry)
-      trimLogsLocked()
+      didChange = upsertLogLocked(entry)
     } else {
-      pendingNativeLogs.append(entry)
+      if config.maxLogs > 0, pendingNativeLogs.count >= config.maxLogs {
+        droppedLogCount += 1
+      }
+      didChange = pendingNativeLogs.append(entry)
       trimPendingNativeLogsLocked()
     }
     lock.unlock()
+    guard didChange else {
+      return
+    }
     notifyChanged(.logs)
   }
 
@@ -275,9 +400,10 @@ final class InAppDebuggerStore {
     var changeMask: InAppDebuggerStoreChangeMask = []
     switch kind {
     case "logs":
-      if !logs.isEmpty || !pendingNativeLogs.isEmpty {
+      if !logs.isEmpty || !pendingNativeLogs.isEmpty || droppedLogCount > 0 {
         logs.clear()
         pendingNativeLogs.clear()
+        droppedLogCount = 0
         changeMask.insert(.logs)
       }
     case "errors":
@@ -291,9 +417,10 @@ final class InAppDebuggerStore {
         changeMask.insert(.network)
       }
     default:
-      if !logs.isEmpty || !pendingNativeLogs.isEmpty {
+      if !logs.isEmpty || !pendingNativeLogs.isEmpty || droppedLogCount > 0 {
         logs.clear()
         pendingNativeLogs.clear()
+        droppedLogCount = 0
         changeMask.insert(.logs)
       }
       if !errors.isEmpty {
@@ -314,8 +441,11 @@ final class InAppDebuggerStore {
 
   func upsertNetworkEntry(_ entry: DebugNetworkEntry) {
     lock.lock()
-    upsertNetworkLocked(entry)
+    let didChange = upsertNetworkLocked(entry)
     lock.unlock()
+    guard didChange else {
+      return
+    }
     notifyChanged(.network, changedNetworkIDs: [entry.id])
   }
 
@@ -344,11 +474,15 @@ final class InAppDebuggerStore {
   }
 
   private func trimLogsLocked() {
+    let previousCount = logs.count
     logs.resize(capacity: config.maxLogs)
+    droppedLogCount += max(0, previousCount - logs.count)
   }
 
   private func trimPendingNativeLogsLocked() {
+    let previousCount = pendingNativeLogs.count
     pendingNativeLogs.resize(capacity: config.maxLogs)
+    droppedLogCount += max(0, previousCount - pendingNativeLogs.count)
   }
 
   private func trimErrorsLocked() {
@@ -357,6 +491,33 @@ final class InAppDebuggerStore {
 
   private func trimNetworkLocked() {
     network.resize(capacity: config.maxRequests)
+  }
+
+  @discardableResult
+  private func upsertLogLocked(_ entry: DebugLogEntry) -> Bool {
+    if logs.value(forKey: entry.id) == nil,
+       let oldestEntry = logs.oldestValue(),
+       logs.count >= config.maxLogs,
+       config.maxLogs > 0 {
+      droppedLogCount += 1
+      guard compareDebugLogEntries(entry, oldestEntry) > 0 else {
+        return false
+      }
+    }
+    return logs.upsert(entry)
+  }
+
+  private func logsRetentionStateLocked() -> DebugLogRetentionState {
+    DebugLogRetentionState(
+      retainedCount: logs.count,
+      maxCount: config.maxLogs,
+      droppedCount: droppedLogCount
+    )
+  }
+
+  @discardableResult
+  private func upsertErrorLocked(_ entry: DebugErrorEntry) -> Bool {
+    return errors.upsert(entry)
   }
 
   private func nextNativeTimelineSequenceLocked() -> Int {
@@ -425,8 +586,9 @@ final class InAppDebuggerStore {
     }
   }
 
-  private func upsertNetworkLocked(_ entry: DebugNetworkEntry) {
-    network.upsert(entry)
+  @discardableResult
+  private func upsertNetworkLocked(_ entry: DebugNetworkEntry) -> Bool {
+    return network.upsert(entry)
   }
 }
 
@@ -556,6 +718,10 @@ private final class InAppDebuggerKeyedRingBuffer<Key: Hashable, Element> {
     orderedKeys.count
   }
 
+  var isEmpty: Bool {
+    orderedKeys.isEmpty
+  }
+
   init(capacity: Int, key: KeyPath<Element, Key>, order: @escaping (Element, Element) -> Int) {
     self.capacity = max(0, capacity)
     self.key = key
@@ -603,6 +769,13 @@ private final class InAppDebuggerKeyedRingBuffer<Key: Hashable, Element> {
 
   func value(forKey key: Key) -> Element? {
     itemsByKey[key]
+  }
+
+  func oldestValue() -> Element? {
+    guard let oldestKey = orderedKeys.first else {
+      return nil
+    }
+    return itemsByKey[oldestKey]
   }
 
   func snapshot() -> [Element] {

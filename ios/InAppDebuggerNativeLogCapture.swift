@@ -499,7 +499,7 @@ final class InAppDebuggerNativeLogCapture {
 
     do {
       osLogStore = try OSLogStore(scope: .currentProcessIdentifier)
-      lastOSLogDate = Date().addingTimeInterval(-8)
+      lastOSLogDate = max(lastOSLogDate, Date().addingTimeInterval(-8))
     } catch {
       osLogStore = nil
       return
