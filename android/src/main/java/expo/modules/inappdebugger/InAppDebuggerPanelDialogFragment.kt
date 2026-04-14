@@ -10,6 +10,8 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -26,6 +28,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -87,6 +90,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.fragment.app.Fragment
@@ -207,6 +211,7 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
 const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
 private const val LOGS_SEARCH_PLACEHOLDER = "Search logs..."
 private const val NETWORK_SEARCH_PLACEHOLDER = "Search network requests..."
+private val APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
 
 private enum class DebugTab {
   Logs,
@@ -244,7 +249,8 @@ private data class PanelTone(
 private data class DetailItem(
   val title: String,
   val content: String,
-  val monospace: Boolean = false
+  val monospace: Boolean = false,
+  val contentMaxHeight: Dp? = null
 )
 
 private data class FilterMenuItem(
@@ -720,27 +726,29 @@ private fun AppInfoTab(
     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp)
   ) {
-    item("app_info_root_control") {
-      RootEnhancedControlCard(
-        checked = rootEnhancedEnabled,
-        enabled = runtimeInfo.rootStatus != "checking",
-        runtimeInfo = runtimeInfo,
-        locale = locale,
-        onCheckedChange = { enabled ->
-          if (!rootTogglePending) {
-            rootTogglePending = true
-            scope.launch {
-              try {
-                withContext(Dispatchers.Default) {
-                  applyPanelRootEnhancedMode(context.applicationContext, enabled)
+    if (runtimeInfo.rootStatus == "root") {
+      item("app_info_root_control") {
+        RootEnhancedControlCard(
+          checked = rootEnhancedEnabled,
+          enabled = runtimeInfo.rootStatus != "checking",
+          runtimeInfo = runtimeInfo,
+          locale = locale,
+          onCheckedChange = { enabled ->
+            if (!rootTogglePending) {
+              rootTogglePending = true
+              scope.launch {
+                try {
+                  withContext(Dispatchers.Default) {
+                    applyPanelRootEnhancedMode(context.applicationContext, enabled)
+                  }
+                } finally {
+                  rootTogglePending = false
                 }
-              } finally {
-                rootTogglePending = false
               }
             }
           }
-        }
-      )
+        )
+      }
     }
     items(
       items = sections,
@@ -749,7 +757,8 @@ private fun AppInfoTab(
       DetailSection(
         title = section.title,
         content = section.content,
-        monospace = section.monospace
+        monospace = section.monospace,
+        contentMaxHeight = section.contentMaxHeight
       )
     }
     item("app_info_footer") {
@@ -1075,8 +1084,13 @@ private fun NetworkDetailScreen(
       contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-      items(sections, key = { it.title }) { item ->
-        DetailSection(title = item.title, content = item.content, monospace = item.monospace)
+      itemsIndexed(sections, key = { index, item -> "${item.title}#$index" }) { _, item ->
+        DetailSection(
+          title = item.title,
+          content = item.content,
+          monospace = item.monospace,
+          contentMaxHeight = item.contentMaxHeight
+        )
       }
       item("network_detail_footer") {
         Spacer(modifier = Modifier.height(12.dp))
@@ -1488,8 +1502,20 @@ private fun combinedLogCardDetails(context: String?, details: String?): String {
 private fun DetailSection(
   title: String,
   content: String,
-  monospace: Boolean = false
+  monospace: Boolean = false,
+  contentMaxHeight: Dp? = null
 ) {
+  val scrollState = rememberScrollState()
+  val contentModifier = Modifier.fillMaxWidth().let { modifier ->
+    if (contentMaxHeight != null) {
+      modifier
+        .heightIn(max = contentMaxHeight)
+        .verticalScroll(scrollState)
+    } else {
+      modifier
+    }
+  }
+
   Card(
     modifier = Modifier.fillMaxWidth(),
     colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
@@ -1509,7 +1535,7 @@ private fun DetailSection(
           text = content,
           color = PanelColors.Text,
           fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
-          modifier = Modifier.fillMaxWidth()
+          modifier = contentModifier
         )
       }
     }
@@ -1791,7 +1817,7 @@ private fun buildWebSocketSections(
     DetailItem("Requested protocols", entry.requestedProtocols ?: "-"),
     DetailItem("URL", entry.url, monospace = true),
     DetailItem("Duration", entry.durationMs?.let { "${it}ms" } ?: "-"),
-    DetailItem("Messages", "IN $inferredIncoming / OUT $inferredOutgoing"),
+    DetailItem("Message Counts", "IN $inferredIncoming / OUT $inferredOutgoing"),
     DetailItem(
       "Bytes",
       "IN ${formatByteCount(context, entry.bytesIn)} / OUT ${formatByteCount(context, entry.bytesOut)}"
@@ -1928,7 +1954,8 @@ private fun buildFatalErrorSections(
             appendLine("${localizedFatalErrorMessageLabel(locale)}:")
             append(error.message.ifBlank { "-" })
           },
-          monospace = true
+          monospace = true,
+          contentMaxHeight = APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT
         )
       )
     }
@@ -1961,7 +1988,8 @@ private fun buildCrashRecordSections(
         DetailItem(
           title = localizedCrashRecordTitle(locale, index + 1),
           content = formatCrashRecord(record, locale),
-          monospace = true
+          monospace = true,
+          contentMaxHeight = APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT
         )
       )
     }
