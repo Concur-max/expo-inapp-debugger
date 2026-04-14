@@ -1,6 +1,6 @@
 {
   "name": "expo-inapp-debugger",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Native in-app debugger for Expo and React Native projects.",
   "license": "MIT",
   "author": "xingyuyang",

@@ -475,6 +475,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     return item
   }()
 
+  private lazy var appInfoCloseBarButtonItem: UIBarButtonItem = {
+    let item = UIBarButtonItem(
+      image: UIImage(systemName: "xmark"),
+      style: .plain,
+      target: self,
+      action: #selector(closeTapped)
+    )
+    return item
+  }()
+
   private lazy var legacyClearButton: InAppDebuggerLegacyBarButton = {
     InAppDebuggerLegacyBarButton(
       symbolName: "trash",
@@ -699,8 +709,13 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       navigationItem.searchController = shouldShowSearchControl ? panelSearchController : nil
       navigationItem.preferredSearchBarPlacement = .integrated
       navigationItem.searchBarPlacementAllowsToolbarIntegration = false
-      navigationItem.pinnedTrailingGroup = shouldShowSearchControl ? trailingButtonGroup : nil
-      navigationItem.rightBarButtonItems = shouldShowSearchControl ? nil : [closeBarButtonItem]
+      if shouldShowSearchControl {
+        navigationItem.pinnedTrailingGroup = trailingButtonGroup
+        navigationItem.rightBarButtonItems = nil
+      } else {
+        navigationItem.pinnedTrailingGroup = nil
+        navigationItem.rightBarButtonItems = [appInfoCloseBarButtonItem]
+      }
     } else {
       title = nil
       navigationItem.searchController = nil
@@ -821,13 +836,10 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let placeholder = currentSearchPlaceholder()
 
     if #available(iOS 26.0, *) {
-      title = nil
-      navigationItem.searchController = shouldShowSearchControl ? panelSearchController : nil
       panelSearchController.searchBar.placeholder = placeholder
       panelSearchController.searchBar.text = searchText
       panelSearchController.searchBar.isEnabled = shouldShowSearchControl
     } else {
-      navigationItem.titleView = legacyHeaderContainer
       legacySearchField.placeholder = placeholder
       legacySearchField.text = searchText
       legacySearchField.isEnabled = shouldShowSearchControl
@@ -924,6 +936,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     clearBarButtonItem.accessibilityLabel = "Clear"
     menuBarButtonItem.accessibilityLabel = localizedMenuTitle()
     closeBarButtonItem.accessibilityLabel = "Close"
+    appInfoCloseBarButtonItem.accessibilityLabel = "Close"
     legacyClearButton.accessibilityLabel = "Clear"
     legacyMenuButton.accessibilityLabel = localizedMenuTitle()
     legacyCloseButton.accessibilityLabel = "Close"
@@ -963,10 +976,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     activeTab = resolvedTab
     deactivateSearchInput()
     syncNativeCaptureStates()
-    updateTabBarState()
-    updateSearchPresentation()
-    updateFilterMenu()
-    updateBarButtonItems()
+    configureNavigationBar()
     updateContentVisibility()
     reloadFromStore()
   }
