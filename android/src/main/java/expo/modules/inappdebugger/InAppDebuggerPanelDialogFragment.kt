@@ -22,26 +22,29 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -49,13 +52,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -201,8 +205,8 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
 }
 
 const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
-private const val ANDROID_PANEL_TITLE = "Debugging panel"
-private const val ANDROID_SEARCH_PLACEHOLDER = "Please enter"
+private const val LOGS_SEARCH_PLACEHOLDER = "Search logs..."
+private const val NETWORK_SEARCH_PLACEHOLDER = "Search network requests..."
 
 private enum class DebugTab {
   Logs,
@@ -339,9 +343,23 @@ private object PanelPreferences {
 private fun DebugPanel(onDismiss: () -> Unit) {
   val chromeState by InAppDebuggerStore.chromeState.collectAsStateWithLifecycle()
   val locale = chromeState.config.locale
-  val strings = chromeState.config.strings
+  val context = LocalContext.current
   var activeTab by rememberSaveable { mutableStateOf(DebugTab.Logs) }
   var selectedNetworkId by rememberSaveable { mutableStateOf<String?>(null) }
+  var logsSearchQuery by rememberSaveable { mutableStateOf("") }
+  var logsSortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
+  var networkSearchQuery by rememberSaveable { mutableStateOf("") }
+  var networkSortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
+  var selectedLogLevels by remember { mutableStateOf(PanelPreferences.loadLogLevels(context)) }
+  var selectedLogOrigins by remember { mutableStateOf(PanelPreferences.loadLogOrigins(context)) }
+  var selectedNetworkOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
+  var selectedNetworkKinds by remember { mutableStateOf(PanelPreferences.loadNetworkKinds(context)) }
+  val hasActiveLogFilters = remember(selectedLogLevels, selectedLogOrigins) {
+    PanelPreferences.hasActiveLogFilters(selectedLogLevels, selectedLogOrigins)
+  }
+  val hasActiveNetworkFilters = remember(selectedNetworkOrigins, selectedNetworkKinds) {
+    PanelPreferences.hasActiveNetworkFilters(selectedNetworkOrigins, selectedNetworkKinds)
+  }
 
   DisposableEffect(Unit) {
     InAppDebuggerStore.setPanelVisible(true)
@@ -371,8 +389,6 @@ private fun DebugPanel(onDismiss: () -> Unit) {
   if (selectedNetworkId != null) {
     NetworkDetailScreen(
       entryId = selectedNetworkId.orEmpty(),
-      strings = strings,
-      locale = locale,
       onBack = { selectedNetworkId = null },
       onClose = onDismiss,
       onMissing = { selectedNetworkId = null }
@@ -380,72 +396,283 @@ private fun DebugPanel(onDismiss: () -> Unit) {
     return
   }
 
-  Scaffold(
-    topBar = {
-      TopAppBar(
-        title = { Text(ANDROID_PANEL_TITLE) },
-        colors = TopAppBarDefaults.topAppBarColors(
-          containerColor = PanelColors.Background,
-          titleContentColor = PanelColors.Text,
-          actionIconContentColor = PanelColors.Primary
+  Column(
+    modifier = Modifier
+      .fillMaxSize()
+      .background(PanelColors.Background)
+  ) {
+    when (activeTab) {
+      DebugTab.Logs -> SearchAndActionRow(
+        query = logsSearchQuery,
+        placeholder = localizedLogsSearchPlaceholder(),
+        menuTitle = localizedMenuTitle(),
+        clearLabel = "Clear",
+        closeLabel = "Close",
+        hasActiveFilters = hasActiveLogFilters,
+        filterSections = listOf(
+          FilterMenuSection(
+            title = localizedSortMenuTitle(),
+            items = listOf(
+              FilterMenuItem(
+                label = localizedSortTitle(ascending = true),
+                selected = logsSortOrder == SortOrder.Asc,
+                onToggle = { logsSortOrder = SortOrder.Asc }
+              ),
+              FilterMenuItem(
+                label = localizedSortTitle(ascending = false),
+                selected = logsSortOrder == SortOrder.Desc,
+                onToggle = { logsSortOrder = SortOrder.Desc }
+              )
+            )
+          ),
+          FilterMenuSection(
+            title = localizedOriginTitleLabel(),
+            items = listOf(
+              FilterMenuItem(
+                label = "JS",
+                selected = "js" in selectedLogOrigins,
+                onToggle = {
+                  selectedLogOrigins = selectedLogOrigins.toggle("js")
+                  PanelPreferences.saveLogOrigins(context, selectedLogOrigins)
+                }
+              ),
+              FilterMenuItem(
+                label = "Native",
+                selected = "native" in selectedLogOrigins,
+                onToggle = {
+                  selectedLogOrigins = selectedLogOrigins.toggle("native")
+                  PanelPreferences.saveLogOrigins(context, selectedLogOrigins)
+                }
+              )
+            )
+          ),
+          FilterMenuSection(
+            title = localizedLevelTitle(),
+            items = listOf("log", "info", "warn", "error", "debug").map { level ->
+              FilterMenuItem(
+                label = level.uppercase(Locale.ROOT),
+                selected = level in selectedLogLevels,
+                onToggle = {
+                  selectedLogLevels = selectedLogLevels.toggle(level)
+                  PanelPreferences.saveLogLevels(context, selectedLogLevels)
+                }
+              )
+            }
+          )
         ),
-        actions = {
-          IconButton(onClick = onDismiss) {
-            Icon(Icons.Outlined.Close, contentDescription = strings["close"] ?: "关闭")
-          }
-        }
+        onQueryChange = { logsSearchQuery = it },
+        onClear = { InAppDebuggerStore.clear("logs") },
+        onClose = onDismiss
       )
-    },
-    containerColor = PanelColors.Background
-  ) { innerPadding ->
-    Column(
-      modifier = Modifier
-        .fillMaxSize()
-        .padding(innerPadding)
-        .background(PanelColors.Background)
-    ) {
-      TabRow(
-        selectedTabIndex = activeTab.ordinal,
-        containerColor = PanelColors.Background,
-        contentColor = PanelColors.Primary,
-        divider = {
-          HorizontalDivider(color = PanelColors.Border)
-        }
-      ) {
-        Tab(
-          selected = activeTab == DebugTab.Logs,
-          onClick = {
-            selectedNetworkId = null
-            activeTab = DebugTab.Logs
-          },
-          text = { Text("log") }
-        )
-        Tab(
-          selected = activeTab == DebugTab.Network,
-          onClick = { activeTab = DebugTab.Network },
-          enabled = chromeState.config.enableNetworkTab,
-          text = { Text("network") }
-        )
-        Tab(
-          selected = activeTab == DebugTab.AppInfo,
-          onClick = {
-            activeTab = DebugTab.AppInfo
-          },
-          text = { Text("app Info") }
-        )
-      }
 
+      DebugTab.Network -> SearchAndActionRow(
+        query = networkSearchQuery,
+        placeholder = localizedNetworkSearchPlaceholder(),
+        menuTitle = localizedMenuTitle(),
+        clearLabel = "Clear",
+        closeLabel = "Close",
+        hasActiveFilters = hasActiveNetworkFilters,
+        filterSections = listOf(
+          FilterMenuSection(
+            title = localizedSortMenuTitle(),
+            items = listOf(
+              FilterMenuItem(
+                label = localizedSortTitle(ascending = true),
+                selected = networkSortOrder == SortOrder.Asc,
+                onToggle = { networkSortOrder = SortOrder.Asc }
+              ),
+              FilterMenuItem(
+                label = localizedSortTitle(ascending = false),
+                selected = networkSortOrder == SortOrder.Desc,
+                onToggle = { networkSortOrder = SortOrder.Desc }
+              )
+            )
+          ),
+          FilterMenuSection(
+            title = localizedOriginTitleLabel(),
+            items = listOf(
+              FilterMenuItem(
+                label = "JS",
+                selected = "js" in selectedNetworkOrigins,
+                onToggle = {
+                  selectedNetworkOrigins = selectedNetworkOrigins.toggle("js")
+                  PanelPreferences.saveNetworkOrigins(context, selectedNetworkOrigins)
+                }
+              ),
+              FilterMenuItem(
+                label = "Native",
+                selected = "native" in selectedNetworkOrigins,
+                onToggle = {
+                  selectedNetworkOrigins = selectedNetworkOrigins.toggle("native")
+                  PanelPreferences.saveNetworkOrigins(context, selectedNetworkOrigins)
+                }
+              )
+            )
+          ),
+          FilterMenuSection(
+            title = localizedNetworkTypeTitle(),
+            items = NetworkKindFilter.entries.map { kind ->
+              FilterMenuItem(
+                label = localizedNetworkKindFilterTitle(kind),
+                selected = kind.rawValue in selectedNetworkKinds,
+                onToggle = {
+                  selectedNetworkKinds = selectedNetworkKinds.toggle(kind.rawValue)
+                  PanelPreferences.saveNetworkKinds(context, selectedNetworkKinds)
+                }
+              )
+            }
+          )
+        ),
+        onQueryChange = { networkSearchQuery = it },
+        onClear = { InAppDebuggerStore.clear("network") },
+        onClose = onDismiss
+      )
+
+      DebugTab.AppInfo -> AppInfoTopBar(onClose = onDismiss)
+    }
+
+    Box(modifier = Modifier.weight(1f)) {
       when (activeTab) {
-        DebugTab.Logs -> LogsTab(config = chromeState.config, locale = locale)
+        DebugTab.Logs -> LogsTab(
+          maxLogs = chromeState.config.maxLogs,
+          searchQuery = logsSearchQuery,
+          sortOrder = logsSortOrder,
+          selectedLevels = selectedLogLevels,
+          selectedOrigins = selectedLogOrigins
+        )
+
         DebugTab.Network -> NetworkTab(
-          config = chromeState.config,
-          locale = locale,
+          maxRequests = chromeState.config.maxRequests,
+          searchQuery = networkSearchQuery,
+          sortOrder = networkSortOrder,
+          selectedOrigins = selectedNetworkOrigins,
+          selectedKinds = selectedNetworkKinds,
           onSelectNetwork = { selectedNetworkId = it }
         )
+
         DebugTab.AppInfo -> AppInfoTab(
           config = chromeState.config,
           runtimeInfo = chromeState.runtimeInfo,
           locale = locale
+        )
+      }
+    }
+
+    PanelTabBar(
+      activeTab = activeTab,
+      networkEnabled = chromeState.config.enableNetworkTab,
+      onSelectTab = { nextTab ->
+        if (nextTab != DebugTab.Network || chromeState.config.enableNetworkTab) {
+          activeTab = nextTab
+        }
+      }
+    )
+  }
+}
+
+@Composable
+private fun AppInfoTopBar(onClose: () -> Unit) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    color = PanelColors.Background
+  ) {
+    Column {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .statusBarsPadding()
+          .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        PanelActionButton(
+          imageVector = Icons.Outlined.Close,
+          contentDescription = "Close",
+          onClick = onClose
+        )
+      }
+      HorizontalDivider(color = PanelColors.Border)
+    }
+  }
+}
+
+@Composable
+private fun PanelTabBar(
+  activeTab: DebugTab,
+  networkEnabled: Boolean,
+  onSelectTab: (DebugTab) -> Unit
+) {
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    color = PanelColors.Surface
+  ) {
+    Column {
+      HorizontalDivider(color = PanelColors.Border)
+      NavigationBar(
+        modifier = Modifier.fillMaxWidth(),
+        containerColor = PanelColors.Surface,
+        tonalElevation = 0.dp
+      ) {
+        NavigationBarItem(
+          selected = activeTab == DebugTab.Logs,
+          onClick = { onSelectTab(DebugTab.Logs) },
+          icon = {
+            Icon(
+              imageVector = Icons.Outlined.Description,
+              contentDescription = null
+            )
+          },
+          label = { Text("Logs") },
+          colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = PanelColors.Primary,
+            selectedTextColor = PanelColors.Primary,
+            indicatorColor = PanelColors.SurfaceAlt,
+            unselectedIconColor = PanelColors.MutedText,
+            unselectedTextColor = PanelColors.MutedText,
+            disabledIconColor = PanelColors.MutedText,
+            disabledTextColor = PanelColors.MutedText
+          )
+        )
+        NavigationBarItem(
+          selected = activeTab == DebugTab.Network,
+          onClick = { onSelectTab(DebugTab.Network) },
+          enabled = networkEnabled,
+          icon = {
+            Icon(
+              imageVector = Icons.Outlined.Public,
+              contentDescription = null
+            )
+          },
+          label = { Text("Network") },
+          colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = PanelColors.Primary,
+            selectedTextColor = PanelColors.Primary,
+            indicatorColor = PanelColors.SurfaceAlt,
+            unselectedIconColor = PanelColors.MutedText,
+            unselectedTextColor = PanelColors.MutedText,
+            disabledIconColor = PanelColors.MutedText,
+            disabledTextColor = PanelColors.MutedText
+          )
+        )
+        NavigationBarItem(
+          selected = activeTab == DebugTab.AppInfo,
+          onClick = { onSelectTab(DebugTab.AppInfo) },
+          icon = {
+            Icon(
+              imageVector = Icons.Outlined.Info,
+              contentDescription = null
+            )
+          },
+          label = { Text("App Info") },
+          colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = PanelColors.Primary,
+            selectedTextColor = PanelColors.Primary,
+            indicatorColor = PanelColors.SurfaceAlt,
+            unselectedIconColor = PanelColors.MutedText,
+            unselectedTextColor = PanelColors.MutedText,
+            disabledIconColor = PanelColors.MutedText,
+            disabledTextColor = PanelColors.MutedText
+          )
         )
       }
     }
@@ -597,25 +824,19 @@ private fun RootEnhancedControlCard(
 
 @Composable
 private fun LogsTab(
-  config: DebugConfig,
-  locale: String
+  maxLogs: Int,
+  searchQuery: String,
+  sortOrder: SortOrder,
+  selectedLevels: Set<String>,
+  selectedOrigins: Set<String>
 ) {
   val logsWindowState by InAppDebuggerStore.logsWindowState.collectAsStateWithLifecycle()
-  val context = LocalContext.current
-  val strings = config.strings
-  val logSearchCache = remember(config.maxLogs) {
+  val logSearchCache = remember(maxLogs) {
     SearchTextCache(
-      capacity = (config.maxLogs * 2).coerceAtLeast(256),
+      capacity = (maxLogs * 2).coerceAtLeast(256),
       keySelector = DebugLogEntry::id,
       searchTextBuilder = ::buildLogSearchText
     )
-  }
-  var searchQuery by rememberSaveable { mutableStateOf("") }
-  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
-  var selectedLevels by remember { mutableStateOf(PanelPreferences.loadLogLevels(context)) }
-  var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadLogOrigins(context)) }
-  val hasActiveFilters = remember(selectedLevels, selectedOrigins) {
-    PanelPreferences.hasActiveLogFilters(selectedLevels, selectedOrigins)
   }
 
   val visibleLogs by produceState(
@@ -655,86 +876,33 @@ private fun LogsTab(
     }
   }
 
-  Column(modifier = Modifier.fillMaxSize()) {
-    SearchAndActionRow(
-      query = searchQuery,
-      placeholder = localizedAndroidSearchPlaceholder(),
-      filterTitle = strings["filter"] ?: "筛选",
-      clearLabel = strings["clear"] ?: "清空",
-      sortLabel = localizedSortTitle(locale, sortOrder == SortOrder.Asc),
-      sortOrder = sortOrder,
-      hasActiveFilters = hasActiveFilters,
-      filterSections = listOf(
-        FilterMenuSection(
-          title = localizedOriginTitleLabel(locale),
-          items = listOf(
-            FilterMenuItem(
-              label = strings["jsLogOrigin"] ?: "JS",
-              selected = "js" in selectedOrigins,
-              onToggle = {
-                selectedOrigins = selectedOrigins.toggle("js")
-                PanelPreferences.saveLogOrigins(context, selectedOrigins)
-              }
-            ),
-            FilterMenuItem(
-              label = strings["nativeLogOrigin"] ?: "native",
-              selected = "native" in selectedOrigins,
-              onToggle = {
-                selectedOrigins = selectedOrigins.toggle("native")
-                PanelPreferences.saveLogOrigins(context, selectedOrigins)
-              }
-            )
-          )
-        ),
-        FilterMenuSection(
-          title = localizedLevelTitle(locale),
-          items = listOf("log", "info", "warn", "error", "debug").map { level ->
-            FilterMenuItem(
-              label = level.uppercase(Locale.ROOT),
-              selected = level in selectedLevels,
-              onToggle = {
-                selectedLevels = selectedLevels.toggle(level)
-                PanelPreferences.saveLogLevels(context, selectedLevels)
-              }
-            )
-          }
-        )
-      ),
-      onQueryChange = { searchQuery = it },
-      onToggleSort = {
-        sortOrder = if (sortOrder == SortOrder.Asc) SortOrder.Desc else SortOrder.Asc
-      },
-      onClear = { InAppDebuggerStore.clear("logs") }
-    )
-
-    if (visibleLogs.isEmpty()) {
-      val title = if (searchQuery.isNotBlank() || selectedLevels.isEmpty()) {
-        strings["noSearchResult"] ?: "未找到匹配的日志"
-      } else {
-        strings["noLogs"] ?: "暂无日志"
-      }
-      val detail = when {
-        selectedOrigins.isEmpty() -> localizedNoLogOriginHint(locale)
-        selectedLevels.isEmpty() -> localizedNoLevelHint(locale)
-        else -> localizedEmptyHint(locale)
-      }
-      EmptyState(title = title, detail = detail)
+  if (visibleLogs.isEmpty()) {
+    val title = if (searchQuery.isNotBlank() || selectedLevels.isEmpty()) {
+      "No matching logs found"
     } else {
-      LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-      ) {
-        items(
-          items = visibleLogs,
-          key = { it.id },
-          contentType = { "log" }
-        ) { log ->
-          LogCard(log = log, strings = strings, locale = locale)
-        }
-        item("logs_footer") {
-          Spacer(modifier = Modifier.height(12.dp))
-        }
+      "No logs yet"
+    }
+    val detail = when {
+      selectedOrigins.isEmpty() -> localizedNoLogOriginHint()
+      selectedLevels.isEmpty() -> localizedNoLevelHint()
+      else -> localizedEmptyHint()
+    }
+    EmptyState(title = title, detail = detail)
+  } else {
+    LazyColumn(
+      modifier = Modifier.fillMaxSize(),
+      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+      items(
+        items = visibleLogs,
+        key = { it.id },
+        contentType = { "log" }
+      ) { log ->
+        LogCard(log = log)
+      }
+      item("logs_footer") {
+        Spacer(modifier = Modifier.height(12.dp))
       }
     }
   }
@@ -742,31 +910,25 @@ private fun LogsTab(
 
 @Composable
 private fun NetworkTab(
-  config: DebugConfig,
-  locale: String,
+  maxRequests: Int,
+  searchQuery: String,
+  sortOrder: SortOrder,
+  selectedOrigins: Set<String>,
+  selectedKinds: Set<String>,
   onSelectNetwork: (String) -> Unit
 ) {
   val networkWindowState by InAppDebuggerStore.networkWindowState.collectAsStateWithLifecycle()
-  val context = LocalContext.current
-  val strings = config.strings
-  val networkSearchCache = remember(locale, config.maxRequests) {
+  val networkSearchCache = remember(maxRequests) {
     SearchTextCache(
-      capacity = (config.maxRequests * 3).coerceAtLeast(256),
+      capacity = (maxRequests * 3).coerceAtLeast(256),
       keySelector = DebugNetworkEntry::id,
       searchTextBuilder = { entry ->
         buildNetworkSearchText(
           entry = entry,
-          localizedKindTitle = localizedNetworkKindFilterTitle(normalizedNetworkKind(entry.kind), locale)
+          localizedKindTitle = localizedNetworkKindFilterTitle(normalizedNetworkKind(entry.kind))
         )
       }
     )
-  }
-  var searchQuery by rememberSaveable { mutableStateOf("") }
-  var sortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
-  var selectedOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
-  var selectedKinds by remember { mutableStateOf(PanelPreferences.loadNetworkKinds(context)) }
-  val hasActiveFilters = remember(selectedOrigins, selectedKinds) {
-    PanelPreferences.hasActiveNetworkFilters(selectedOrigins, selectedKinds)
   }
 
   val visibleEntries by produceState(
@@ -775,8 +937,7 @@ private fun NetworkTab(
     searchQuery,
     sortOrder,
     selectedOrigins,
-    selectedKinds,
-    locale
+    selectedKinds
   ) {
     value =
       withContext(Dispatchers.Default) {
@@ -786,7 +947,6 @@ private fun NetworkTab(
           sortOrder = sortOrder,
           selectedOrigins = selectedOrigins,
           selectedKinds = selectedKinds,
-          locale = locale,
           allFiltersSelected = PanelPreferences.isAllNetworkFiltersSelected(selectedOrigins, selectedKinds),
           searchCache = networkSearchCache
         )
@@ -808,95 +968,41 @@ private fun NetworkTab(
     }
   }
 
-  Column(modifier = Modifier.fillMaxSize()) {
-    SearchAndActionRow(
-      query = searchQuery,
-      placeholder = localizedAndroidSearchPlaceholder(),
-      filterTitle = strings["filter"] ?: "筛选",
-      clearLabel = strings["clear"] ?: "清空",
-      sortLabel = localizedSortTitle(locale, sortOrder == SortOrder.Asc),
-      sortOrder = sortOrder,
-      hasActiveFilters = hasActiveFilters,
-      filterSections = listOf(
-        FilterMenuSection(
-          title = localizedOriginTitleLabel(locale),
-          items = listOf(
-            FilterMenuItem(
-              label = strings["jsLogOrigin"] ?: "JS",
-              selected = "js" in selectedOrigins,
-              onToggle = {
-                selectedOrigins = selectedOrigins.toggle("js")
-                PanelPreferences.saveNetworkOrigins(context, selectedOrigins)
-              }
-            ),
-            FilterMenuItem(
-              label = strings["nativeLogOrigin"] ?: "native",
-              selected = "native" in selectedOrigins,
-              onToggle = {
-                selectedOrigins = selectedOrigins.toggle("native")
-                PanelPreferences.saveNetworkOrigins(context, selectedOrigins)
-              }
-            )
-          )
-        ),
-        FilterMenuSection(
-          title = localizedNetworkTypeTitle(locale),
-          items = NetworkKindFilter.entries.map { kind ->
-            FilterMenuItem(
-              label = localizedNetworkKindFilterTitle(kind, locale),
-              selected = kind.rawValue in selectedKinds,
-              onToggle = {
-                selectedKinds = selectedKinds.toggle(kind.rawValue)
-                PanelPreferences.saveNetworkKinds(context, selectedKinds)
-              }
-            )
-          }
-        )
-      ),
-      onQueryChange = { searchQuery = it },
-      onToggleSort = {
-        sortOrder = if (sortOrder == SortOrder.Asc) SortOrder.Desc else SortOrder.Asc
-      },
-      onClear = { InAppDebuggerStore.clear("network") }
-    )
-
-    if (visibleEntries.isEmpty()) {
-      val title = if (
-        searchQuery.isNotBlank() ||
-          selectedOrigins.isEmpty() ||
-          selectedKinds.isEmpty()
-      ) {
-        localizedNoNetworkResultTitle(locale)
-      } else {
-        strings["noNetworkRequests"] ?: "暂无网络请求"
-      }
-      val detail = when {
-        selectedOrigins.isEmpty() && selectedKinds.isEmpty() -> localizedNoNetworkFilterHint(locale)
-        selectedOrigins.isEmpty() -> localizedNoNetworkOriginHint(locale)
-        selectedKinds.isEmpty() -> localizedNoNetworkKindHint(locale)
-        else -> localizedEmptyHint(locale)
-      }
-      EmptyState(title = title, detail = detail)
+  if (visibleEntries.isEmpty()) {
+    val title = if (
+      searchQuery.isNotBlank() ||
+        selectedOrigins.isEmpty() ||
+        selectedKinds.isEmpty()
+    ) {
+      localizedNoNetworkResultTitle()
     } else {
-      LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-      ) {
-        items(
-          items = visibleEntries,
-          key = { it.id },
-          contentType = { "network" }
-        ) { entry ->
-          NetworkCard(
-            entry = entry,
-            strings = strings,
-            onClick = { onSelectNetwork(entry.id) }
-          )
-        }
-        item("network_footer") {
-          Spacer(modifier = Modifier.height(12.dp))
-        }
+      "No network requests yet"
+    }
+    val detail = when {
+      selectedOrigins.isEmpty() && selectedKinds.isEmpty() -> localizedNoNetworkFilterHint()
+      selectedOrigins.isEmpty() -> localizedNoNetworkOriginHint()
+      selectedKinds.isEmpty() -> localizedNoNetworkKindHint()
+      else -> localizedEmptyHint()
+    }
+    EmptyState(title = title, detail = detail)
+  } else {
+    LazyColumn(
+      modifier = Modifier.fillMaxSize(),
+      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+      items(
+        items = visibleEntries,
+        key = { it.id },
+        contentType = { "network" }
+      ) { entry ->
+        NetworkCard(
+          entry = entry,
+          onClick = { onSelectNetwork(entry.id) }
+        )
+      }
+      item("network_footer") {
+        Spacer(modifier = Modifier.height(12.dp))
       }
     }
   }
@@ -906,8 +1012,6 @@ private fun NetworkTab(
 @Composable
 private fun NetworkDetailScreen(
   entryId: String,
-  strings: Map<String, String>,
-  locale: String,
   onBack: () -> Unit,
   onClose: () -> Unit,
   onMissing: () -> Unit
@@ -928,15 +1032,14 @@ private fun NetworkDetailScreen(
   val sections by produceState(
     initialValue = emptyList<DetailItem>(),
     resolvedEntry,
-    strings,
-    locale
+    context
   ) {
     value =
       withContext(Dispatchers.Default) {
         if (isWebSocketKind(resolvedEntry.kind)) {
-          buildWebSocketSections(resolvedEntry, strings, locale, context)
+          buildWebSocketSections(resolvedEntry, context)
         } else {
-          buildHttpSections(resolvedEntry, strings, locale, context)
+          buildHttpSections(resolvedEntry, context)
         }
       }
   }
@@ -944,7 +1047,7 @@ private fun NetworkDetailScreen(
   Scaffold(
     topBar = {
       TopAppBar(
-        title = { Text(strings["requestDetails"] ?: "请求详情") },
+        title = { Text("Request Details") },
         colors = TopAppBarDefaults.topAppBarColors(
           containerColor = PanelColors.Background,
           titleContentColor = PanelColors.Text,
@@ -958,7 +1061,7 @@ private fun NetworkDetailScreen(
         },
         actions = {
           IconButton(onClick = onClose) {
-            Icon(Icons.Outlined.Close, contentDescription = strings["close"] ?: "关闭")
+            Icon(Icons.Outlined.Close, contentDescription = "Close")
           }
         }
       )
@@ -986,93 +1089,101 @@ private fun NetworkDetailScreen(
 private fun SearchAndActionRow(
   query: String,
   placeholder: String,
-  filterTitle: String,
+  menuTitle: String,
   clearLabel: String,
-  sortLabel: String,
-  sortOrder: SortOrder,
+  closeLabel: String,
   hasActiveFilters: Boolean,
   filterSections: List<FilterMenuSection>,
   onQueryChange: (String) -> Unit,
-  onToggleSort: () -> Unit,
-  onClear: () -> Unit
+  onClear: () -> Unit,
+  onClose: () -> Unit
 ) {
   var filterMenuExpanded by rememberSaveable { mutableStateOf(false) }
   val searchFieldTextStyle = MaterialTheme.typography.bodyLarge.copy(
     lineHeight = 20.sp,
     platformStyle = PlatformTextStyle(includeFontPadding = true)
   )
-  Row(
-    modifier = Modifier
-      .fillMaxWidth()
-      .padding(horizontal = 12.dp, vertical = 4.dp),
-    verticalAlignment = Alignment.CenterVertically
+  Surface(
+    modifier = Modifier.fillMaxWidth(),
+    color = PanelColors.Background
   ) {
-    OutlinedTextField(
-      value = query,
-      onValueChange = onQueryChange,
-      modifier = Modifier
-        .weight(1f)
-        .heightIn(min = 56.dp),
-      textStyle = searchFieldTextStyle,
-      placeholder = {
-        Text(
-          text = placeholder,
-          style = searchFieldTextStyle,
-          maxLines = 1
+    Column {
+      Row(
+        modifier = Modifier
+          .fillMaxWidth()
+          .statusBarsPadding()
+          .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        OutlinedTextField(
+          value = query,
+          onValueChange = onQueryChange,
+          modifier = Modifier
+            .weight(1f)
+            .heightIn(min = 40.dp),
+          textStyle = searchFieldTextStyle,
+          placeholder = {
+            Text(
+              text = placeholder,
+              style = searchFieldTextStyle,
+              maxLines = 1
+            )
+          },
+          leadingIcon = {
+            Icon(
+              imageVector = Icons.Outlined.Search,
+              contentDescription = null,
+              tint = PanelColors.MutedText
+            )
+          },
+          singleLine = true,
+          keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+          shape = RoundedCornerShape(12.dp),
+          colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = PanelColors.Surface,
+            unfocusedContainerColor = PanelColors.Surface,
+            focusedBorderColor = PanelColors.Primary.copy(alpha = 0.45f),
+            unfocusedBorderColor = PanelColors.Border,
+            focusedTextColor = PanelColors.Text,
+            unfocusedTextColor = PanelColors.Text,
+            focusedPlaceholderColor = PanelColors.MutedText,
+            unfocusedPlaceholderColor = PanelColors.MutedText,
+            focusedLeadingIconColor = PanelColors.MutedText,
+            unfocusedLeadingIconColor = PanelColors.MutedText,
+            cursorColor = PanelColors.Primary
+          )
         )
-      },
-      leadingIcon = {
-        Icon(
-          imageVector = Icons.Outlined.Search,
-          contentDescription = null,
-          tint = PanelColors.MutedText
+        Spacer(modifier = Modifier.width(6.dp))
+        PanelActionButton(
+          imageVector = Icons.Outlined.DeleteOutline,
+          contentDescription = clearLabel,
+          onClick = onClear,
+          tint = Color(0xFFB42318)
         )
-      },
-      singleLine = true,
-      keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
-      shape = RoundedCornerShape(12.dp),
-      colors = OutlinedTextFieldDefaults.colors(
-        focusedContainerColor = PanelColors.Surface,
-        unfocusedContainerColor = PanelColors.Surface,
-        focusedBorderColor = PanelColors.Primary.copy(alpha = 0.45f),
-        unfocusedBorderColor = PanelColors.Border,
-        focusedTextColor = PanelColors.Text,
-        unfocusedTextColor = PanelColors.Text,
-        focusedPlaceholderColor = PanelColors.MutedText,
-        unfocusedPlaceholderColor = PanelColors.MutedText,
-        focusedLeadingIconColor = PanelColors.MutedText,
-        unfocusedLeadingIconColor = PanelColors.MutedText,
-        cursorColor = PanelColors.Primary
-      )
-    )
-    Spacer(modifier = Modifier.width(6.dp))
-    Box {
-      PanelActionButton(
-        imageVector = Icons.Outlined.FilterList,
-        contentDescription = filterTitle,
-        onClick = { filterMenuExpanded = true },
-        active = hasActiveFilters,
-        tint = if (hasActiveFilters) Color.White else PanelColors.Primary
-      )
-      FilterDropdownMenu(
-        expanded = filterMenuExpanded,
-        onDismissRequest = { filterMenuExpanded = false },
-        sections = filterSections
-      )
+        Spacer(modifier = Modifier.width(6.dp))
+        Box {
+          PanelActionButton(
+            imageVector = Icons.Outlined.FilterList,
+            contentDescription = menuTitle,
+            onClick = { filterMenuExpanded = true },
+            active = hasActiveFilters,
+            tint = if (hasActiveFilters) Color.White else PanelColors.Primary
+          )
+          FilterDropdownMenu(
+            expanded = filterMenuExpanded,
+            onDismissRequest = { filterMenuExpanded = false },
+            sections = filterSections
+          )
+        }
+        Spacer(modifier = Modifier.width(6.dp))
+        PanelActionButton(
+          imageVector = Icons.Outlined.Close,
+          contentDescription = closeLabel,
+          onClick = onClose
+        )
+      }
+      HorizontalDivider(color = PanelColors.Border)
     }
-    Spacer(modifier = Modifier.width(6.dp))
-    PanelActionButton(
-      imageVector = if (sortOrder == SortOrder.Asc) Icons.Outlined.ArrowUpward else Icons.Outlined.ArrowDownward,
-      contentDescription = sortLabel,
-      onClick = onToggleSort
-    )
-    Spacer(modifier = Modifier.width(6.dp))
-    PanelActionButton(
-      imageVector = Icons.Outlined.DeleteOutline,
-      contentDescription = clearLabel,
-      onClick = onClear,
-      tint = Color(0xFFB42318)
-    )
   }
 }
 
@@ -1095,7 +1206,8 @@ private fun PanelActionButton(
     Icon(
       imageVector = imageVector,
       contentDescription = contentDescription,
-      modifier = Modifier.size(18.dp),
+      modifier = Modifier
+        .size(18.dp),
       tint = if (active) Color.White else tint
     )
   }
@@ -1150,9 +1262,7 @@ private fun FilterDropdownMenu(
 
 @Composable
 private fun LogCard(
-  log: DebugLogEntry,
-  strings: Map<String, String>,
-  locale: String
+  log: DebugLogEntry
 ) {
   var expanded by remember(log.id) { mutableStateOf(false) }
   var detailsOverflow by remember(log.id) { mutableStateOf(false) }
@@ -1183,80 +1293,88 @@ private fun LogCard(
         modifier = Modifier
           .padding(12.dp)
       ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          PanelChip(
-            text = localizedOriginTitle(log.origin, strings),
-            background = if (isNativeOrigin(log.origin)) PanelColors.Primary else PanelColors.Control,
-            foreground = if (isNativeOrigin(log.origin)) Color.White else PanelColors.MutedText
-          )
-          Spacer(modifier = Modifier.width(8.dp))
-          PanelChip(
-            text = log.type.uppercase(Locale.ROOT),
-            background = tone.background,
-            foreground = tone.foreground
-          )
-          Spacer(modifier = Modifier.weight(1f))
-          Text(
-            text = log.timestamp,
-            style = MaterialTheme.typography.labelMedium,
-            color = PanelColors.MutedText
-          )
-          IconButton(onClick = {
-            copyToClipboard(
-              text = formatLogCopyText(log),
-              successMessage = strings["copySingleSuccess"] ?: "已复制到剪贴板",
-              context = context
-            )
-          }) {
-            Icon(
-              imageVector = Icons.Outlined.ContentCopy,
-              contentDescription = strings["copySingleA11y"] ?: "复制该条日志",
-              tint = tone.foreground
-            )
-          }
-        }
-
-        Column(
-          modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = if (details.isNotBlank()) 6.dp else 8.dp)
-        ) {
-          if (details.isNotBlank()) {
-            Text(
-              text = details,
-              style = MaterialTheme.typography.labelMedium,
-              color = PanelColors.MutedText,
-              maxLines = if (expanded) Int.MAX_VALUE else 2,
-              overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
-              modifier = Modifier.fillMaxWidth(),
-              onTextLayout = { layoutResult ->
-                if (!expanded) {
-                  detailsOverflow = layoutResult.hasVisualOverflow
+        SelectionContainer(modifier = Modifier.fillMaxWidth()) {
+          Column(modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              PanelChip(
+                text = localizedOriginTitle(log.origin),
+                background = if (isNativeOrigin(log.origin)) PanelColors.Primary else PanelColors.Control,
+                foreground = if (isNativeOrigin(log.origin)) Color.White else PanelColors.MutedText
+              )
+              Spacer(modifier = Modifier.width(8.dp))
+              PanelChip(
+                text = log.type.uppercase(Locale.ROOT),
+                background = tone.background,
+                foreground = tone.foreground
+              )
+              Spacer(modifier = Modifier.weight(1f))
+              Text(
+                text = log.timestamp,
+                style = MaterialTheme.typography.labelMedium,
+                color = PanelColors.MutedText
+              )
+              DisableSelection {
+                IconButton(onClick = {
+                  copyToClipboard(
+                    text = formatLogCopyText(log),
+                    successMessage = "Copied to clipboard",
+                    context = context
+                  )
+                }) {
+                  Icon(
+                    imageVector = Icons.Outlined.ContentCopy,
+                    contentDescription = "Copy log entry",
+                    tint = tone.foreground
+                  )
                 }
               }
-            )
-          }
-
-          Text(
-            text = log.message,
-            color = PanelColors.Text,
-            fontFamily = FontFamily.Monospace,
-            maxLines = if (expanded) Int.MAX_VALUE else 6,
-            overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
-            modifier = Modifier
-              .fillMaxWidth()
-              .padding(top = if (details.isNotBlank()) 8.dp else 0.dp),
-            onTextLayout = { layoutResult ->
-              if (!expanded) {
-                messageOverflow = layoutResult.hasVisualOverflow
-              }
             }
-          )
+
+            Column(
+              modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = if (details.isNotBlank()) 6.dp else 8.dp)
+            ) {
+              if (details.isNotBlank()) {
+                Text(
+                  text = details,
+                  style = MaterialTheme.typography.labelMedium,
+                  color = PanelColors.MutedText,
+                  maxLines = if (expanded) Int.MAX_VALUE else 2,
+                  overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                  modifier = Modifier.fillMaxWidth(),
+                  onTextLayout = { layoutResult ->
+                    if (!expanded) {
+                      detailsOverflow = layoutResult.hasVisualOverflow
+                    }
+                  }
+                )
+              }
+
+              Text(
+                text = log.message,
+                color = PanelColors.Text,
+                fontFamily = FontFamily.Monospace,
+                maxLines = if (expanded) Int.MAX_VALUE else 6,
+                overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .padding(top = if (details.isNotBlank()) 8.dp else 0.dp),
+                onTextLayout = { layoutResult ->
+                  if (!expanded) {
+                    messageOverflow = layoutResult.hasVisualOverflow
+                  }
+                }
+              )
+            }
+          }
         }
 
         if (canExpand) {
-          TextButton(onClick = { expanded = !expanded }) {
-            Text(if (expanded) localizedCollapseLabel(locale) else localizedExpandLabel(locale))
+          DisableSelection {
+            TextButton(onClick = { expanded = !expanded }) {
+              Text(if (expanded) localizedCollapseLabel() else localizedExpandLabel())
+            }
           }
         }
       }
@@ -1268,10 +1386,9 @@ private fun LogCard(
 @Composable
 private fun NetworkCard(
   entry: DebugNetworkEntry,
-  strings: Map<String, String>,
   onClick: () -> Unit
 ) {
-  val durationLabel = strings["duration"] ?: "耗时"
+  val durationLabel = "Duration"
   val tone = remember(entry.state, entry.status) { toneForNetwork(entry) }
   val trailingBadgeText = remember(entry.kind, entry.status, entry.state) { networkTrailingBadgeTitle(entry) }
   val showStateLabel = remember(entry.kind, entry.status) { shouldShowNetworkStateLabel(entry) }
@@ -1304,7 +1421,7 @@ private fun NetworkCard(
       Column(modifier = Modifier.padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
           PanelChip(
-            text = localizedOriginTitle(entry.origin, strings),
+            text = localizedOriginTitle(entry.origin),
             background = if (isNativeOrigin(entry.origin)) PanelColors.Primary else PanelColors.Control,
             foreground = if (isNativeOrigin(entry.origin)) Color.White else PanelColors.MutedText
           )
@@ -1521,7 +1638,6 @@ private fun filterNetwork(
   sortOrder: SortOrder,
   selectedOrigins: Set<String>,
   selectedKinds: Set<String>,
-  locale: String,
   allFiltersSelected: Boolean = false,
   searchCache: SearchTextCache<DebugNetworkEntry>? = null
 ): List<DebugNetworkEntry> {
@@ -1542,7 +1658,7 @@ private fun filterNetwork(
       if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind, searchCache)) {
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, kind, searchCache)) {
         continue
       }
       result.add(entry)
@@ -1553,7 +1669,7 @@ private fun filterNetwork(
       if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, locale, kind, searchCache)) {
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, kind, searchCache)) {
         continue
       }
       result.add(entry)
@@ -1581,7 +1697,6 @@ private fun matchesLogQuery(
 private fun matchesNetworkQuery(
   entry: DebugNetworkEntry,
   query: String,
-  locale: String,
   kind: NetworkKindFilter = normalizedNetworkKind(entry.kind),
   searchCache: SearchTextCache<DebugNetworkEntry>? = null
 ): Boolean {
@@ -1589,7 +1704,7 @@ private fun matchesNetworkQuery(
     return cache.matches(entry, query)
   }
 
-  val kindTitle = localizedNetworkKindFilterTitle(kind, locale)
+  val kindTitle = localizedNetworkKindFilterTitle(kind)
   return entry.url.contains(query, ignoreCase = true) ||
     entry.origin.contains(query, ignoreCase = true) ||
     entry.kind.contains(query, ignoreCase = true) ||
@@ -1606,54 +1721,52 @@ private fun matchesNetworkQuery(
 
 private fun buildHttpSections(
   entry: DebugNetworkEntry,
-  strings: Map<String, String>,
-  locale: String,
   context: Context
 ): List<DetailItem> {
   val items = mutableListOf(
-    DetailItem(localizedOriginTitleLabel(locale), localizedOriginTitle(entry.origin, strings)),
-    DetailItem(localizedNetworkTypeTitle(locale), localizedNetworkKindTitle(entry.kind, locale)),
-    DetailItem(strings["method"] ?: "方法", entry.method),
-    DetailItem(strings["status"] ?: "状态码", httpStatusDetailText(entry)),
-    DetailItem(strings["protocol"] ?: "协议", entry.protocol ?: "-"),
+    DetailItem(localizedOriginTitleLabel(), localizedOriginTitle(entry.origin)),
+    DetailItem(localizedNetworkTypeTitle(), localizedNetworkKindTitle(entry.kind)),
+    DetailItem("Method", entry.method),
+    DetailItem("Status", httpStatusDetailText(entry)),
+    DetailItem("Protocol", entry.protocol ?: "-"),
     DetailItem("URL", entry.url, monospace = true),
-    DetailItem(strings["duration"] ?: "耗时", entry.durationMs?.let { "${it}ms" } ?: "-"),
-    DetailItem(strings["requestHeaders"] ?: "请求头", headerText(entry.requestHeaders), monospace = true),
-    DetailItem(strings["responseHeaders"] ?: "响应头", headerText(entry.responseHeaders), monospace = true),
+    DetailItem("Duration", entry.durationMs?.let { "${it}ms" } ?: "-"),
+    DetailItem("Request Headers", headerText(entry.requestHeaders), monospace = true),
+    DetailItem("Response Headers", headerText(entry.responseHeaders), monospace = true),
     DetailItem(
-      strings["requestBody"] ?: "请求体",
-      formattedStructuredContent(entry.requestBody, strings["noRequestBody"] ?: "无请求体"),
+      "Request Body",
+      formattedStructuredContent(entry.requestBody, "No request body"),
       monospace = true
     ),
     DetailItem(
-      strings["responseBody"] ?: "响应体",
-      formattedStructuredContent(entry.responseBody, strings["noResponseBody"] ?: "无响应体"),
+      "Response Body",
+      formattedStructuredContent(entry.responseBody, "No response body"),
       monospace = true
     )
   )
 
   if (shouldShowNetworkStateLabel(entry)) {
-    items.add(4, DetailItem(strings["state"] ?: "状态", entry.state))
+    items.add(4, DetailItem("State", entry.state))
   }
 
   entry.events?.takeIf { it.isNotBlank() }?.let { events ->
     items += DetailItem(
-      title = localizedNetworkEventsTitle(locale),
-      content = formattedMessagesText(events, localizedNoNetworkEvents(locale)),
+      title = localizedNetworkEventsTitle(),
+      content = formattedMessagesText(events, localizedNoNetworkEvents()),
       monospace = true
     )
   }
 
   if (!entry.error.isNullOrBlank()) {
-    items += DetailItem(strings["errorTitle"] ?: "错误", entry.error.orEmpty(), monospace = true)
+    items += DetailItem("Error", entry.error.orEmpty(), monospace = true)
   }
 
   if (entry.responseSize != null || !entry.responseContentType.isNullOrBlank()) {
     items += DetailItem(
-      title = localizedResponseMetaTitle(locale),
+      title = localizedResponseMetaTitle(),
       content = buildString {
-        appendLine("${localizedResponseTypeTitle(locale)}: ${entry.responseType ?: "-"}")
-        appendLine("${localizedContentTypeTitle(locale)}: ${entry.responseContentType ?: "-"}")
+        appendLine("${localizedResponseTypeTitle()}: ${entry.responseType ?: "-"}")
+        appendLine("${localizedContentTypeTitle()}: ${entry.responseContentType ?: "-"}")
         append("Size: ${formatByteCount(context, entry.responseSize)}")
       },
       monospace = true
@@ -1665,35 +1778,33 @@ private fun buildHttpSections(
 
 private fun buildWebSocketSections(
   entry: DebugNetworkEntry,
-  strings: Map<String, String>,
-  locale: String,
   context: Context
 ): List<DetailItem> {
   val inferredIncoming = entry.messageCountIn ?: countMessages(entry.messages, "<<")
   val inferredOutgoing = entry.messageCountOut ?: countMessages(entry.messages, ">>")
   val items = mutableListOf(
-    DetailItem(localizedOriginTitleLabel(locale), localizedOriginTitle(entry.origin, strings)),
-    DetailItem(localizedNetworkTypeTitle(locale), localizedNetworkKindTitle(entry.kind, locale)),
-    DetailItem(strings["method"] ?: "方法", entry.method),
-    DetailItem(strings["state"] ?: "状态", entry.state),
-    DetailItem(strings["protocol"] ?: "协议", entry.protocol ?: "-"),
+    DetailItem(localizedOriginTitleLabel(), localizedOriginTitle(entry.origin)),
+    DetailItem(localizedNetworkTypeTitle(), localizedNetworkKindTitle(entry.kind)),
+    DetailItem("Method", entry.method),
+    DetailItem("State", entry.state),
+    DetailItem("Protocol", entry.protocol ?: "-"),
     DetailItem("Requested protocols", entry.requestedProtocols ?: "-"),
     DetailItem("URL", entry.url, monospace = true),
-    DetailItem(strings["duration"] ?: "耗时", entry.durationMs?.let { "${it}ms" } ?: "-"),
+    DetailItem("Duration", entry.durationMs?.let { "${it}ms" } ?: "-"),
     DetailItem("Messages", "IN $inferredIncoming / OUT $inferredOutgoing"),
     DetailItem(
       "Bytes",
       "IN ${formatByteCount(context, entry.bytesIn)} / OUT ${formatByteCount(context, entry.bytesOut)}"
     ),
-    DetailItem(strings["requestHeaders"] ?: "请求头", headerText(entry.requestHeaders), monospace = true)
+    DetailItem("Request Headers", headerText(entry.requestHeaders), monospace = true)
   )
 
   if (entry.responseHeaders.isNotEmpty()) {
-    items += DetailItem(strings["responseHeaders"] ?: "响应头", headerText(entry.responseHeaders), monospace = true)
+    items += DetailItem("Response Headers", headerText(entry.responseHeaders), monospace = true)
   }
 
   if (entry.status != null) {
-    items += DetailItem(strings["status"] ?: "状态码", httpStatusDisplayText(entry))
+    items += DetailItem("Status", httpStatusDisplayText(entry))
   }
 
   if (entry.requestedCloseCode != null || !entry.requestedCloseReason.isNullOrBlank()) {
@@ -1704,15 +1815,15 @@ private fun buildWebSocketSections(
     items += DetailItem("Close result", closeResultSummary(entry), monospace = true)
   }
 
-  items += DetailItem("Event timeline", entry.events ?: localizedNoEventsText(locale), monospace = true)
+  items += DetailItem("Event timeline", entry.events ?: localizedNoEventsText(), monospace = true)
   items += DetailItem(
-    strings["messages"] ?: "消息",
-    formattedWebSocketMessagesText(entry.messages, strings["noMessages"] ?: "暂无消息"),
+    "Messages",
+    formattedWebSocketMessagesText(entry.messages, "No messages"),
     monospace = true
   )
 
   if (!entry.error.isNullOrBlank()) {
-    items += DetailItem(strings["errorTitle"] ?: "错误", entry.error.orEmpty(), monospace = true)
+    items += DetailItem("Error", entry.error.orEmpty(), monospace = true)
   }
 
   return items
@@ -1980,34 +2091,25 @@ private fun shouldShowNetworkStateLabel(entry: DebugNetworkEntry): Boolean {
   return entry.status == null
 }
 
-private fun localizedNetworkTypeTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Request type"
-    locale.startsWith("ja") -> "通信種別"
-    locale == "zh-TW" -> "請求類型"
-    else -> "请求类型"
-  }
+private fun localizedNetworkTypeTitle(): String {
+  return "Request Type"
 }
 
-private fun localizedNetworkKindFilterTitle(kind: NetworkKindFilter, locale: String): String {
+private fun localizedNetworkKindFilterTitle(kind: NetworkKindFilter): String {
   return when (kind) {
     NetworkKindFilter.Http -> "XHR/Fetch"
     NetworkKindFilter.WebSocket -> "WebSocket"
-    NetworkKindFilter.Other -> when {
-      locale.startsWith("en") -> "Other"
-      locale.startsWith("ja") -> "その他"
-      else -> "其他"
-    }
+    NetworkKindFilter.Other -> "Other"
   }
 }
 
-private fun localizedNetworkKindTitle(rawKind: String, locale: String): String {
+private fun localizedNetworkKindTitle(rawKind: String): String {
   return when (val normalized = normalizedNetworkKind(rawKind)) {
-    NetworkKindFilter.Http -> localizedNetworkKindFilterTitle(normalized, locale)
-    NetworkKindFilter.WebSocket -> localizedNetworkKindFilterTitle(normalized, locale)
+    NetworkKindFilter.Http -> localizedNetworkKindFilterTitle(normalized)
+    NetworkKindFilter.WebSocket -> localizedNetworkKindFilterTitle(normalized)
     NetworkKindFilter.Other -> rawKind.trim().takeIf {
       it.isNotEmpty() && !it.equals(NetworkKindFilter.Other.rawValue, ignoreCase = true)
-    }?.uppercase(Locale.ROOT) ?: localizedNetworkKindFilterTitle(normalized, locale)
+    }?.uppercase(Locale.ROOT) ?: localizedNetworkKindFilterTitle(normalized)
   }
 }
 
@@ -2015,158 +2117,92 @@ private fun isNativeOrigin(origin: String): Boolean {
   return origin.equals("native", ignoreCase = true)
 }
 
-private fun localizedOriginTitle(origin: String, strings: Map<String, String>): String {
+private fun localizedOriginTitle(origin: String): String {
   return if (isNativeOrigin(origin)) {
-    strings["nativeLogOrigin"] ?: "native"
+    "Native"
   } else {
-    strings["jsLogOrigin"] ?: "JS"
+    "JS"
   }
 }
 
-private fun localizedOriginTitleLabel(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Origin"
-    locale.startsWith("ja") -> "送信元"
-    locale == "zh-TW" -> "來源"
-    else -> "来源"
-  }
+private fun localizedOriginTitleLabel(): String {
+  return "Origin"
 }
 
-private fun localizedLevelTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Level"
-    locale.startsWith("ja") -> "レベル"
-    locale == "zh-TW" -> "級別"
-    else -> "级别"
-  }
+private fun localizedLevelTitle(): String {
+  return "Level"
 }
 
-private fun localizedSortTitle(locale: String, ascending: Boolean): String {
-  return when {
-    locale.startsWith("en") -> if (ascending) "Time Asc" else "Time Desc"
-    locale.startsWith("ja") -> if (ascending) "時間昇順" else "時間降順"
-    else -> if (ascending) "时间升序" else "时间倒序"
-  }
+private fun localizedSortTitle(ascending: Boolean): String {
+  return if (ascending) "Time Asc" else "Time Desc"
 }
 
-private fun localizedAndroidSearchPlaceholder(): String {
-  return ANDROID_SEARCH_PLACEHOLDER
+private fun localizedSortMenuTitle(): String {
+  return "Sort"
 }
 
-private fun localizedEmptyHint(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Try another keyword or generate new events."
-    locale.startsWith("ja") -> "別のキーワードを試すか、新しいイベントを生成してください。"
-    locale == "zh-TW" -> "換個關鍵字，或產生新的事件。"
-    else -> "换个关键词，或生成新的调试事件。"
-  }
+private fun localizedMenuTitle(): String {
+  return "Menu"
 }
 
-private fun localizedNoLevelHint(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Select at least one level to show logs."
-    locale.startsWith("ja") -> "少なくとも 1 つのレベルを選択してください。"
-    locale == "zh-TW" -> "至少選擇一個級別。"
-    else -> "至少选择一个日志级别。"
-  }
+private fun localizedLogsSearchPlaceholder(): String {
+  return LOGS_SEARCH_PLACEHOLDER
 }
 
-private fun localizedNoLogOriginHint(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Select JS or native to show logs."
-    locale.startsWith("ja") -> "JS または native を選択してください。"
-    locale == "zh-TW" -> "請選擇 JS 或 native 日誌。"
-    else -> "请选择 JS 或 native 日志。"
-  }
+private fun localizedNetworkSearchPlaceholder(): String {
+  return NETWORK_SEARCH_PLACEHOLDER
 }
 
-private fun localizedNoNetworkOriginHint(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Select JS or native to show network entries."
-    locale.startsWith("ja") -> "JS または native を選択してください。"
-    locale == "zh-TW" -> "請選擇 JS 或 native 網路請求。"
-    else -> "请选择 JS 或 native 网络请求。"
-  }
+private fun localizedEmptyHint(): String {
+  return "Try another keyword or generate new events."
 }
 
-private fun localizedNoNetworkKindHint(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Select at least one request type to show network entries."
-    locale.startsWith("ja") -> "少なくとも 1 つの通信種別を選択してください。"
-    locale == "zh-TW" -> "至少選擇一種請求類型。"
-    else -> "至少选择一种请求类型。"
-  }
+private fun localizedNoLevelHint(): String {
+  return "Select at least one level to show logs."
 }
 
-private fun localizedNoNetworkFilterHint(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Select at least one source and request type to show network entries."
-    locale.startsWith("ja") -> "少なくとも 1 つの送信元と通信種別を選択してください。"
-    locale == "zh-TW" -> "至少選擇一種來源與請求類型。"
-    else -> "至少选择一种来源和请求类型。"
-  }
+private fun localizedNoLogOriginHint(): String {
+  return "Select JS or Native to show logs."
 }
 
-private fun localizedNoNetworkResultTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "No matching network requests found"
-    locale.startsWith("ja") -> "一致する通信が見つかりません"
-    locale == "zh-TW" -> "未找到符合的網路請求"
-    else -> "未找到匹配的网络请求"
-  }
+private fun localizedNoNetworkOriginHint(): String {
+  return "Select JS or Native to show network entries."
 }
 
-private fun localizedResponseMetaTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Response metadata"
-    locale.startsWith("ja") -> "レスポンス情報"
-    locale == "zh-TW" -> "回應資訊"
-    else -> "响应信息"
-  }
+private fun localizedNoNetworkKindHint(): String {
+  return "Select at least one request type to show network entries."
 }
 
-private fun localizedResponseTypeTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Type"
-    locale.startsWith("ja") -> "種別"
-    locale == "zh-TW" -> "類型"
-    else -> "类型"
-  }
+private fun localizedNoNetworkFilterHint(): String {
+  return "Select at least one source and request type to show network entries."
 }
 
-private fun localizedContentTypeTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Content-Type"
-    locale.startsWith("ja") -> "Content-Type"
-    else -> "Content-Type"
-  }
+private fun localizedNoNetworkResultTitle(): String {
+  return "No matching network requests found"
 }
 
-private fun localizedNoEventsText(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "No events yet"
-    locale.startsWith("ja") -> "イベントはまだありません"
-    locale == "zh-TW" -> "暫無事件"
-    else -> "暂无事件"
-  }
+private fun localizedResponseMetaTitle(): String {
+  return "Response Metadata"
 }
 
-private fun localizedExpandLabel(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Expand"
-    locale.startsWith("ja") -> "展開"
-    locale == "zh-TW" -> "展開"
-    else -> "展开"
-  }
+private fun localizedResponseTypeTitle(): String {
+  return "Type"
 }
 
-private fun localizedCollapseLabel(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Collapse"
-    locale.startsWith("ja") -> "折りたたむ"
-    locale == "zh-TW" -> "收起"
-    else -> "收起"
-  }
+private fun localizedContentTypeTitle(): String {
+  return "Content-Type"
+}
+
+private fun localizedNoEventsText(): String {
+  return "No events yet"
+}
+
+private fun localizedExpandLabel(): String {
+  return "Expand"
+}
+
+private fun localizedCollapseLabel(): String {
+  return "Collapse"
 }
 
 private fun buildCapabilitySummary(
@@ -2934,22 +2970,12 @@ private fun localizedLimitationAndroidNativeNetwork(locale: String): String {
   }
 }
 
-private fun localizedNetworkEventsTitle(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "Events"
-    locale.startsWith("ja") -> "イベント"
-    locale == "zh-TW" -> "事件"
-    else -> "事件"
-  }
+private fun localizedNetworkEventsTitle(): String {
+  return "Events"
 }
 
-private fun localizedNoNetworkEvents(locale: String): String {
-  return when {
-    locale.startsWith("en") -> "No event timeline"
-    locale.startsWith("ja") -> "イベントタイムラインはありません"
-    locale == "zh-TW" -> "暫無事件時間線"
-    else -> "暂无事件时间线"
-  }
+private fun localizedNoNetworkEvents(): String {
+  return "No event timeline"
 }
 
 private fun localizedLimitationNetworkTabDisabled(locale: String): String {
@@ -3122,14 +3148,12 @@ private fun buildNetworkDurationSummary(
 
 private fun formatNetworkSummaryText(
   entry: DebugNetworkEntry,
-  strings: Map<String, String>,
-  locale: String,
   context: Context
 ): String {
   val parts = mutableListOf(
     "${entry.method.uppercase(Locale.ROOT)} ${entry.url}",
-    "origin=${localizedOriginTitle(entry.origin, strings)}",
-    "type=${localizedNetworkKindTitle(entry.kind, locale)}",
+    "origin=${localizedOriginTitle(entry.origin)}",
+    "type=${localizedNetworkKindTitle(entry.kind)}",
     "state=${entry.state}",
     "status=${entry.status?.let { httpStatusDisplayText(entry) } ?: networkKindBadgeTitle(entry.kind)}",
     "duration=${entry.durationMs?.let { "${it}ms" } ?: "-"}"
