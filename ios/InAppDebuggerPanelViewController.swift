@@ -7,7 +7,6 @@ private enum ActiveTab: Int {
   case appInfo
 }
 
-private let panelTitle = "Debugging Panel"
 private let panelSearchPlaceholder = "Search logs..."
 private let logsTabTitle = "Logs"
 private let networkTabTitle = "Network"
@@ -319,6 +318,48 @@ private func applyPanelNavigationItemAppearance(_ navigationItem: UINavigationIt
   }
 }
 
+private final class InAppDebuggerLegacyBarButton: UIButton {
+  static let sideLength: CGFloat = 34
+
+  override var intrinsicContentSize: CGSize {
+    CGSize(width: Self.sideLength, height: Self.sideLength)
+  }
+
+  init(symbolName: String, accessibilityLabel: String, target: AnyObject?, action: Selector?) {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    tintColor = PanelColors.primary
+    self.accessibilityLabel = accessibilityLabel
+    accessibilityTraits.insert(.button)
+    setImage(UIImage(systemName: symbolName), for: .normal)
+    setPreferredSymbolConfiguration(
+      UIImage.SymbolConfiguration(pointSize: 17, weight: .regular),
+      forImageIn: .normal
+    )
+
+    if #available(iOS 15.0, *) {
+      var config = UIButton.Configuration.plain()
+      config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 6, bottom: 6, trailing: 6)
+      configuration = config
+    } else {
+      contentEdgeInsets = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+    }
+
+    NSLayoutConstraint.activate([
+      widthAnchor.constraint(equalToConstant: Self.sideLength),
+      heightAnchor.constraint(equalToConstant: Self.sideLength),
+    ])
+
+    if let target, let action {
+      addTarget(target, action: action, for: .touchUpInside)
+    }
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+}
+
 final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, UITabBarDelegate, UISearchResultsUpdating, UIGestureRecognizerDelegate {
   private enum ReloadReason {
     case full
@@ -334,6 +375,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private static let maxIncrementalTableMutationCount = 32
   private static let tableBottomInset: CGFloat = 18
+  private static let legacyTabBarBaseHeight: CGFloat = 49
 
   private var activeTab: ActiveTab = .logs
   private var searchText = ""
@@ -356,7 +398,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var renderedAppInfoSignature = ""
   private var renderedTableTab: ActiveTab?
   private var lastAppliedBottomBarInset: CGFloat = -1
-  private var legacySearchFieldWidthConstraint: NSLayoutConstraint?
+  private var legacyTabBarHeightConstraint: NSLayoutConstraint?
+  private var legacyHeaderWidthConstraint: NSLayoutConstraint?
   private lazy var dismissKeyboardTapGestureRecognizer: UITapGestureRecognizer = {
     let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap))
     recognizer.cancelsTouchesInView = false
@@ -393,11 +436,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     field.returnKeyType = .done
     field.addTarget(self, action: #selector(searchTextChanged(_:)), for: .editingChanged)
     field.translatesAutoresizingMaskIntoConstraints = false
-    let widthConstraint = field.widthAnchor.constraint(equalToConstant: 220)
-    widthConstraint.isActive = true
-    legacySearchFieldWidthConstraint = widthConstraint
+    field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
     NSLayoutConstraint.activate([
       field.heightAnchor.constraint(equalToConstant: 36),
+      field.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
     ])
     return field
   }()
@@ -430,6 +473,66 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       action: #selector(closeTapped)
     )
     return item
+  }()
+
+  private lazy var legacyClearButton: InAppDebuggerLegacyBarButton = {
+    InAppDebuggerLegacyBarButton(
+      symbolName: "trash",
+      accessibilityLabel: "Clear",
+      target: self,
+      action: #selector(clearTapped)
+    )
+  }()
+
+  private lazy var legacyMenuButton: InAppDebuggerLegacyBarButton = {
+    let button = InAppDebuggerLegacyBarButton(
+      symbolName: "ellipsis.circle",
+      accessibilityLabel: localizedMenuTitle(),
+      target: nil,
+      action: nil
+    )
+    button.showsMenuAsPrimaryAction = true
+    return button
+  }()
+
+  private lazy var legacyCloseButton: InAppDebuggerLegacyBarButton = {
+    InAppDebuggerLegacyBarButton(
+      symbolName: "xmark",
+      accessibilityLabel: "Close",
+      target: self,
+      action: #selector(closeTapped)
+    )
+  }()
+
+  private lazy var legacyHeaderContainer: UIView = {
+    let container = UIView()
+    container.translatesAutoresizingMaskIntoConstraints = false
+
+    let stack = UIStackView(arrangedSubviews: [
+      legacySearchField,
+      legacyClearButton,
+      legacyMenuButton,
+      legacyCloseButton,
+    ])
+    stack.axis = .horizontal
+    stack.alignment = .center
+    stack.spacing = 8
+    stack.translatesAutoresizingMaskIntoConstraints = false
+
+    container.addSubview(stack)
+
+    NSLayoutConstraint.activate([
+      stack.topAnchor.constraint(equalTo: container.topAnchor),
+      stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+      container.heightAnchor.constraint(equalToConstant: 36),
+    ])
+
+    let widthConstraint = container.widthAnchor.constraint(equalToConstant: 320)
+    widthConstraint.isActive = true
+    legacyHeaderWidthConstraint = widthConstraint
+    return container
   }()
 
   private lazy var trailingButtonGroup: UIBarButtonItemGroup = {
@@ -542,7 +645,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
-    updateLegacySearchFieldWidthIfNeeded()
+    updateLegacyHeaderWidthIfNeeded()
+    updateLegacyTabBarHeightIfNeeded()
     updateBottomContentInsetsIfNeeded()
     updateLogRetentionNoticeIfNeeded()
   }
@@ -590,21 +694,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private func configureNavigationBar() {
     let shouldShowSearchControl = activeTab != .appInfo
     if #available(iOS 26.0, *) {
-      title = shouldShowSearchControl ? nil : panelTitle
+      title = nil
       navigationItem.titleView = nil
       navigationItem.searchController = shouldShowSearchControl ? panelSearchController : nil
       navigationItem.preferredSearchBarPlacement = .integrated
       navigationItem.searchBarPlacementAllowsToolbarIntegration = false
-      navigationItem.pinnedTrailingGroup = trailingButtonGroup
-      navigationItem.rightBarButtonItems = nil
+      navigationItem.pinnedTrailingGroup = shouldShowSearchControl ? trailingButtonGroup : nil
+      navigationItem.rightBarButtonItems = shouldShowSearchControl ? nil : [closeBarButtonItem]
     } else {
-      title = panelTitle
+      title = nil
       navigationItem.searchController = nil
-      navigationItem.titleView = shouldShowSearchControl ? legacySearchField : nil
+      navigationItem.titleView = legacyHeaderContainer
       if #available(iOS 16.0, *) {
         navigationItem.pinnedTrailingGroup = nil
       }
-      navigationItem.rightBarButtonItems = [closeBarButtonItem, menuBarButtonItem, clearBarButtonItem]
+      navigationItem.rightBarButtonItems = nil
     }
 
     updateTabBarState()
@@ -651,16 +755,35 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       tabBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
+
+    if #unavailable(iOS 26.0) {
+      let heightConstraint = tabBar.heightAnchor.constraint(equalToConstant: Self.legacyTabBarBaseHeight)
+      heightConstraint.isActive = true
+      legacyTabBarHeightConstraint = heightConstraint
+    }
   }
 
-  private func updateLegacySearchFieldWidthIfNeeded() {
-    guard navigationItem.titleView === legacySearchField else {
+  private func updateLegacyHeaderWidthIfNeeded() {
+    guard navigationItem.titleView === legacyHeaderContainer, let legacyHeaderWidthConstraint else {
       return
     }
 
-    let reservedWidth: CGFloat = 156
-    let availableWidth = max(180, min(320, view.bounds.width - reservedWidth))
-    legacySearchFieldWidthConstraint?.constant = availableWidth
+    let navigationBarWidth = navigationController?.navigationBar.bounds.width ?? view.bounds.width
+    let horizontalMargin: CGFloat = 20
+    let availableWidth = max(180, navigationBarWidth - horizontalMargin)
+    legacyHeaderWidthConstraint.constant = availableWidth
+  }
+
+  private func updateLegacyTabBarHeightIfNeeded() {
+    guard #unavailable(iOS 26.0), let legacyTabBarHeightConstraint else {
+      return
+    }
+
+    let nextHeight = Self.legacyTabBarBaseHeight + view.safeAreaInsets.bottom
+    guard abs(legacyTabBarHeightConstraint.constant - nextHeight) > 0.5 else {
+      return
+    }
+    legacyTabBarHeightConstraint.constant = nextHeight
   }
 
   private func installDismissKeyboardGestureIfNeeded() {
@@ -675,7 +798,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateBottomContentInsetsIfNeeded() {
-    let tabBarHeight = max(0, tabBar.bounds.height)
+    let resolvedTabBarHeight = legacyTabBarHeightConstraint?.constant ?? tabBar.bounds.height
+    let tabBarHeight = max(0, resolvedTabBarHeight)
     let bottomInset = tabBarHeight + Self.tableBottomInset
     guard abs(bottomInset - lastAppliedBottomBarInset) > 0.5 else {
       return
@@ -697,22 +821,25 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let placeholder = currentSearchPlaceholder()
 
     if #available(iOS 26.0, *) {
-      title = shouldShowSearchControl ? nil : panelTitle
+      title = nil
       navigationItem.searchController = shouldShowSearchControl ? panelSearchController : nil
       panelSearchController.searchBar.placeholder = placeholder
       panelSearchController.searchBar.text = searchText
       panelSearchController.searchBar.isEnabled = shouldShowSearchControl
     } else {
-      navigationItem.titleView = shouldShowSearchControl ? legacySearchField : nil
+      navigationItem.titleView = legacyHeaderContainer
       legacySearchField.placeholder = placeholder
       legacySearchField.text = searchText
       legacySearchField.isEnabled = shouldShowSearchControl
+      legacySearchField.alpha = shouldShowSearchControl ? 1 : 0
+      legacySearchField.isUserInteractionEnabled = shouldShowSearchControl
     }
   }
 
   private func updateFilterMenu() {
     guard activeTab != .appInfo else {
       menuBarButtonItem.menu = nil
+      legacyMenuButton.menu = nil
       return
     }
 
@@ -765,7 +892,9 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       menuChildren.append(kindMenu)
     }
 
-    menuBarButtonItem.menu = UIMenu(title: localizedMenuTitle(), children: menuChildren)
+    let menu = UIMenu(title: localizedMenuTitle(), children: menuChildren)
+    menuBarButtonItem.menu = menu
+    legacyMenuButton.menu = menu
   }
 
   private func makePersistentMenuAction(
@@ -791,13 +920,23 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func updateBarButtonItems() {
+    let shouldShowLegacyActions = activeTab != .appInfo
     clearBarButtonItem.accessibilityLabel = "Clear"
     menuBarButtonItem.accessibilityLabel = localizedMenuTitle()
     closeBarButtonItem.accessibilityLabel = "Close"
+    legacyClearButton.accessibilityLabel = "Clear"
+    legacyMenuButton.accessibilityLabel = localizedMenuTitle()
+    legacyCloseButton.accessibilityLabel = "Close"
 
     let areActionsEnabled = activeTab != .appInfo
     clearBarButtonItem.isEnabled = areActionsEnabled
     menuBarButtonItem.isEnabled = areActionsEnabled
+    legacyClearButton.isEnabled = shouldShowLegacyActions
+    legacyMenuButton.isEnabled = shouldShowLegacyActions
+    legacyClearButton.alpha = shouldShowLegacyActions ? 1 : 0
+    legacyMenuButton.alpha = shouldShowLegacyActions ? 1 : 0
+    legacyClearButton.isUserInteractionEnabled = shouldShowLegacyActions
+    legacyMenuButton.isUserInteractionEnabled = shouldShowLegacyActions
   }
 
   private func tabBarItem(for tab: ActiveTab) -> UITabBarItem {
