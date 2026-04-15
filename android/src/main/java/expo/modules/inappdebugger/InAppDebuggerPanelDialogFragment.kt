@@ -3,11 +3,19 @@ package expo.modules.inappdebugger
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.text.format.Formatter
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.ImageView
+import androidx.appcompat.widget.SearchView
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
@@ -30,7 +38,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -43,7 +50,6 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Public
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -58,8 +64,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
@@ -86,13 +90,11 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -104,6 +106,7 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -118,6 +121,10 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
   ): View {
     return ComposeView(requireContext()).apply {
       setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+      setOnTouchListener { _, event ->
+        dismissSearchFocusOnOutsideTouch(event)
+        false
+      }
       setContent {
         MaterialTheme(
           colorScheme = lightColorScheme(
@@ -159,6 +166,26 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
 
   private fun closePanel() {
     parentFragmentManager.popBackStack(PANEL_BACK_STACK_NAME, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+  }
+
+  private fun dismissSearchFocusOnOutsideTouch(event: MotionEvent?) {
+    if (event?.actionMasked != MotionEvent.ACTION_DOWN) {
+      return
+    }
+    val focusedView = activity?.currentFocus ?: return
+    val searchView = focusedView.findAncestorSearchView() ?: return
+    val searchBounds = Rect()
+    if (!searchView.getGlobalVisibleRect(searchBounds)) {
+      return
+    }
+    val touchX = event.rawX.roundToInt()
+    val touchY = event.rawY.roundToInt()
+    if (searchBounds.contains(touchX, touchY)) {
+      return
+    }
+    hideKeyboard(focusedView)
+    focusedView.clearFocus()
+    searchView.clearFocus()
   }
 
   private fun configureWindow() {
@@ -206,6 +233,23 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
       }
     }
   }
+
+  private fun hideKeyboard(target: View) {
+    val inputMethodManager =
+      target.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+    inputMethodManager.hideSoftInputFromWindow(target.windowToken, 0)
+  }
+}
+
+private fun View.findAncestorSearchView(): SearchView? {
+  var current: View? = this
+  while (current != null) {
+    if (current is SearchView) {
+      return current
+    }
+    current = current.parent as? View
+  }
+  return null
 }
 
 const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
@@ -1114,10 +1158,6 @@ private fun SearchAndActionRow(
   onClose: () -> Unit
 ) {
   var filterMenuExpanded by rememberSaveable { mutableStateOf(false) }
-  val searchFieldTextStyle = MaterialTheme.typography.bodyLarge.copy(
-    lineHeight = 20.sp,
-    platformStyle = PlatformTextStyle(includeFontPadding = true)
-  )
   Surface(
     modifier = Modifier.fillMaxWidth(),
     color = PanelColors.Background
@@ -1130,43 +1170,13 @@ private fun SearchAndActionRow(
           .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
       ) {
-        OutlinedTextField(
-          value = query,
-          onValueChange = onQueryChange,
+        NativeSearchField(
+          query = query,
+          placeholder = placeholder,
+          onQueryChange = onQueryChange,
           modifier = Modifier
             .weight(1f)
-            .heightIn(min = 40.dp),
-          textStyle = searchFieldTextStyle,
-          placeholder = {
-            Text(
-              text = placeholder,
-              style = searchFieldTextStyle,
-              maxLines = 1
-            )
-          },
-          leadingIcon = {
-            Icon(
-              imageVector = Icons.Outlined.Search,
-              contentDescription = null,
-              tint = PanelColors.MutedText
-            )
-          },
-          singleLine = true,
-          keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
-          shape = RoundedCornerShape(12.dp),
-          colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = PanelColors.Surface,
-            unfocusedContainerColor = PanelColors.Surface,
-            focusedBorderColor = PanelColors.Primary.copy(alpha = 0.45f),
-            unfocusedBorderColor = PanelColors.Border,
-            focusedTextColor = PanelColors.Text,
-            unfocusedTextColor = PanelColors.Text,
-            focusedPlaceholderColor = PanelColors.MutedText,
-            unfocusedPlaceholderColor = PanelColors.MutedText,
-            focusedLeadingIconColor = PanelColors.MutedText,
-            unfocusedLeadingIconColor = PanelColors.MutedText,
-            cursorColor = PanelColors.Primary
-          )
+            .heightIn(min = 40.dp)
         )
         Spacer(modifier = Modifier.width(6.dp))
         PanelActionButton(
@@ -1199,6 +1209,99 @@ private fun SearchAndActionRow(
       }
       HorizontalDivider(color = PanelColors.Border)
     }
+  }
+}
+
+@Composable
+private fun NativeSearchField(
+  query: String,
+  placeholder: String,
+  onQueryChange: (String) -> Unit,
+  modifier: Modifier = Modifier
+) {
+  AndroidView(
+    modifier = modifier,
+    factory = { context ->
+      SearchView(context).apply {
+        setIconifiedByDefault(false)
+        isIconified = false
+        isSubmitButtonEnabled = false
+        maxWidth = Int.MAX_VALUE
+        imeOptions = EditorInfo.IME_ACTION_DONE
+        queryHint = placeholder
+        minimumHeight = (40f * resources.displayMetrics.density).roundToInt()
+
+        val searchTextView =
+          findViewById<SearchView.SearchAutoComplete>(androidx.appcompat.R.id.search_src_text)
+        val searchIcon = findViewById<ImageView>(androidx.appcompat.R.id.search_mag_icon)
+        val clearIcon = findViewById<ImageView>(androidx.appcompat.R.id.search_close_btn)
+        val searchPlate = findViewById<View>(androidx.appcompat.R.id.search_plate)
+        val submitArea = findViewById<View>(androidx.appcompat.R.id.submit_area)
+
+        searchTextView?.apply {
+          setTextColor(PanelColors.Text.toArgb())
+          setHintTextColor(PanelColors.MutedText.toArgb())
+          textSize = 16f
+          isSingleLine = true
+          imeOptions = EditorInfo.IME_ACTION_DONE
+          inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+          setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        }
+
+        searchIcon?.setColorFilter(PanelColors.MutedText.toArgb())
+        clearIcon?.setColorFilter(PanelColors.MutedText.toArgb())
+        searchPlate?.background = null
+        submitArea?.background = null
+
+        setOnQueryTextFocusChangeListener { _, hasFocus ->
+          background = buildNativeSearchFieldBackground(context, hasFocus)
+        }
+        setOnQueryTextListener(object : SearchView.OnQueryTextListener {
+          override fun onQueryTextSubmit(text: String?): Boolean {
+            clearFocus()
+            return true
+          }
+
+          override fun onQueryTextChange(newText: String?): Boolean {
+            onQueryChange(newText.orEmpty())
+            return true
+          }
+        })
+
+        background = buildNativeSearchFieldBackground(context, hasFocus = false)
+        if (query.isNotEmpty()) {
+          setQuery(query, false)
+        }
+      }
+    },
+    update = { searchView ->
+      if (searchView.query?.toString() != query) {
+        searchView.setQuery(query, false)
+        searchView.findViewById<SearchView.SearchAutoComplete>(androidx.appcompat.R.id.search_src_text)
+          ?.let { textView ->
+          textView.setSelection(query.length)
+        }
+      }
+      if (searchView.queryHint?.toString() != placeholder) {
+        searchView.queryHint = placeholder
+      }
+    }
+  )
+}
+
+private fun buildNativeSearchFieldBackground(
+  context: Context,
+  hasFocus: Boolean
+): GradientDrawable {
+  val density = context.resources.displayMetrics.density
+  return GradientDrawable().apply {
+    shape = GradientDrawable.RECTANGLE
+    cornerRadius = 12f * density
+    setColor(PanelColors.Surface.toArgb())
+    setStroke(
+      maxOf(1, density.roundToInt()),
+      if (hasFocus) PanelColors.Primary.copy(alpha = 0.45f).toArgb() else PanelColors.Border.toArgb()
+    )
   }
 }
 
