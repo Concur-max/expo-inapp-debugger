@@ -201,6 +201,30 @@ export default function Root() {
 - iOS 原生：stdout、stderr、OSLog 轮询、未捕获 NSException、fatal signal 崩溃标记、部分 URLSession / WebSocket 信息。
 - Android 原生：当前应用进程 logcat、stdout、stderr、未捕获 Java/Kotlin 异常，部分 OkHttp HTTP / WebSocket 信息。
 
+如果 Android 宿主 App、原生模块，或接入的部分 SDK 会自己创建 `OkHttpClient`，推荐在创建 client 时走一次官方 helper。这样不需要逐条手动上报 request，也能把这批 native 请求并入调试面板：
+
+```kotlin
+import expo.modules.inappdebugger.InAppDebuggerOkHttpIntegration
+import okhttp3.OkHttpClient
+
+val client =
+  InAppDebuggerOkHttpIntegration
+    .newBuilder()
+    .build()
+```
+
+如果你已经有现成的 `OkHttpClient.Builder` / `OkHttpClient`，也可以直接包一层：
+
+```kotlin
+val builder = OkHttpClient.Builder()
+InAppDebuggerOkHttpIntegration.instrument(builder)
+
+val client = OkHttpClient()
+val instrumentedClient = InAppDebuggerOkHttpIntegration.instrument(client)
+```
+
+这条路径适合“宿主自己可控、但不一定走 React Native 默认网络模块”的 Android native 请求。它仍然不是系统级全抓；`OkHttp` 之外的网络栈，例如 `HttpURLConnection`、`Cronet` 或某些黑盒 SDK 自带实现，仍然需要单独适配。
+
 为了降低对宿主应用的影响，部分 native 深度采集会根据面板是否打开、当前 tab 是否激活、过滤条件是否选择 native 来延迟启动或减少 payload preview。
 
 ## Provider 配置

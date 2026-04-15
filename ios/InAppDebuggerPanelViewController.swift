@@ -1063,6 +1063,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         for: indexPath
       ) as? InAppDebuggerLogCell
       cell?.configure(entry: entry)
+      cell?.onMessageTap = { [weak self, weak tableView, weak cell] in
+        guard let self, let tableView, let cell, let currentIndexPath = tableView.indexPath(for: cell) else {
+          return
+        }
+        self.tableView(tableView, didSelectRowAt: currentIndexPath)
+      }
       return cell ?? UITableViewCell()
     case .network:
       guard displayedNetwork.indices.contains(indexPath.row) else {
@@ -2237,6 +2243,14 @@ private final class InAppDebuggerLogCell: UITableViewCell {
   private let timeLabel = UILabel()
   private let contextLabel = UILabel()
   private let messageTextView = InAppDebuggerSelectableTextView()
+  var onMessageTap: (() -> Void)?
+
+  private lazy var messageTapGestureRecognizer: UITapGestureRecognizer = {
+    let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleMessageTap(_:)))
+    recognizer.cancelsTouchesInView = false
+    recognizer.delegate = self
+    return recognizer
+  }()
 
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
     super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -2249,6 +2263,7 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
   override func prepareForReuse() {
     super.prepareForReuse()
+    onMessageTap = nil
     messageTextView.selectedRange = NSRange(location: 0, length: 0)
     messageTextView.overrideCopyText = nil
   }
@@ -2303,6 +2318,14 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     messageTextView.presentsSelectionMenuAutomatically = true
     messageTextView.textContainer.maximumNumberOfLines = 4
     messageTextView.textContainer.lineBreakMode = .byTruncatingTail
+    messageTextView.addGestureRecognizer(messageTapGestureRecognizer)
+    messageTextView.gestureRecognizers?.forEach { recognizer in
+      guard recognizer !== messageTapGestureRecognizer,
+            recognizer is UILongPressGestureRecognizer else {
+        return
+      }
+      messageTapGestureRecognizer.require(toFail: recognizer)
+    }
 
     let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView()])
     headerStack.axis = .horizontal
@@ -2336,6 +2359,20 @@ private final class InAppDebuggerLogCell: UITableViewCell {
       bodyStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
       bodyStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
     ])
+  }
+
+  override func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer,
+    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+  ) -> Bool {
+    gestureRecognizer === messageTapGestureRecognizer || otherGestureRecognizer === messageTapGestureRecognizer
+  }
+
+  @objc private func handleMessageTap(_ recognizer: UITapGestureRecognizer) {
+    guard recognizer.state == .ended, messageTextView.selectedRange.length == 0 else {
+      return
+    }
+    onMessageTap?()
   }
 }
 

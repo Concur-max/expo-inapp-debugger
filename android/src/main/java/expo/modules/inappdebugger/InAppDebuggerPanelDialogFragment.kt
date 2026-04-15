@@ -212,6 +212,7 @@ const val PANEL_BACK_STACK_NAME = "expo.modules.inappdebugger.panel.backstack"
 private const val LOGS_SEARCH_PLACEHOLDER = "Search logs..."
 private const val NETWORK_SEARCH_PLACEHOLDER = "Search network requests..."
 private val APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
+private val NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
 
 private enum class DebugTab {
   Logs,
@@ -1762,12 +1763,14 @@ private fun buildHttpSections(
     DetailItem(
       "Request Body",
       formattedStructuredContent(entry.requestBody, "No request body"),
-      monospace = true
+      monospace = true,
+      contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
     ),
     DetailItem(
       "Response Body",
       formattedStructuredContent(entry.responseBody, "No response body"),
-      monospace = true
+      monospace = true,
+      contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
     )
   )
 
@@ -2928,10 +2931,10 @@ private fun localizedCapabilityNativeDisabled(locale: String): String {
 
 private fun localizedCapabilityNetworkEnabled(locale: String): String {
   return when {
-    locale.startsWith("en") -> "JS XHR / WebSocket events plus Android native HTTP traffic and native WebSocket handshakes on instrumented OkHttp paths."
-    locale.startsWith("ja") -> "JS 層の XHR / WebSocket イベントに加え、計装済み OkHttp 経路の Android ネイティブ HTTP 通信とネイティブ WebSocket ハンドシェイク。"
-    locale == "zh-TW" -> "除 JS 層 XHR / WebSocket 事件外，也覆蓋已掛接 OkHttp 路徑上的 Android 原生 HTTP 通信與原生 WebSocket 握手。"
-    else -> "除 JS 层 XHR / WebSocket 事件外，也覆盖已挂接 OkHttp 路径上的 Android 原生 HTTP 通信与原生 WebSocket 握手。"
+    locale.startsWith("en") -> "JS XHR / WebSocket events plus Android native HTTP traffic and native WebSocket handshakes on instrumented or explicitly integrated OkHttp paths."
+    locale.startsWith("ja") -> "JS 層の XHR / WebSocket イベントに加え、計装済みまたは明示的に統合した OkHttp 経路の Android ネイティブ HTTP 通信とネイティブ WebSocket ハンドシェイク。"
+    locale == "zh-TW" -> "除 JS 層 XHR / WebSocket 事件外，也覆蓋已掛接或顯式接入 OkHttp 路徑上的 Android 原生 HTTP 通信與原生 WebSocket 握手。"
+    else -> "除 JS 层 XHR / WebSocket 事件外，也覆盖已挂接或显式接入 OkHttp 路径上的 Android 原生 HTTP 通信与原生 WebSocket 握手。"
   }
 }
 
@@ -2991,10 +2994,10 @@ private fun localizedLimitationRootNotEnabled(locale: String): String {
 
 private fun localizedLimitationAndroidNativeNetwork(locale: String): String {
   return when {
-    locale.startsWith("en") -> "Android now captures native HTTP traffic on instrumented OkHttp paths. Traffic outside OkHttp, plus full native WebSocket frame lifecycle, is still not automatically covered."
-    locale.startsWith("ja") -> "Android は計装済み OkHttp 経路のネイティブ HTTP 通信を採集できるようになりました。OkHttp 外の通信と、ネイティブ WebSocket フレームの完全なライフサイクルはまだ自動採集できません。"
-    locale == "zh-TW" -> "Android 現已可採集已掛接 OkHttp 路徑上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命週期，仍未自動覆蓋。"
-    else -> "Android 现已可采集已挂接 OkHttp 路径上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命周期，仍未自动覆盖。"
+    locale.startsWith("en") -> "Android captures native HTTP traffic on instrumented or explicitly integrated OkHttp paths. Traffic outside OkHttp, plus full native WebSocket frame lifecycle, is still not automatically covered."
+    locale.startsWith("ja") -> "Android は計装済みまたは明示的に統合した OkHttp 経路のネイティブ HTTP 通信を採集できます。OkHttp 外の通信と、ネイティブ WebSocket フレームの完全なライフサイクルはまだ自動採集できません。"
+    locale == "zh-TW" -> "Android 現已可採集已掛接或顯式接入 OkHttp 路徑上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命週期，仍未自動覆蓋。"
+    else -> "Android 现已可采集已挂接或显式接入 OkHttp 路径上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命周期，仍未自动覆盖。"
   }
 }
 
@@ -3036,8 +3039,7 @@ private fun formattedMessagesText(raw: String?, fallback: String): String {
 }
 
 private fun formattedStructuredContent(raw: String?, fallback: String): String {
-  val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return fallback
-  return prettyJsonOrOriginal(normalized)
+  return raw ?: fallback
 }
 
 private fun formattedWebSocketMessagesText(raw: String?, fallback: String): String {

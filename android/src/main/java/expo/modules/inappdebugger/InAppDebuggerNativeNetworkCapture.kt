@@ -42,6 +42,12 @@ private const val MAX_EVENT_REDIRECTS = 8
 private const val MAX_EVENT_LINES = 48
 private const val LIVE_UPDATE_THROTTLE_MS = 120L
 private val HEX_DIGITS = "0123456789ABCDEF".toCharArray()
+private const val REACT_NATIVE_JS_REQUEST_ORIGIN = "js"
+
+private class RequestOriginTag(val value: String)
+
+private val reactNativeJsRequestOriginTag = RequestOriginTag(REACT_NATIVE_JS_REQUEST_ORIGIN)
+private val reactNativeRequestMarkerInterceptor = ReactNativeRequestMarkerInterceptor()
 
 object InAppDebuggerNativeNetworkCapture {
   private val lock = Any()
@@ -129,23 +135,42 @@ object InAppDebuggerNativeNetworkCapture {
     return builder
   }
 
-  internal fun shouldCapture(request: Request): Boolean {
+  fun applyToReactNativeBuilder(builder: OkHttpClient.Builder): OkHttpClient.Builder {
+    val currentInterceptors = builder.interceptors()
+    if (
+      currentInterceptors.none {
+        it === reactNativeRequestMarkerInterceptor || it is ReactNativeRequestMarkerInterceptor
+      }
+    ) {
+      val captureInterceptorIndex =
+        currentInterceptors.indexOfFirst {
+          it === interceptor || it is NativeOkHttpCaptureInterceptor
+        }
+      if (captureInterceptorIndex >= 0) {
+        currentInterceptors.add(captureInterceptorIndex, reactNativeRequestMarkerInterceptor)
+      } else {
+        builder.addInterceptor(reactNativeRequestMarkerInterceptor)
+      }
+    }
+    return applyTo(builder)
+  }
+
+  internal fun shouldObserve(request: Request): Boolean {
     if (!enabled) {
       return false
     }
 
-    val scheme = request.url.scheme
-    if (
-      !scheme.equals("http", ignoreCase = true) &&
-      !scheme.equals("https", ignoreCase = true) &&
-      !scheme.equals("ws", ignoreCase = true) &&
-      !scheme.equals("wss", ignoreCase = true)
-    ) {
+    return isSupportedNativeNetworkScheme(request.url.scheme)
+  }
+
+  internal fun shouldCapture(request: Request): Boolean {
+    if (!shouldObserve(request)) {
       return false
     }
 
-    // RN NetworkingModule / WebSocketModule tag requests with numeric ids.
-    if (request.tag() is Number) {
+    // RN JS requests are marked explicitly so native clients that also use numeric tags
+    // still show up in the native network feed.
+    if (request.isReactNativeJsRequest()) {
       return false
     }
 
@@ -578,7 +603,7 @@ object InAppDebuggerNativeNetworkCapture {
   ) : CustomClientBuilder {
     override fun apply(builder: OkHttpClient.Builder) {
       delegate?.apply(builder)
-      applyTo(builder)
+      applyToReactNativeBuilder(builder)
     }
   }
 
@@ -972,8 +997,7 @@ private class InstrumentedEventListenerFactory(
   override fun create(call: Call): EventListener {
     val delegateListener = delegate?.create(call) ?: EventListener.NONE
     val nativeListener =
-      if (InAppDebuggerNativeNetworkCapture.shouldCapture(call.request())) {
-        InAppDebuggerNativeNetworkCapture.ensureCallState(call, call.request())
+      if (InAppDebuggerNativeNetworkCapture.shouldObserve(call.request())) {
         NativeOkHttpEventListener(call)
       } else {
         EventListener.NONE
@@ -1145,6 +1169,21 @@ private class CompositeEventListener(
   override fun callFailed(call: Call, ioe: IOException) {
     primary.callFailed(call, ioe)
     secondary.callFailed(call, ioe)
+  }
+}
+
+private class ReactNativeRequestMarkerInterceptor : Interceptor {
+  override fun intercept(chain: Interceptor.Chain): Response {
+    val request = chain.request()
+    if (request.isReactNativeJsRequest()) {
+      return chain.proceed(request)
+    }
+
+    val markedRequest =
+      request.newBuilder()
+        .tag(RequestOriginTag::class.java, reactNativeJsRequestOriginTag)
+        .build()
+    return chain.proceed(markedRequest)
   }
 }
 
@@ -1364,6 +1403,17 @@ private class NativeOkHttpEventListener(
 private fun isWebSocketUpgrade(request: Request): Boolean {
   return request.header("Upgrade")?.equals("websocket", ignoreCase = true) == true ||
     request.header("Sec-WebSocket-Key") != null
+}
+
+private fun isSupportedNativeNetworkScheme(scheme: String?): Boolean {
+  return scheme.equals("http", ignoreCase = true) ||
+    scheme.equals("https", ignoreCase = true) ||
+    scheme.equals("ws", ignoreCase = true) ||
+    scheme.equals("wss", ignoreCase = true)
+}
+
+private fun Request.isReactNativeJsRequest(): Boolean {
+  return tag(RequestOriginTag::class.java)?.value == REACT_NATIVE_JS_REQUEST_ORIGIN
 }
 
 private inline fun <reified T> Class<*>.readObjectField(name: String, receiver: Any): T? {
