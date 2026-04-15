@@ -1,0 +1,20 @@
+{
+  "name": "expo-native-request-trigger",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.ts",
+  "types": "index.ts",
+  "source": "index.ts",
+  "react-native": "index.ts",
+  "files": [
+    "android",
+    "ios",
+    "index.ts",
+    "expo-module.config.json"
+  ],
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*",
+    "react-native": "*"
+  }
+}

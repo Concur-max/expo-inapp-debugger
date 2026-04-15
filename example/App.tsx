@@ -18,6 +18,7 @@ import {
   InAppDebugProvider,
   inAppDebug,
 } from 'expo-inapp-debugger';
+import { NativeRequestTrigger } from './modules/expo-native-request-trigger';
 
 function DemoCrash({ shouldCrash }: { shouldCrash: boolean }) {
   if (shouldCrash) {
@@ -133,7 +134,7 @@ export default function App() {
   const [httpStatus, setHttpStatus] = React.useState('idle');
   const [httpBody, setHttpBody] = React.useState(() => createDemoPostPayload());
   const [httpResponsePreview, setHttpResponsePreview] = React.useState(
-    '点击下面的本地 GET / POST 按钮后，这里会显示最近一次响应体。'
+    '点击下面的 JS / 原生 GET / POST 按钮后，这里会显示最近一次响应体或原生请求说明。'
   );
   const [httpEvents, setHttpEvents] = React.useState<string[]>([]);
   const [httpHint, setHttpHint] = React.useState(() =>
@@ -294,6 +295,73 @@ export default function App() {
     }
   }, [appendHttpEvent, httpBaseUrl, httpBody]);
 
+  const queueNativeModuleRequest = React.useCallback(
+    async (method: 'GET' | 'POST') => {
+      const baseUrl = normalizeBaseUrl(httpBaseUrl);
+      if (!baseUrl) {
+        Alert.alert('HTTP 地址不能为空', '请先输入本地 mock server 地址。');
+        return;
+      }
+
+      const requestUrl =
+        method === 'GET'
+          ? `${baseUrl}/debug-http/get?channel=native-module&demo=get&at=${Date.now()}`
+          : `${baseUrl}/debug-http/post?channel=native-module&demo=post&at=${Date.now()}`;
+      const requestBody = method === 'POST' ? httpBody.trim() || createDemoPostPayload() : undefined;
+
+      setHttpStatus(method === 'GET' ? 'native get queued' : 'native post queued');
+      appendHttpEvent(`Native ${method} queued ${requestUrl}`);
+      if (isLoopbackUrl(requestUrl)) {
+        setHttpHint('如果你现在连的是 iPhone 真机，127.0.0.1 指向手机自己。请改成电脑局域网 IP。');
+      } else {
+        setHttpHint('请求已经从 example 本地 Expo module 发出。现在去 network 面板里找 origin=native 的记录。');
+      }
+
+      try {
+        await NativeRequestTrigger.sendHttpRequest({
+          url: requestUrl,
+          method,
+          body: requestBody,
+          headers: {
+            Accept: 'application/json',
+            'X-Debug-Demo': method === 'GET' ? 'native-module-get' : 'native-module-post',
+            ...(method === 'POST'
+              ? {
+                  'Content-Type': 'application/json; charset=utf-8',
+                }
+              : {}),
+          },
+        });
+        setHttpBody(requestBody ?? httpBody);
+        setHttpResponsePreview(
+          method === 'GET'
+            ? '原生 GET 已从 example 本地 Expo module 发出。若抓包链路正常，network 面板里会出现一条 origin=native 的 GET 记录。'
+            : '原生 POST 已从 example 本地 Expo module 发出。若抓包链路正常，network 面板里会出现一条 origin=native 的 POST 记录，请求体就是当前输入框里的 JSON。'
+        );
+        console.info('已从原生 Expo module 触发请求', {
+          method,
+          url: requestUrl,
+          requestBody,
+        });
+      } catch (error) {
+        setHttpStatus('native queue error');
+        setHttpResponsePreview(String(error));
+        setHttpHint('原生请求没有成功排队。通常是本地 Expo module 还没 autolink，重新构建 example 即可。');
+        appendHttpEvent(`Native ${method} queue error`);
+        console.error('原生 Expo module 请求排队失败', error);
+      }
+    },
+    [appendHttpEvent, httpBaseUrl, httpBody]
+  );
+
+  const runNativeModuleGet = React.useCallback(() => {
+    return queueNativeModuleRequest('GET');
+  }, [queueNativeModuleRequest]);
+
+  const runNativeModulePost = React.useCallback(() => {
+    return queueNativeModuleRequest('POST');
+  }, [queueNativeModuleRequest]);
+
   const connectSocket = React.useCallback(() => {
     socketRef.current?.close();
     setSocketStatus('connecting');
@@ -443,8 +511,9 @@ export default function App() {
             <View style={styles.socketCard}>
               <Text style={styles.cardTitle}>本地 HTTP 回路</Text>
               <Text style={styles.cardHint}>
-                先在 `example` 目录运行 `pnpm http:mock`，然后分别点击本地 GET 和本地 POST。GET 会走
-                `fetch` 并返回本地响应体，POST 会走 `XMLHttpRequest` 并带上 JSON 请求体，再回显完整响应体。
+                先在 `example` 目录运行 `pnpm http:mock`。前两个按钮分别走 JS 的 `fetch` / `XMLHttpRequest`；
+                后两个按钮会调用 example 本地 Expo module，从原生层直接发 GET / POST。Android 这条路径会用
+                app 自建 `OkHttpClient` 加 `InAppDebuggerOkHttpIntegration`，专门用来验证 native 抓包。
               </Text>
               <Text style={styles.cardSubHint}>{httpHint}</Text>
 
@@ -479,6 +548,8 @@ export default function App() {
               <View style={styles.socketActionGrid}>
                 <ActionButton label="本地 GET(fetch)" onPress={runLocalFetchGet} />
                 <ActionButton label="本地 POST(XHR)" onPress={runLocalXhrPost} />
+                <ActionButton label="原生 GET(Expo)" onPress={runNativeModuleGet} />
+                <ActionButton label="原生 POST(Expo)" onPress={runNativeModulePost} />
                 <ActionButton
                   label="重置 POST 请求体"
                   onPress={() => setHttpBody(createDemoPostPayload())}
