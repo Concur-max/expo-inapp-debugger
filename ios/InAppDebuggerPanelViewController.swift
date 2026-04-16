@@ -360,7 +360,7 @@ private final class InAppDebuggerLegacyBarButton: UIButton {
   }
 }
 
-final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, UITabBarDelegate, UISearchResultsUpdating, UIGestureRecognizerDelegate {
+final class InAppDebuggerPanelViewController: UIViewController, UITableViewDelegate, UITableViewDataSource, UITabBarDelegate, UISearchResultsUpdating, UIGestureRecognizerDelegate, UISearchControllerDelegate {
   private enum ReloadReason {
     case full
     case dataOnly
@@ -398,6 +398,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var renderedAppInfoSignature = ""
   private var renderedTableTab: ActiveTab?
   private var lastAppliedBottomBarInset: CGFloat = -1
+  private var pendingPanelDismissAfterSearchDeactivation = false
   private var legacyTabBarHeightConstraint: NSLayoutConstraint?
   private var legacyHeaderWidthConstraint: NSLayoutConstraint?
   private lazy var dismissKeyboardTapGestureRecognizer: UITapGestureRecognizer = {
@@ -409,6 +410,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private lazy var panelSearchController: UISearchController = {
     let controller = UISearchController(searchResultsController: nil)
+    controller.delegate = self
     controller.searchResultsUpdater = self
     controller.obscuresBackgroundDuringPresentation = false
     controller.hidesNavigationBarDuringPresentation = false
@@ -2075,11 +2077,30 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   @objc private func closeTapped() {
+    if #available(iOS 26.0, *), panelSearchController.isActive {
+      pendingPanelDismissAfterSearchDeactivation = true
+      navigationController?.view.endEditing(true)
+      view.endEditing(true)
+      panelSearchController.searchBar.searchTextField.resignFirstResponder()
+      panelSearchController.isActive = false
+      DispatchQueue.main.async { [weak self] in
+        self?.dismissPanelIfNeededAfterSearchDeactivation()
+      }
+      return
+    }
+    pendingPanelDismissAfterSearchDeactivation = false
     dismiss(animated: true)
   }
 
   func updateSearchResults(for searchController: UISearchController) {
     applySearchText(searchController.searchBar.text ?? "")
+  }
+
+  func didDismissSearchController(_ searchController: UISearchController) {
+    guard searchController === panelSearchController else {
+      return
+    }
+    dismissPanelIfNeededAfterSearchDeactivation()
   }
 
   @objc private func searchTextChanged(_ sender: UITextField) {
@@ -2131,6 +2152,16 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       return true
     }
     let touchedView = touch.view
+    if let navigationBar = navigationController?.navigationBar,
+       isView(touchedView, descendantOf: navigationBar) {
+      return false
+    }
+    if isView(touchedView, descendantOf: tabBar) {
+      return false
+    }
+    if isDescendantOfControl(touchedView) {
+      return false
+    }
     if isView(touchedView, descendantOf: legacySearchField) {
       return false
     }
@@ -2216,9 +2247,38 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     view.endEditing(true)
     legacySearchField.resignFirstResponder()
     panelSearchController.searchBar.searchTextField.resignFirstResponder()
+    if #available(iOS 26.0, *) {
+      if !hasSearchText && panelSearchController.isActive {
+        panelSearchController.isActive = false
+      }
+      return
+    }
     if panelSearchController.isActive {
       panelSearchController.isActive = false
     }
+  }
+
+  private var hasSearchText: Bool {
+    !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private func dismissPanelIfNeededAfterSearchDeactivation() {
+    guard pendingPanelDismissAfterSearchDeactivation, !panelSearchController.isActive else {
+      return
+    }
+    pendingPanelDismissAfterSearchDeactivation = false
+    dismiss(animated: true)
+  }
+
+  private func isDescendantOfControl(_ view: UIView?) -> Bool {
+    var current = view
+    while let currentView = current {
+      if currentView is UIControl {
+        return true
+      }
+      current = currentView.superview
+    }
+    return false
   }
 
   private func isView(_ view: UIView?, descendantOf ancestor: UIView) -> Bool {

@@ -83,10 +83,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -121,10 +123,6 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
   ): View {
     return ComposeView(requireContext()).apply {
       setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-      setOnTouchListener { _, event ->
-        dismissSearchFocusOnOutsideTouch(event)
-        false
-      }
       setContent {
         MaterialTheme(
           colorScheme = lightColorScheme(
@@ -135,7 +133,10 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
           )
         ) {
           Surface(modifier = Modifier.fillMaxSize(), color = PanelColors.Background) {
-            DebugPanel(onDismiss = ::closePanel)
+            DebugPanel(
+              onDismiss = ::closePanel,
+              onPanelTouch = { event -> dismissSearchFocusOnOutsideTouch(this, event) }
+            )
           }
         }
       }
@@ -168,11 +169,11 @@ class InAppDebuggerPanelDialogFragment : Fragment() {
     parentFragmentManager.popBackStack(PANEL_BACK_STACK_NAME, FragmentManager.POP_BACK_STACK_INCLUSIVE)
   }
 
-  private fun dismissSearchFocusOnOutsideTouch(event: MotionEvent?) {
+  private fun dismissSearchFocusOnOutsideTouch(hostView: View, event: MotionEvent?) {
     if (event?.actionMasked != MotionEvent.ACTION_DOWN) {
       return
     }
-    val focusedView = activity?.currentFocus ?: return
+    val focusedView = hostView.findFocus() ?: return
     val searchView = focusedView.findAncestorSearchView() ?: return
     val searchBounds = Rect()
     if (!searchView.getGlobalVisibleRect(searchBounds)) {
@@ -389,9 +390,12 @@ private object PanelPreferences {
   }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
-private fun DebugPanel(onDismiss: () -> Unit) {
+private fun DebugPanel(
+  onDismiss: () -> Unit,
+  onPanelTouch: (MotionEvent) -> Unit
+) {
   val chromeState by InAppDebuggerStore.chromeState.collectAsStateWithLifecycle()
   val locale = chromeState.config.locale
   val context = LocalContext.current
@@ -451,6 +455,10 @@ private fun DebugPanel(onDismiss: () -> Unit) {
     modifier = Modifier
       .fillMaxSize()
       .background(PanelColors.Background)
+      .pointerInteropFilter { event ->
+        onPanelTouch(event)
+        false
+      }
   ) {
     when (activeTab) {
       DebugTab.Logs -> SearchAndActionRow(
