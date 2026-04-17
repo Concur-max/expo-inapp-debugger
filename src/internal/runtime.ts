@@ -22,6 +22,7 @@ import {
   resolveAndroidNativeLogsConfig,
   resolveProviderConfig,
 } from './config';
+import { formatDebugMessage } from './preview';
 import { defaultStrings } from './strings';
 import { materializeNetworkEntry, NetworkCollector } from './network';
 
@@ -60,6 +61,8 @@ type RuntimeNativeModule = {
 
 const FLUSH_DELAY_MS = 64;
 const MAX_BUFFERED_BATCH_SIZE = 120;
+const MAX_LOG_MESSAGE_LENGTH = 12_000;
+const MAX_ERROR_MESSAGE_LENGTH = 12_000;
 const JS_PIPELINE_DIAGNOSTICS_ENABLED = false;
 let runtimeEntryCounter = 0;
 let cachedTimestampSecond = -1;
@@ -99,29 +102,10 @@ function createRuntimeIdentity(nowValue: number): RuntimeIdentity {
   };
 }
 
-function stringifyValue(value: unknown) {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (typeof value === 'object' && value != null) {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
-    }
-  }
-  return String(value);
-}
-
 export function formatMessage(args: unknown[]) {
-  let result = '';
-  for (let index = 0; index < args.length; index += 1) {
-    if (index > 0) {
-      result += ' ';
-    }
-    result += stringifyValue(args[index]);
-  }
-  return result;
+  return formatDebugMessage(args, {
+    maxLength: MAX_LOG_MESSAGE_LENGTH,
+  });
 }
 
 function formatTimestamps(nowValue: number) {
@@ -315,7 +299,9 @@ export class DebugRuntime {
     const entry: DebugErrorEntry = {
       id: identity.id,
       source,
-      message: formatMessage(args),
+      message: formatDebugMessage(args, {
+        maxLength: MAX_ERROR_MESSAGE_LENGTH,
+      }),
       ...formatTimestamps(nowValue),
       timelineTimestampMillis: nowValue,
       timelineSequence: identity.sequence,
@@ -329,7 +315,9 @@ export class DebugRuntime {
 
   private captureConsoleError(args: unknown[]) {
     const nowValue = this.now();
-    const formattedMessage = formatMessage(args);
+    const formattedMessage = formatDebugMessage(args, {
+      maxLength: MAX_ERROR_MESSAGE_LENGTH,
+    });
     const timestamps = formatTimestamps(nowValue);
     const logIdentity = createRuntimeIdentity(nowValue);
     const errorIdentity = createRuntimeIdentity(nowValue);

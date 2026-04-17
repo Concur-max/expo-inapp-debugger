@@ -299,6 +299,37 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     expect(latestEntry()?.error).toBeUndefined();
   });
 
+  it('caps oversized XHR previews and tolerates circular payloads', () => {
+    const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const latestEntry = () => entries[entries.length - 1];
+
+    collector.enable();
+
+    const xhr: Record<string, unknown> = {};
+    const circular: Record<string, unknown> = { value: 'ok' };
+    circular.self = circular;
+
+    xhrCallbacks.open?.('POST', 'https://example.com/items', xhr);
+    xhrCallbacks.send?.(circular, xhr);
+    xhrCallbacks.response?.(200, 0, 'x'.repeat(40_000), 'https://example.com/items', 'text', xhr);
+
+    expect(latestEntry()).toMatchObject({
+      id: 'http_1',
+      kind: 'http',
+      status: 200,
+    });
+    expect(String(latestEntry()?.requestBody)).toContain('"self":[Circular]');
+    expect(String(latestEntry()?.responseBody)).toContain('...[truncated]');
+    expect(String(latestEntry()?.responseBody).length).toBeLessThanOrEqual(32_000);
+  });
+
   it('marks XHR requests with status 0 as errors', () => {
     const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
     const entries: Array<Record<string, unknown>> = [];

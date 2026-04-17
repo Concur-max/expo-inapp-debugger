@@ -1,4 +1,5 @@
 import type { DebugNetworkEntry } from '../types';
+import { formatDebugValue } from './preview';
 
 type HeaderMap = Record<string, string>;
 type RawHeaderMap = HeaderMap | string | null | undefined;
@@ -36,6 +37,8 @@ type NetworkCollectorOptions = {
 };
 
 const MAX_WEBSOCKET_MESSAGE_HISTORY = 100;
+const MAX_HTTP_BODY_PREVIEW_LENGTH = 32_000;
+const MAX_WEBSOCKET_MESSAGE_PREVIEW_LENGTH = 4_000;
 
 class CappedStringBuffer {
   private readonly storage: Array<string | undefined>;
@@ -89,17 +92,15 @@ function now() {
 }
 
 function safeStringify(value: unknown) {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (value == null) {
-    return '';
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return formatDebugValue(value, {
+    maxLength: MAX_HTTP_BODY_PREVIEW_LENGTH,
+  });
+}
+
+function safeWebSocketPreview(value: unknown) {
+  return formatDebugValue(value, {
+    maxLength: MAX_WEBSOCKET_MESSAGE_PREVIEW_LENGTH,
+  });
 }
 
 let cachedXHRInterceptor: XHRInterceptorModule | null | undefined;
@@ -346,11 +347,11 @@ export class NetworkCollector {
     });
 
     this.webSocketInterceptor.setSendCallback?.((data: unknown, socketId: number) => {
-      this.appendMessage(socketId, `>> ${safeStringify(data)}`);
+      this.appendMessage(socketId, `>> ${safeWebSocketPreview(data)}`);
     });
 
     this.webSocketInterceptor.setOnMessageCallback?.((data: unknown, socketId: number) => {
-      this.appendMessage(socketId, `<< ${safeStringify(data)}`);
+      this.appendMessage(socketId, `<< ${safeWebSocketPreview(data)}`);
     });
 
     this.webSocketInterceptor.setOnErrorCallback?.((payload: { message?: string }, socketId: number) => {

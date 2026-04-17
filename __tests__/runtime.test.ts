@@ -10,6 +10,17 @@ describe('formatMessage', () => {
   it('formats objects and strings', () => {
     expect(formatMessage(['hello', { value: 1 }])).toContain('"value":1');
   });
+
+  it('caps large previews and handles circular references', () => {
+    const circular: Record<string, unknown> = { ok: true };
+    circular.self = circular;
+
+    const message = formatMessage([circular, 'x'.repeat(20_000)]);
+
+    expect(message).toContain('"self":[Circular]');
+    expect(message).toContain('...[truncated]');
+    expect(message.length).toBeLessThanOrEqual(12_000);
+  });
 });
 
 describe('resolveProviderConfig', () => {
