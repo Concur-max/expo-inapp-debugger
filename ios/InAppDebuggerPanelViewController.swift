@@ -227,6 +227,7 @@ private enum PanelFilterPreferences {
   static let selectedNetworkKindsKey = "expo.inappdebugger.panel.selectedNetworkKinds"
   static let allLevels: Set<String> = ["log", "info", "warn", "error", "debug"]
   static let allOrigins: Set<String> = ["js", "native"]
+  static let jsOrigins: Set<String> = ["js"]
   static let allNetworkKinds: Set<String> = Set(NetworkKindFilter.allCases.map(\.rawValue))
   static let defaultOrigins: Set<String> = ["js"]
   static let defaultNetworkOrigins: Set<String> = defaultOrigins
@@ -262,6 +263,22 @@ private enum PanelFilterPreferences {
 
   static func saveNetworkKinds(_ kinds: Set<String>) {
     saveSet(kinds, forKey: selectedNetworkKindsKey)
+  }
+
+  static func availableOrigins(nativeEnabled: Bool) -> Set<String> {
+    nativeEnabled ? allOrigins : jsOrigins
+  }
+
+  static func originOptions(nativeEnabled: Bool) -> [String] {
+    nativeEnabled ? ["js", "native"] : ["js"]
+  }
+
+  static func sanitizeOrigins(_ origins: Set<String>, availableOrigins: Set<String>) -> Set<String> {
+    let filteredOrigins = Set(origins.filter { availableOrigins.contains($0) })
+    if !filteredOrigins.isEmpty || origins.isEmpty {
+      return filteredOrigins
+    }
+    return Set(defaultOrigins.filter { availableOrigins.contains($0) })
   }
 
   private static func loadSet(
@@ -384,6 +401,14 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var selectedNetworkOrigins: Set<String> = PanelFilterPreferences.loadNetworkOrigins()
   private var selectedNetworkKinds: Set<String> = PanelFilterPreferences.loadNetworkKinds()
   private var sortAscending = true
+  private var availableLogOrigins: Set<String> {
+    PanelFilterPreferences.availableOrigins(nativeEnabled: currentConfig.enableNativeLogs)
+  }
+  private var availableNetworkOrigins: Set<String> {
+    PanelFilterPreferences.availableOrigins(
+      nativeEnabled: currentConfig.enableNetworkTab && currentConfig.enableNativeNetwork
+    )
+  }
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
   private var currentLogRetentionState = DebugLogRetentionState.empty
@@ -621,6 +646,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   override func viewDidLoad() {
     super.viewDidLoad()
     currentConfig = InAppDebuggerStore.shared.currentConfig()
+    sanitizeFiltersForCurrentConfig(persist: true)
     view.backgroundColor = PanelColors.background
     navigationItem.largeTitleDisplayMode = .never
     definesPresentationContext = true
@@ -869,7 +895,13 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let sortMenu = UIMenu(title: localizedSortMenuTitle(), options: .displayInline, children: sortOptions)
 
     let selectedOrigins = activeTab == .logs ? selectedLogOrigins : selectedNetworkOrigins
-    let originOptions = ["js", "native"].map { origin in
+    let isNativeOriginAvailable: Bool
+    if activeTab == .logs {
+      isNativeOriginAvailable = currentConfig.enableNativeLogs
+    } else {
+      isNativeOriginAvailable = currentConfig.enableNetworkTab && currentConfig.enableNativeNetwork
+    }
+    let originOptions = PanelFilterPreferences.originOptions(nativeEnabled: isNativeOriginAvailable).map { origin in
       let title = localizedOriginTitle(origin)
       let isSelected = selectedOrigins.contains(origin)
       return makePersistentMenuAction(title: title, state: isSelected ? .on : .off) { [weak self] in
@@ -987,18 +1019,32 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private func toggleOrigin(_ origin: String) {
     switch activeTab {
     case .logs:
+      guard availableLogOrigins.contains(origin) else {
+        return
+      }
       if selectedLogOrigins.contains(origin) {
         selectedLogOrigins.remove(origin)
       } else {
         selectedLogOrigins.insert(origin)
       }
+      selectedLogOrigins = PanelFilterPreferences.sanitizeOrigins(
+        selectedLogOrigins,
+        availableOrigins: availableLogOrigins
+      )
       PanelFilterPreferences.saveLogOrigins(selectedLogOrigins)
     case .network:
+      guard availableNetworkOrigins.contains(origin) else {
+        return
+      }
       if selectedNetworkOrigins.contains(origin) {
         selectedNetworkOrigins.remove(origin)
       } else {
         selectedNetworkOrigins.insert(origin)
       }
+      selectedNetworkOrigins = PanelFilterPreferences.sanitizeOrigins(
+        selectedNetworkOrigins,
+        availableOrigins: availableNetworkOrigins
+      )
       PanelFilterPreferences.saveNetworkOrigins(selectedNetworkOrigins)
     case .appInfo:
       return
@@ -1063,14 +1109,47 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
 
     currentConfig = nextConfig
+    sanitizeFiltersForCurrentConfig(persist: true)
     InAppDebuggerStore.shared.update(config: nextConfig)
     InAppDebuggerNativeLogCapture.shared.setEnabled(nextConfig.enabled && nextConfig.enableNativeLogs)
     InAppDebuggerNativeNetworkCapture.shared.setEnabled(
       nextConfig.enabled && nextConfig.enableNetworkTab && nextConfig.enableNativeNetwork
     )
     InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
+    updateFilterMenu()
     syncNativeCaptureStates()
     reloadFromStore()
+  }
+
+  @discardableResult
+  private func sanitizeFiltersForCurrentConfig(persist: Bool) -> Bool {
+    var didChange = false
+
+    let nextLogOrigins = PanelFilterPreferences.sanitizeOrigins(
+      selectedLogOrigins,
+      availableOrigins: availableLogOrigins
+    )
+    if nextLogOrigins != selectedLogOrigins {
+      selectedLogOrigins = nextLogOrigins
+      didChange = true
+      if persist {
+        PanelFilterPreferences.saveLogOrigins(nextLogOrigins)
+      }
+    }
+
+    let nextNetworkOrigins = PanelFilterPreferences.sanitizeOrigins(
+      selectedNetworkOrigins,
+      availableOrigins: availableNetworkOrigins
+    )
+    if nextNetworkOrigins != selectedNetworkOrigins {
+      selectedNetworkOrigins = nextNetworkOrigins
+      didChange = true
+      if persist {
+        PanelFilterPreferences.saveNetworkOrigins(nextNetworkOrigins)
+      }
+    }
+
+    return didChange
   }
 
   private func configuredCell(for tableView: UITableView, at indexPath: IndexPath) -> UITableViewCell {
@@ -1214,6 +1293,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let shouldRefreshChrome = reason == .full || config != currentConfig
     if shouldRefreshChrome {
       currentConfig = config
+      sanitizeFiltersForCurrentConfig(persist: true)
 
       if !currentConfig.enableNetworkTab && activeTab == .network {
         activeTab = .logs
@@ -1434,11 +1514,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func localizedNoLogOriginHint() -> String {
-    "Select JS or Native to show logs."
+    if currentConfig.enableNativeLogs {
+      return "Select JS or Native to show logs."
+    }
+    return "Select JS to show logs."
   }
 
   private func localizedNoNetworkOriginHint() -> String {
-    "Select JS or Native to show network entries."
+    if currentConfig.enableNetworkTab && currentConfig.enableNativeNetwork {
+      return "Select JS or Native to show network entries."
+    }
+    return "Select JS to show network entries."
   }
 
   private func localizedNoNetworkKindHint() -> String {

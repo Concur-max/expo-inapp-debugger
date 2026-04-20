@@ -321,6 +321,7 @@ private object PanelPreferences {
   private const val SELECTED_NETWORK_ORIGINS_KEY = "selected_network_origins"
   private const val SELECTED_NETWORK_KINDS_KEY = "selected_network_kinds"
 
+  private val jsOrigins = setOf("js")
   private val allLevels = setOf("log", "info", "warn", "error", "debug")
   private val allOrigins = setOf("js", "native")
   private val allNetworkKinds = NetworkKindFilter.entries.mapTo(linkedSetOf()) { it.rawValue }
@@ -358,20 +359,44 @@ private object PanelPreferences {
     saveSet(context, SELECTED_NETWORK_KINDS_KEY, values)
   }
 
-  fun hasActiveLogFilters(levels: Set<String>, origins: Set<String>): Boolean {
-    return origins.size < allOrigins.size || levels.size < allLevels.size
+  fun availableOrigins(nativeEnabled: Boolean): Set<String> {
+    return if (nativeEnabled) allOrigins else jsOrigins
   }
 
-  fun hasActiveNetworkFilters(origins: Set<String>, kinds: Set<String>): Boolean {
-    return origins.size < allOrigins.size || kinds.size < allNetworkKinds.size
+  fun originOptions(nativeEnabled: Boolean): List<String> {
+    return if (nativeEnabled) listOf("js", "native") else listOf("js")
+  }
+
+  fun sanitizeOrigins(values: Set<String>, availableOrigins: Set<String>): Set<String> {
+    val next = values.filterTo(linkedSetOf()) { it in availableOrigins }
+    if (next.isNotEmpty() || values.isEmpty()) {
+      return next
+    }
+    return defaultOrigins.filterTo(linkedSetOf()) { it in availableOrigins }
+  }
+
+  fun hasActiveLogFilters(
+    levels: Set<String>,
+    origins: Set<String>,
+    availableOrigins: Set<String>
+  ): Boolean {
+    return origins != availableOrigins || levels != allLevels
+  }
+
+  fun hasActiveNetworkFilters(
+    origins: Set<String>,
+    kinds: Set<String>,
+    availableOrigins: Set<String>
+  ): Boolean {
+    return origins != availableOrigins || kinds != allNetworkKinds
   }
 
   fun isAllLogFiltersSelected(levels: Set<String>, origins: Set<String>): Boolean {
-    return levels.size == allLevels.size && origins.size == allOrigins.size
+    return levels == allLevels && origins == allOrigins
   }
 
   fun isAllNetworkFiltersSelected(origins: Set<String>, kinds: Set<String>): Boolean {
-    return origins.size == allOrigins.size && kinds.size == allNetworkKinds.size
+    return origins == allOrigins && kinds == allNetworkKinds
   }
 
   private fun loadSet(
@@ -410,11 +435,26 @@ private fun DebugPanel(
   var selectedLogOrigins by remember { mutableStateOf(PanelPreferences.loadLogOrigins(context)) }
   var selectedNetworkOrigins by remember { mutableStateOf(PanelPreferences.loadNetworkOrigins(context)) }
   var selectedNetworkKinds by remember { mutableStateOf(PanelPreferences.loadNetworkKinds(context)) }
-  val hasActiveLogFilters = remember(selectedLogLevels, selectedLogOrigins) {
-    PanelPreferences.hasActiveLogFilters(selectedLogLevels, selectedLogOrigins)
+  val nativeLogOriginAvailable = chromeState.config.enableNativeLogs
+  val nativeNetworkOriginAvailable =
+    chromeState.config.enableNetworkTab && chromeState.config.enableNativeNetwork
+  val availableLogOrigins = remember(nativeLogOriginAvailable) {
+    PanelPreferences.availableOrigins(nativeLogOriginAvailable)
   }
-  val hasActiveNetworkFilters = remember(selectedNetworkOrigins, selectedNetworkKinds) {
-    PanelPreferences.hasActiveNetworkFilters(selectedNetworkOrigins, selectedNetworkKinds)
+  val availableNetworkOrigins = remember(nativeNetworkOriginAvailable) {
+    PanelPreferences.availableOrigins(nativeNetworkOriginAvailable)
+  }
+  val logOriginOptions = remember(nativeLogOriginAvailable) {
+    PanelPreferences.originOptions(nativeLogOriginAvailable)
+  }
+  val networkOriginOptions = remember(nativeNetworkOriginAvailable) {
+    PanelPreferences.originOptions(nativeNetworkOriginAvailable)
+  }
+  val hasActiveLogFilters = remember(selectedLogLevels, selectedLogOrigins, availableLogOrigins) {
+    PanelPreferences.hasActiveLogFilters(selectedLogLevels, selectedLogOrigins, availableLogOrigins)
+  }
+  val hasActiveNetworkFilters = remember(selectedNetworkOrigins, selectedNetworkKinds, availableNetworkOrigins) {
+    PanelPreferences.hasActiveNetworkFilters(selectedNetworkOrigins, selectedNetworkKinds, availableNetworkOrigins)
   }
 
   DisposableEffect(Unit) {
@@ -422,6 +462,22 @@ private fun DebugPanel(
     onDispose {
       InAppDebuggerStore.setActiveFeed(DebugPanelFeed.None)
       InAppDebuggerStore.setPanelVisible(false)
+    }
+  }
+
+  LaunchedEffect(availableLogOrigins) {
+    val nextOrigins = PanelPreferences.sanitizeOrigins(selectedLogOrigins, availableLogOrigins)
+    if (nextOrigins != selectedLogOrigins) {
+      selectedLogOrigins = nextOrigins
+      PanelPreferences.saveLogOrigins(context, nextOrigins)
+    }
+  }
+
+  LaunchedEffect(availableNetworkOrigins) {
+    val nextOrigins = PanelPreferences.sanitizeOrigins(selectedNetworkOrigins, availableNetworkOrigins)
+    if (nextOrigins != selectedNetworkOrigins) {
+      selectedNetworkOrigins = nextOrigins
+      PanelPreferences.saveNetworkOrigins(context, nextOrigins)
     }
   }
 
@@ -487,24 +543,20 @@ private fun DebugPanel(
           ),
           FilterMenuSection(
             title = localizedOriginTitleLabel(),
-            items = listOf(
+            items = logOriginOptions.map { origin ->
               FilterMenuItem(
-                label = "JS",
-                selected = "js" in selectedLogOrigins,
+                label = localizedOriginTitle(origin),
+                selected = origin in selectedLogOrigins,
                 onToggle = {
-                  selectedLogOrigins = selectedLogOrigins.toggle("js")
-                  PanelPreferences.saveLogOrigins(context, selectedLogOrigins)
-                }
-              ),
-              FilterMenuItem(
-                label = "Native",
-                selected = "native" in selectedLogOrigins,
-                onToggle = {
-                  selectedLogOrigins = selectedLogOrigins.toggle("native")
+                  selectedLogOrigins =
+                    PanelPreferences.sanitizeOrigins(
+                      selectedLogOrigins.toggle(origin),
+                      availableLogOrigins
+                    )
                   PanelPreferences.saveLogOrigins(context, selectedLogOrigins)
                 }
               )
-            )
+            }
           ),
           FilterMenuSection(
             title = localizedLevelTitle(),
@@ -550,24 +602,20 @@ private fun DebugPanel(
           ),
           FilterMenuSection(
             title = localizedOriginTitleLabel(),
-            items = listOf(
+            items = networkOriginOptions.map { origin ->
               FilterMenuItem(
-                label = "JS",
-                selected = "js" in selectedNetworkOrigins,
+                label = localizedOriginTitle(origin),
+                selected = origin in selectedNetworkOrigins,
                 onToggle = {
-                  selectedNetworkOrigins = selectedNetworkOrigins.toggle("js")
-                  PanelPreferences.saveNetworkOrigins(context, selectedNetworkOrigins)
-                }
-              ),
-              FilterMenuItem(
-                label = "Native",
-                selected = "native" in selectedNetworkOrigins,
-                onToggle = {
-                  selectedNetworkOrigins = selectedNetworkOrigins.toggle("native")
+                  selectedNetworkOrigins =
+                    PanelPreferences.sanitizeOrigins(
+                      selectedNetworkOrigins.toggle(origin),
+                      availableNetworkOrigins
+                    )
                   PanelPreferences.saveNetworkOrigins(context, selectedNetworkOrigins)
                 }
               )
-            )
+            }
           ),
           FilterMenuSection(
             title = localizedNetworkTypeTitle(),
@@ -598,7 +646,8 @@ private fun DebugPanel(
           searchQuery = logsSearchQuery,
           sortOrder = logsSortOrder,
           selectedLevels = selectedLogLevels,
-          selectedOrigins = selectedLogOrigins
+          selectedOrigins = selectedLogOrigins,
+          nativeOriginAvailable = nativeLogOriginAvailable
         )
 
         DebugTab.Network -> NetworkTab(
@@ -607,6 +656,7 @@ private fun DebugPanel(
           sortOrder = networkSortOrder,
           selectedOrigins = selectedNetworkOrigins,
           selectedKinds = selectedNetworkKinds,
+          nativeOriginAvailable = nativeNetworkOriginAvailable,
           onSelectNetwork = { selectedNetworkId = it }
         )
 
@@ -1014,7 +1064,8 @@ private fun LogsTab(
   searchQuery: String,
   sortOrder: SortOrder,
   selectedLevels: Set<String>,
-  selectedOrigins: Set<String>
+  selectedOrigins: Set<String>,
+  nativeOriginAvailable: Boolean
 ) {
   val logsWindowState by InAppDebuggerStore.logsWindowState.collectAsStateWithLifecycle()
   val logSearchCache = remember(maxLogs) {
@@ -1069,7 +1120,7 @@ private fun LogsTab(
       "No logs yet"
     }
     val detail = when {
-      selectedOrigins.isEmpty() -> localizedNoLogOriginHint()
+      selectedOrigins.isEmpty() -> localizedNoLogOriginHint(nativeOriginAvailable)
       selectedLevels.isEmpty() -> localizedNoLevelHint()
       else -> localizedEmptyHint()
     }
@@ -1101,6 +1152,7 @@ private fun NetworkTab(
   sortOrder: SortOrder,
   selectedOrigins: Set<String>,
   selectedKinds: Set<String>,
+  nativeOriginAvailable: Boolean,
   onSelectNetwork: (String) -> Unit
 ) {
   val networkWindowState by InAppDebuggerStore.networkWindowState.collectAsStateWithLifecycle()
@@ -1166,7 +1218,7 @@ private fun NetworkTab(
     }
     val detail = when {
       selectedOrigins.isEmpty() && selectedKinds.isEmpty() -> localizedNoNetworkFilterHint()
-      selectedOrigins.isEmpty() -> localizedNoNetworkOriginHint()
+      selectedOrigins.isEmpty() -> localizedNoNetworkOriginHint(nativeOriginAvailable)
       selectedKinds.isEmpty() -> localizedNoNetworkKindHint()
       else -> localizedEmptyHint()
     }
@@ -2450,12 +2502,20 @@ private fun localizedNoLevelHint(): String {
   return "Select at least one level to show logs."
 }
 
-private fun localizedNoLogOriginHint(): String {
-  return "Select JS or Native to show logs."
+private fun localizedNoLogOriginHint(nativeOriginAvailable: Boolean): String {
+  return if (nativeOriginAvailable) {
+    "Select JS or Native to show logs."
+  } else {
+    "Select JS to show logs."
+  }
 }
 
-private fun localizedNoNetworkOriginHint(): String {
-  return "Select JS or Native to show network entries."
+private fun localizedNoNetworkOriginHint(nativeOriginAvailable: Boolean): String {
+  return if (nativeOriginAvailable) {
+    "Select JS or Native to show network entries."
+  } else {
+    "Select JS to show network entries."
+  }
 }
 
 private fun localizedNoNetworkKindHint(): String {
