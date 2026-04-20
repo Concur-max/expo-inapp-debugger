@@ -9,6 +9,8 @@ import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.text.format.Formatter
+import android.util.JsonReader
+import android.util.JsonToken
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -100,6 +102,7 @@ import androidx.compose.ui.unit.dp
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.io.StringReader
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -109,8 +112,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
-import org.json.JSONArray
-import org.json.JSONObject
 
 class InAppDebuggerPanelDialogFragment : Fragment() {
   private var previousLightStatusBars: Boolean? = null
@@ -3394,7 +3395,8 @@ private fun formattedMessagesText(raw: String?, fallback: String): String {
 }
 
 private fun formattedStructuredContent(raw: String?, fallback: String): String {
-  return raw ?: fallback
+  val source = raw?.takeIf { it.isNotBlank() } ?: return fallback
+  return prettyJsonOrOriginal(source)
 }
 
 private fun formattedWebSocketMessagesText(raw: String?, fallback: String): String {
@@ -3491,11 +3493,107 @@ private fun prettyJsonOrOriginal(raw: String): String {
 }
 
 private fun prettyJsonOrNull(raw: String): String? {
-  return when {
-    raw.startsWith("{") && raw.endsWith("}") -> runCatching { JSONObject(raw).toString(2) }.getOrNull()
-    raw.startsWith("[") && raw.endsWith("]") -> runCatching { JSONArray(raw).toString(2) }.getOrNull()
-    else -> null
+  if (!hasJsonContainerBounds(raw) || !isValidJson(raw)) {
+    return null
   }
+  return formatJsonWhitespaceOnly(raw)
+}
+
+private fun hasJsonContainerBounds(raw: String): Boolean {
+  return (raw.startsWith("{") && raw.endsWith("}")) ||
+    (raw.startsWith("[") && raw.endsWith("]"))
+}
+
+private fun isValidJson(raw: String): Boolean {
+  return runCatching {
+    JsonReader(StringReader(raw)).use { reader ->
+      reader.setLenient(false)
+      reader.skipValue()
+      reader.peek() == JsonToken.END_DOCUMENT
+    }
+  }.getOrDefault(false)
+}
+
+private fun formatJsonWhitespaceOnly(raw: String): String {
+  val result = StringBuilder(raw.length + 32)
+  var indentLevel = 0
+  var index = 0
+  var insideString = false
+  var escaping = false
+
+  fun appendIndent() {
+    repeat(indentLevel * 2) {
+      result.append(' ')
+    }
+  }
+
+  fun nextNonWhitespaceChar(startIndex: Int): Char? {
+    var cursor = startIndex
+    while (cursor < raw.length) {
+      val candidate = raw[cursor]
+      if (!candidate.isJsonWhitespace()) {
+        return candidate
+      }
+      cursor += 1
+    }
+    return null
+  }
+
+  while (index < raw.length) {
+    val char = raw[index]
+
+    if (insideString) {
+      result.append(char)
+      when {
+        escaping -> escaping = false
+        char == '\\' -> escaping = true
+        char == '"' -> insideString = false
+      }
+      index += 1
+      continue
+    }
+
+    when {
+      char.isJsonWhitespace() -> Unit
+      char == '"' -> {
+        insideString = true
+        result.append(char)
+      }
+      char == '{' || char == '[' -> {
+        result.append(char)
+        indentLevel += 1
+        val closingChar = if (char == '{') '}' else ']'
+        if (nextNonWhitespaceChar(index + 1) != closingChar) {
+          result.append('\n')
+          appendIndent()
+        }
+      }
+      char == '}' || char == ']' -> {
+        indentLevel = (indentLevel - 1).coerceAtLeast(0)
+        val previousChar = result.lastOrNull()
+        if (previousChar != '{' && previousChar != '[') {
+          result.append('\n')
+          appendIndent()
+        }
+        result.append(char)
+      }
+      char == ',' -> {
+        result.append(char)
+        result.append('\n')
+        appendIndent()
+      }
+      char == ':' -> result.append(": ")
+      else -> result.append(char)
+    }
+
+    index += 1
+  }
+
+  return result.toString()
+}
+
+private fun Char.isJsonWhitespace(): Boolean {
+  return this == ' ' || this == '\n' || this == '\r' || this == '\t'
 }
 
 private fun closeRequestSummary(entry: DebugNetworkEntry): String {
