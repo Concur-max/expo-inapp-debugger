@@ -4,6 +4,8 @@ struct DebugConfig: Equatable {
   var enabled: Bool = false
   var initialVisible: Bool = true
   var enableNetworkTab: Bool = true
+  var enableNativeLogs: Bool = false
+  var enableNativeNetwork: Bool = false
   var maxLogs: Int = 2000
   var maxErrors: Int = 100
   var maxRequests: Int = 100

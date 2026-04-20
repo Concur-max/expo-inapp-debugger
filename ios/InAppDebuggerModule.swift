@@ -11,6 +11,8 @@ public final class InAppDebuggerModule: Module {
         enabled: rawConfig["enabled"] as? Bool ?? false,
         initialVisible: rawConfig["initialVisible"] as? Bool ?? true,
         enableNetworkTab: rawConfig["enableNetworkTab"] as? Bool ?? true,
+        enableNativeLogs: rawConfig["enableNativeLogs"] as? Bool ?? false,
+        enableNativeNetwork: rawConfig["enableNativeNetwork"] as? Bool ?? false,
         maxLogs: (rawConfig["maxLogs"] as? NSNumber)?.intValue ?? 2000,
         maxErrors: (rawConfig["maxErrors"] as? NSNumber)?.intValue ?? 100,
         maxRequests: (rawConfig["maxRequests"] as? NSNumber)?.intValue ?? 100
@@ -29,9 +31,9 @@ public final class InAppDebuggerModule: Module {
       }
 
       inAppDebuggerNativeRuntimeActive = true
-      InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled)
-      InAppDebuggerNativeNetworkCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
-      InAppDebuggerNativeWebSocketCapture.shared.setEnabled(config.enabled && config.enableNetworkTab)
+      InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled && config.enableNativeLogs)
+      InAppDebuggerNativeNetworkCapture.shared.setEnabled(config.enabled && config.enableNetworkTab && config.enableNativeNetwork)
+      InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
 

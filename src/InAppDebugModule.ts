@@ -70,6 +70,8 @@ export type NativeConfig = {
   enabled: boolean;
   initialVisible: boolean;
   enableNetworkTab: boolean;
+  enableNativeLogs: boolean;
+  enableNativeNetwork: boolean;
   maxLogs: number;
   maxErrors: number;
   maxRequests: number;

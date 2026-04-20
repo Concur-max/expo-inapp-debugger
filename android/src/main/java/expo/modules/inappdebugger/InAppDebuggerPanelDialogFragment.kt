@@ -747,6 +747,7 @@ private fun AppInfoTab(
   val errorsWindowState by InAppDebuggerStore.errorsWindowState.collectAsStateWithLifecycle()
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
+  var nativeCaptureTogglePending by remember { mutableStateOf(false) }
   var rootTogglePending by remember { mutableStateOf(false) }
   val rootEnhancedEnabled = remember(config.androidNativeLogs.logcatScope, config.androidNativeLogs.rootMode) {
     isRootEnhancedRequested(config)
@@ -779,11 +780,56 @@ private fun AppInfoTab(
     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp)
   ) {
+    item("app_info_native_capture_control") {
+      NativeCaptureControlCard(
+        nativeLogsChecked = config.enableNativeLogs,
+        nativeNetworkChecked = config.enableNativeNetwork,
+        nativeNetworkEnabled = config.enableNetworkTab,
+        pending = nativeCaptureTogglePending,
+        locale = locale,
+        onNativeLogsChange = { enabled ->
+          if (!nativeCaptureTogglePending) {
+            nativeCaptureTogglePending = true
+            scope.launch {
+              try {
+                withContext(Dispatchers.Default) {
+                  applyPanelNativeCaptureMode(
+                    context.applicationContext,
+                    enableNativeLogs = enabled,
+                    enableNativeNetwork = config.enableNativeNetwork
+                  )
+                }
+              } finally {
+                nativeCaptureTogglePending = false
+              }
+            }
+          }
+        },
+        onNativeNetworkChange = { enabled ->
+          if (!nativeCaptureTogglePending) {
+            nativeCaptureTogglePending = true
+            scope.launch {
+              try {
+                withContext(Dispatchers.Default) {
+                  applyPanelNativeCaptureMode(
+                    context.applicationContext,
+                    enableNativeLogs = config.enableNativeLogs,
+                    enableNativeNetwork = enabled
+                  )
+                }
+              } finally {
+                nativeCaptureTogglePending = false
+              }
+            }
+          }
+        }
+      )
+    }
     if (runtimeInfo.rootStatus == "root") {
       item("app_info_root_control") {
         RootEnhancedControlCard(
           checked = rootEnhancedEnabled,
-          enabled = runtimeInfo.rootStatus != "checking",
+          enabled = config.enableNativeLogs && runtimeInfo.rootStatus != "checking",
           runtimeInfo = runtimeInfo,
           locale = locale,
           onCheckedChange = { enabled ->
@@ -817,6 +863,83 @@ private fun AppInfoTab(
     item("app_info_footer") {
       Spacer(modifier = Modifier.height(12.dp))
     }
+  }
+}
+
+@Composable
+private fun NativeCaptureControlCard(
+  nativeLogsChecked: Boolean,
+  nativeNetworkChecked: Boolean,
+  nativeNetworkEnabled: Boolean,
+  pending: Boolean,
+  locale: String,
+  onNativeLogsChange: (Boolean) -> Unit,
+  onNativeNetworkChange: (Boolean) -> Unit
+) {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, PanelColors.Border),
+    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+  ) {
+    Column(modifier = Modifier.padding(12.dp)) {
+      Text(
+        text = localizedNativeCaptureControlTitle(locale),
+        style = MaterialTheme.typography.titleSmall,
+        color = PanelColors.Text
+      )
+      Spacer(modifier = Modifier.height(10.dp))
+      NativeCaptureSwitchRow(
+        title = localizedNativeLogsControlTitle(locale),
+        summary = localizedNativeLogsControlSummary(locale),
+        checked = nativeLogsChecked,
+        enabled = !pending,
+        onCheckedChange = onNativeLogsChange
+      )
+      HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = PanelColors.Border)
+      NativeCaptureSwitchRow(
+        title = localizedNativeNetworkControlTitle(locale),
+        summary = localizedNativeNetworkControlSummary(nativeNetworkEnabled, locale),
+        checked = nativeNetworkChecked && nativeNetworkEnabled,
+        enabled = !pending && nativeNetworkEnabled,
+        onCheckedChange = onNativeNetworkChange
+      )
+    }
+  }
+}
+
+@Composable
+private fun NativeCaptureSwitchRow(
+  title: String,
+  summary: String,
+  checked: Boolean,
+  enabled: Boolean,
+  onCheckedChange: (Boolean) -> Unit
+) {
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    verticalAlignment = Alignment.CenterVertically
+  ) {
+    Column(modifier = Modifier.weight(1f)) {
+      Text(
+        text = title,
+        style = MaterialTheme.typography.bodyLarge,
+        color = PanelColors.Text
+      )
+      Spacer(modifier = Modifier.height(4.dp))
+      Text(
+        text = summary,
+        style = MaterialTheme.typography.bodyMedium,
+        color = PanelColors.MutedText
+      )
+    }
+    Spacer(modifier = Modifier.width(12.dp))
+    Switch(
+      checked = checked,
+      enabled = enabled,
+      onCheckedChange = onCheckedChange
+    )
   }
 }
 
@@ -1673,6 +1796,28 @@ private fun applyPanelRootEnhancedMode(context: Context?, enabled: Boolean) {
   InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
 }
 
+private fun applyPanelNativeCaptureMode(
+  context: Context?,
+  enableNativeLogs: Boolean,
+  enableNativeNetwork: Boolean
+) {
+  val currentConfig = InAppDebuggerStore.currentConfig()
+  val nextConfig = currentConfig.copy(
+    enableNativeLogs = enableNativeLogs,
+    enableNativeNetwork = enableNativeNetwork && currentConfig.enableNetworkTab
+  )
+
+  if (nextConfig == currentConfig) {
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+    return
+  }
+
+  InAppDebuggerStore.updateConfig(nextConfig)
+  InAppDebuggerNativeLogCapture.applyConfig(context?.applicationContext, nextConfig)
+  InAppDebuggerNativeNetworkCapture.applyConfig(context?.applicationContext, nextConfig)
+  InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+}
+
 private fun isRootEnhancedRequested(config: DebugConfig): Boolean {
   return config.androidNativeLogs.logcatScope == "device" &&
     config.androidNativeLogs.rootMode == "auto"
@@ -2010,6 +2155,7 @@ private fun buildDebuggerInfoSections(
           appendLine("${localizedRootDetailLabel(locale)}: $it")
         }
         appendLine("${localizedNativeLogsStatusLabel(locale)}: ${localizedBooleanValue(runtimeInfo.nativeLogsEnabled, locale)}")
+        appendLine("${localizedNativeNetworkStatusLabel(locale)}: ${localizedBooleanValue(runtimeInfo.nativeNetworkEnabled, locale)}")
         appendLine("${localizedLogcatModeLabel(locale)}: ${localizedLogcatMode(runtimeInfo.activeLogcatMode, locale)}")
         appendLine("${localizedRequestedScopeLabel(locale)}: ${localizedLogcatScope(runtimeInfo.requestedLogcatScope, locale)}")
         appendLine("${localizedRequestedRootModeLabel(locale)}: ${localizedRootMode(runtimeInfo.requestedRootMode, locale)}")
@@ -2365,6 +2511,13 @@ private fun buildCapabilitySummary(
   } else {
     localizedCapabilityNetworkDisabled(locale)
   }
+  if (runtimeInfo.networkTabEnabled) {
+    lines += if (runtimeInfo.nativeNetworkEnabled) {
+      localizedCapabilityNativeNetworkEnabled(locale)
+    } else {
+      localizedCapabilityNativeNetworkDisabled(locale)
+    }
+  }
   if (config.androidNativeLogs.rootMode == "auto" && runtimeInfo.rootStatus == "root") {
     lines += localizedCapabilityRootEnhanced(locale)
   }
@@ -2386,8 +2539,10 @@ private fun buildLimitationsSummary(
   if (config.androidNativeLogs.rootMode != "auto") {
     lines += localizedLimitationRootNotEnabled(locale)
   }
-  if (runtimeInfo.networkTabEnabled) {
+  if (runtimeInfo.networkTabEnabled && runtimeInfo.nativeNetworkEnabled) {
     lines += localizedLimitationAndroidNativeNetwork(locale)
+  } else if (runtimeInfo.networkTabEnabled) {
+    lines += localizedLimitationNativeNetworkDisabled(locale)
   } else {
     lines += localizedLimitationNetworkTabDisabled(locale)
   }
@@ -2438,6 +2593,59 @@ private fun localizedDebuggerCapabilityTitle(locale: String): String {
     locale.startsWith("ja") -> "このデバッガーで確認できる内容"
     locale == "zh-TW" -> "目前調試器可查看的內容"
     else -> "当前调试器可查看的内容"
+  }
+}
+
+private fun localizedNativeCaptureControlTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native Capture"
+    locale.startsWith("ja") -> "ネイティブ採集"
+    locale == "zh-TW" -> "原生採集"
+    else -> "原生采集"
+  }
+}
+
+private fun localizedNativeLogsControlTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native logs"
+    locale.startsWith("ja") -> "ネイティブログ"
+    locale == "zh-TW" -> "原生日誌"
+    else -> "原生日志"
+  }
+}
+
+private fun localizedNativeLogsControlSummary(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Temporarily capture logcat, stdout/stderr, and native uncaught exceptions."
+    locale.startsWith("ja") -> "logcat、stdout/stderr、ネイティブ未捕捉例外を一時的に採集します。"
+    locale == "zh-TW" -> "臨時採集 logcat、stdout/stderr 與原生未捕捉例外。"
+    else -> "临时采集 logcat、stdout/stderr 与原生未捕获异常。"
+  }
+}
+
+private fun localizedNativeNetworkControlTitle(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native network"
+    locale.startsWith("ja") -> "ネイティブ通信"
+    locale == "zh-TW" -> "原生網路"
+    else -> "原生网络"
+  }
+}
+
+private fun localizedNativeNetworkControlSummary(networkTabEnabled: Boolean, locale: String): String {
+  if (!networkTabEnabled) {
+    return when {
+      locale.startsWith("en") -> "Unavailable because the network tab is disabled."
+      locale.startsWith("ja") -> "通信タブが無効なため利用できません。"
+      locale == "zh-TW" -> "網路面板已關閉，因此不可用。"
+      else -> "network 面板已关闭，因此不可用。"
+    }
+  }
+  return when {
+    locale.startsWith("en") -> "Temporarily capture explicitly integrated native OkHttp traffic."
+    locale.startsWith("ja") -> "明示的に統合したネイティブ OkHttp 通信を一時的に採集します。"
+    locale == "zh-TW" -> "臨時採集已顯式接入的原生 OkHttp 流量。"
+    else -> "临时采集已显式接入的原生 OkHttp 流量。"
   }
 }
 
@@ -2675,6 +2883,15 @@ private fun localizedNativeLogsStatusLabel(locale: String): String {
     locale.startsWith("ja") -> "ネイティブログ有効"
     locale == "zh-TW" -> "原生日誌已啟用"
     else -> "原生日志已启用"
+  }
+}
+
+private fun localizedNativeNetworkStatusLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native network enabled"
+    locale.startsWith("ja") -> "ネイティブ通信有効"
+    locale == "zh-TW" -> "原生網路已啟用"
+    else -> "原生网络已启用"
   }
 }
 
@@ -3042,10 +3259,28 @@ private fun localizedCapabilityNativeDisabled(locale: String): String {
 
 private fun localizedCapabilityNetworkEnabled(locale: String): String {
   return when {
-    locale.startsWith("en") -> "JS XHR / WebSocket events plus Android native HTTP traffic and native WebSocket handshakes on instrumented or explicitly integrated OkHttp paths."
-    locale.startsWith("ja") -> "JS 層の XHR / WebSocket イベントに加え、計装済みまたは明示的に統合した OkHttp 経路の Android ネイティブ HTTP 通信とネイティブ WebSocket ハンドシェイク。"
-    locale == "zh-TW" -> "除 JS 層 XHR / WebSocket 事件外，也覆蓋已掛接或顯式接入 OkHttp 路徑上的 Android 原生 HTTP 通信與原生 WebSocket 握手。"
-    else -> "除 JS 层 XHR / WebSocket 事件外，也覆盖已挂接或显式接入 OkHttp 路径上的 Android 原生 HTTP 通信与原生 WebSocket 握手。"
+    locale.startsWith("en") -> "JS XHR / fetch / WebSocket events from React Native."
+    locale.startsWith("ja") -> "React Native の JS XHR / fetch / WebSocket イベント。"
+    locale == "zh-TW" -> "React Native 的 JS XHR / fetch / WebSocket 事件。"
+    else -> "React Native 的 JS XHR / fetch / WebSocket 事件。"
+  }
+}
+
+private fun localizedCapabilityNativeNetworkEnabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Android native network capture is enabled for instrumented or explicitly integrated OkHttp paths."
+    locale.startsWith("ja") -> "計装済みまたは明示的に統合した OkHttp 経路の Android ネイティブ通信採集が有効です。"
+    locale == "zh-TW" -> "已啟用已掛接或顯式接入 OkHttp 路徑上的 Android 原生網路採集。"
+    else -> "已启用已挂接或显式接入 OkHttp 路径上的 Android 原生网络采集。"
+  }
+}
+
+private fun localizedCapabilityNativeNetworkDisabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native network capture is off until explicitly enabled in App Info."
+    locale.startsWith("ja") -> "App Info で明示的に有効化するまで、ネイティブ通信採集はオフです。"
+    locale == "zh-TW" -> "原生網路採集保持關閉，直到在 App Info 中明確啟用。"
+    else -> "原生网络采集保持关闭，直到在 App Info 中显式启用。"
   }
 }
 
@@ -3109,6 +3344,15 @@ private fun localizedLimitationAndroidNativeNetwork(locale: String): String {
     locale.startsWith("ja") -> "Android は計装済みまたは明示的に統合した OkHttp 経路のネイティブ HTTP 通信を採集できます。OkHttp 外の通信と、ネイティブ WebSocket フレームの完全なライフサイクルはまだ自動採集できません。"
     locale == "zh-TW" -> "Android 現已可採集已掛接或顯式接入 OkHttp 路徑上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命週期，仍未自動覆蓋。"
     else -> "Android 现已可采集已挂接或显式接入 OkHttp 路径上的原生 HTTP 通信；但 OkHttp 之外的流量，以及原生 WebSocket frame 的完整生命周期，仍未自动覆盖。"
+  }
+}
+
+private fun localizedLimitationNativeNetworkDisabled(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Native network capture is disabled by default to avoid OkHttp instrumentation overhead on normal sessions."
+    locale.startsWith("ja") -> "通常セッションでの OkHttp 計装コストを避けるため、ネイティブ通信採集はデフォルトで無効です。"
+    locale == "zh-TW" -> "為避免一般會話承擔 OkHttp 掛接開銷，原生網路採集預設關閉。"
+    else -> "为避免普通会话承担 OkHttp 挂接开销，原生网络采集默认关闭。"
   }
 }
 

@@ -68,7 +68,7 @@ object InAppDebuggerNativeNetworkCapture {
         appContextRef = WeakReference(context.applicationContext)
       }
       val wasLivePanelActive = livePanelActive
-      enabled = config.enabled && config.enableNetworkTab
+      enabled = config.enabled && config.enableNetworkTab && config.enableNativeNetwork
       if (enabled) {
         if (!hooksInstalled) {
           installHooksLocked()

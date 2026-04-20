@@ -57,19 +57,21 @@ object InAppDebuggerNativeLogCapture {
   fun applyConfig(context: Context?, config: DebugConfig) {
     synchronized(lock) {
       val previousContext = appContextRef?.get()
+      val previousNativeConfig = nativeConfig
+      val previousCaptureEnabled = captureEnabled
       val nextConfig = sanitizeConfig(config.androidNativeLogs)
-      val nextCaptureEnabled = config.enabled && nextConfig.enabled
+      val nextCaptureEnabled = config.enabled && config.enableNativeLogs && nextConfig.enabled
 
-      updateContextLocked(context)
-      val resolvedContext = appContextRef?.get()
       debugConfig = config
-      val shouldRefresh =
-        nativeConfig != nextConfig ||
-          captureEnabled != nextCaptureEnabled ||
-        (resolvedContext != null && resolvedContext !== previousContext)
-
       nativeConfig = nextConfig
       captureEnabled = nextCaptureEnabled
+      updateContextLocked(context, replayCrashReport = nextCaptureEnabled)
+      val resolvedContext = appContextRef?.get()
+      val shouldRefresh =
+        previousNativeConfig != nextConfig ||
+          previousCaptureEnabled != nextCaptureEnabled ||
+        (resolvedContext != null && resolvedContext !== previousContext)
+
       if (shouldRefresh) {
         refreshCaptureStateLocked()
       } else {
@@ -210,13 +212,13 @@ object InAppDebuggerNativeLogCapture {
     publishRuntimeInfoLocked()
   }
 
-  private fun updateContextLocked(context: Context?) {
+  private fun updateContextLocked(context: Context?, replayCrashReport: Boolean = captureEnabled) {
     if (context != null) {
       appContextRef = WeakReference(context.applicationContext)
     }
     val actualContext = appContextRef?.get() ?: return
     crashHistory = loadCrashHistory(actualContext)
-    if (crashReplayLoaded) {
+    if (crashReplayLoaded || !replayCrashReport) {
       return
     }
 
@@ -278,6 +280,7 @@ object InAppDebuggerNativeLogCapture {
       supportedAbis = Build.SUPPORTED_ABIS?.toList() ?: emptyList(),
       networkTabEnabled = debugConfig.enableNetworkTab,
       nativeLogsEnabled = captureEnabled,
+      nativeNetworkEnabled = debugConfig.enabled && debugConfig.enableNetworkTab && debugConfig.enableNativeNetwork,
       captureLogcat = captureEnabled && nativeConfig.captureLogcat,
       captureStdoutStderr = captureEnabled && nativeConfig.captureStdoutStderr,
       captureUncaughtExceptions = captureEnabled && nativeConfig.captureUncaughtExceptions,

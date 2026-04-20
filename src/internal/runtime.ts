@@ -61,6 +61,7 @@ type RuntimeNativeModule = {
 
 const FLUSH_DELAY_MS = 64;
 const MAX_BUFFERED_BATCH_SIZE = 120;
+const MAX_QUEUE_OVERFLOW_MARGIN = MAX_BUFFERED_BATCH_SIZE;
 const MAX_LOG_MESSAGE_LENGTH = 12_000;
 const MAX_ERROR_MESSAGE_LENGTH = 12_000;
 const JS_PIPELINE_DIAGNOSTICS_ENABLED = false;
@@ -103,8 +104,20 @@ function createRuntimeIdentity(nowValue: number): RuntimeIdentity {
 }
 
 export function formatMessage(args: unknown[]) {
+  if (args.length === 1 && typeof args[0] === 'string' && args[0].length <= MAX_LOG_MESSAGE_LENGTH) {
+    return args[0];
+  }
   return formatDebugMessage(args, {
     maxLength: MAX_LOG_MESSAGE_LENGTH,
+  });
+}
+
+function formatErrorMessage(args: unknown[]) {
+  if (args.length === 1 && typeof args[0] === 'string' && args[0].length <= MAX_ERROR_MESSAGE_LENGTH) {
+    return args[0];
+  }
+  return formatDebugMessage(args, {
+    maxLength: MAX_ERROR_MESSAGE_LENGTH,
   });
 }
 
@@ -131,6 +144,8 @@ function toNativeConfig(config: ResolvedInAppDebugConfig): NativeConfig {
     enabled: config.enabled,
     initialVisible: config.initialVisible,
     enableNetworkTab: config.enableNetworkTab,
+    enableNativeLogs: config.enableNativeLogs,
+    enableNativeNetwork: config.enableNativeNetwork,
     maxLogs: config.maxLogs,
     maxErrors: config.maxErrors,
     maxRequests: config.maxRequests,
@@ -156,6 +171,8 @@ export class DebugRuntime {
     enabled: false,
     initialVisible: true,
     enableNetworkTab: true,
+    enableNativeLogs: false,
+    enableNativeNetwork: false,
     maxLogs: 2000,
     maxErrors: 100,
     maxRequests: 100,
@@ -273,6 +290,9 @@ export class DebugRuntime {
   }
 
   log(level: DebugLevel, args: unknown[]) {
+    if (!this.isCaptureActive()) {
+      return;
+    }
     if (level === 'error') {
       this.captureConsoleError(args);
       return;
@@ -294,14 +314,15 @@ export class DebugRuntime {
   }
 
   captureError(source: DebugErrorSource, args: unknown[]) {
+    if (!this.isCaptureActive()) {
+      return;
+    }
     const nowValue = this.now();
     const identity = createRuntimeIdentity(nowValue);
     const entry: DebugErrorEntry = {
       id: identity.id,
       source,
-      message: formatDebugMessage(args, {
-        maxLength: MAX_ERROR_MESSAGE_LENGTH,
-      }),
+      message: formatErrorMessage(args),
       ...formatTimestamps(nowValue),
       timelineTimestampMillis: nowValue,
       timelineSequence: identity.sequence,
@@ -310,14 +331,18 @@ export class DebugRuntime {
   }
 
   captureNetwork(entry: DebugNetworkEntry) {
+    if (!this.isCaptureActive()) {
+      return;
+    }
     this.enqueueNetwork(entry);
   }
 
   private captureConsoleError(args: unknown[]) {
+    if (!this.isCaptureActive()) {
+      return;
+    }
     const nowValue = this.now();
-    const formattedMessage = formatDebugMessage(args, {
-      maxLength: MAX_ERROR_MESSAGE_LENGTH,
-    });
+    const formattedMessage = formatErrorMessage(args);
     const timestamps = formatTimestamps(nowValue);
     const logIdentity = createRuntimeIdentity(nowValue);
     const errorIdentity = createRuntimeIdentity(nowValue);
@@ -489,23 +514,29 @@ export class DebugRuntime {
   }
 
   private enqueueLog(entry: DebugLogEntry) {
-    if (!this.configured || !this.providerConfig.enabled) {
+    if (!this.isCaptureActive()) {
       return;
     }
     this.logQueue.push(encodeLogEntry(entry))
-    this.scheduleFlushIfNeeded()
+    this.trimPendingLogQueue(false)
+    if (this.pendingEntryCount() > 0) {
+      this.scheduleFlushIfNeeded()
+    }
   }
 
   private enqueueError(entry: DebugErrorEntry) {
-    if (!this.configured || !this.providerConfig.enabled) {
+    if (!this.isCaptureActive()) {
       return;
     }
     this.errorQueue.push(encodeErrorEntry(entry))
-    this.scheduleFlushIfNeeded()
+    this.trimPendingErrorQueue(false)
+    if (this.pendingEntryCount() > 0) {
+      this.scheduleFlushIfNeeded()
+    }
   }
 
   private enqueueNetwork(entry: DebugNetworkEntry) {
-    if (!this.configured || !this.providerConfig.enabled) {
+    if (!this.isCaptureActive()) {
       return;
     }
 
@@ -550,6 +581,8 @@ export class DebugRuntime {
     if (this.flushInFlight) {
       return this.flushInFlight;
     }
+    this.trimPendingLogQueue(true);
+    this.trimPendingErrorQueue(true);
     if (this.pendingEntryCount() === 0) {
       return;
     }
@@ -619,6 +652,18 @@ export class DebugRuntime {
     void this.dependencies.nativeModule.emitDiagnostic?.(source, message).catch(() => undefined);
   }
 
+  private isCaptureActive() {
+    return this.configured && this.providerConfig.enabled;
+  }
+
+  private trimPendingLogQueue(exact: boolean) {
+    trimPendingQueue(this.logQueue, this.providerConfig.maxLogs, exact);
+  }
+
+  private trimPendingErrorQueue(exact: boolean) {
+    trimPendingQueue(this.errorQueue, this.providerConfig.maxErrors, exact);
+  }
+
   private getMergedConfig(): ResolvedInAppDebugConfig {
     const overrides = this.androidNativeLogsOverride;
     if (!overrides) {
@@ -651,6 +696,30 @@ function encodeLogEntry(entry: DebugLogEntry): NativeLogWireEntry {
     timelineTimestampMillis,
     timelineSequence,
   ]
+}
+
+function trimPendingQueue<T>(queue: T[], maxCount: number, exact: boolean) {
+  const sanitizedMaxCount = sanitizeNonNegativeInteger(maxCount);
+  if (sanitizedMaxCount <= 0) {
+    queue.length = 0;
+    return;
+  }
+
+  const allowedCount = exact
+    ? sanitizedMaxCount
+    : sanitizedMaxCount + MAX_QUEUE_OVERFLOW_MARGIN;
+  if (queue.length <= allowedCount) {
+    return;
+  }
+
+  queue.splice(0, queue.length - sanitizedMaxCount);
+}
+
+function sanitizeNonNegativeInteger(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(value));
 }
 
 function encodeErrorEntry(entry: DebugErrorEntry): NativeErrorWireEntry {
@@ -764,6 +833,8 @@ function areResolvedConfigsEqual(
     lhs.enabled === rhs.enabled &&
     lhs.initialVisible === rhs.initialVisible &&
     lhs.enableNetworkTab === rhs.enableNetworkTab &&
+    lhs.enableNativeLogs === rhs.enableNativeLogs &&
+    lhs.enableNativeNetwork === rhs.enableNativeNetwork &&
     lhs.maxLogs === rhs.maxLogs &&
     lhs.maxErrors === rhs.maxErrors &&
     lhs.maxRequests === rhs.maxRequests &&

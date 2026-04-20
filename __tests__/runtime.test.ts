@@ -27,6 +27,14 @@ describe('resolveProviderConfig', () => {
   it('defaults to disabled until explicitly enabled', () => {
     expect(resolveProviderConfig({}).enabled).toBe(false);
   });
+
+  it('keeps native collectors disabled by default', () => {
+    expect(resolveProviderConfig({ enabled: true })).toMatchObject({
+      enableNativeLogs: false,
+      enableNativeNetwork: false,
+    });
+    expect(resolveProviderConfig({ enabled: true, androidNativeLogs: { enabled: true } }).enableNativeLogs).toBe(true);
+  });
 });
 
 describe('DebugRuntime', () => {
@@ -99,6 +107,12 @@ describe('DebugRuntime', () => {
     });
 
     await runtime.registerProvider(resolveProviderConfig({ enabled: true }));
+    expect(nativeModule.configure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enableNativeLogs: false,
+        enableNativeNetwork: false,
+      })
+    );
     console.log('hello');
     console.info('details');
     console.error('boom');
@@ -129,6 +143,43 @@ describe('DebugRuntime', () => {
     jest.advanceTimersByTime(32);
     await flushPromises();
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps pending JS log batches to the configured log window', async () => {
+    const nativeModule = {
+      configure: jest.fn().mockResolvedValue(undefined),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => ({
+        enable: jest.fn(),
+        disable: jest.fn(),
+        updateOptions: jest.fn(),
+      }),
+      consoleRef: {
+        log: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    });
+
+    await runtime.registerProvider(resolveProviderConfig({ enabled: true, maxLogs: 3 }));
+    for (let index = 0; index < 6; index += 1) {
+      console.log(`log-${index}`);
+    }
+
+    jest.advanceTimersByTime(64);
+    await flushPromises();
+
+    const [logs] = nativeModule.ingestBatch.mock.calls[0];
+    expect(logs.map((entry: any[]) => entry[5])).toEqual(['log-3', 'log-4', 'log-5']);
   });
 
   it('skips redundant native reconfiguration when the resolved config does not change', async () => {

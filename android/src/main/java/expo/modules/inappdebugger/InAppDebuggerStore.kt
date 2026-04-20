@@ -367,7 +367,8 @@ object InAppDebuggerStore {
     return panelVisible &&
       activeFeed == DebugPanelFeed.Network &&
       config.enabled &&
-      config.enableNetworkTab
+      config.enableNetworkTab &&
+      config.enableNativeNetwork
   }
 
   private fun publishChromeState(nextState: DebugPanelChromeState) {

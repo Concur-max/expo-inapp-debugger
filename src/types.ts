@@ -147,6 +147,8 @@ export type InAppDebugProviderProps = {
   enabled?: boolean;
   initialVisible?: boolean;
   enableNetworkTab?: boolean;
+  enableNativeLogs?: boolean;
+  enableNativeNetwork?: boolean;
   maxLogs?: number;
   maxErrors?: number;
   maxRequests?: number;
@@ -174,6 +176,8 @@ export type ResolvedInAppDebugConfig = {
   enabled: boolean;
   initialVisible: boolean;
   enableNetworkTab: boolean;
+  enableNativeLogs: boolean;
+  enableNativeNetwork: boolean;
   maxLogs: number;
   maxErrors: number;
   maxRequests: number;

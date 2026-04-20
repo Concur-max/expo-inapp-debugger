@@ -616,6 +616,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private let emptyStateView = InAppDebuggerEmptyStateView()
   private let logRetentionNoticeView = InAppDebuggerTableNoticeView()
+  private let nativeCaptureControlsView = InAppDebuggerNativeCaptureControlsView()
 
   override func viewDidLoad() {
     super.viewDidLoad()
@@ -1031,11 +1032,15 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func syncNativeCaptureStates() {
-    let shouldActivateNativeLogs = activeTab == .logs && selectedLogOrigins.contains("native")
+    let shouldActivateNativeLogs =
+      currentConfig.enableNativeLogs &&
+      activeTab == .logs &&
+      selectedLogOrigins.contains("native")
     InAppDebuggerNativeLogCapture.shared.setPanelActive(shouldActivateNativeLogs)
 
     let shouldActivateNativeNetwork =
       currentConfig.enableNetworkTab &&
+      currentConfig.enableNativeNetwork &&
       activeTab == .network &&
       selectedNetworkOrigins.contains("native") &&
       (
@@ -1044,13 +1049,28 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       )
     InAppDebuggerNativeNetworkCapture.shared.setPanelActive(shouldActivateNativeNetwork)
 
-    // The current native WebSocket hook captures RN-managed sockets, which are still JS-origin requests.
-    let shouldActivateNativeWebSocket =
-      currentConfig.enableNetworkTab &&
-      activeTab == .network &&
-      selectedNetworkOrigins.contains("js") &&
-      selectedNetworkKinds.contains(NetworkKindFilter.websocket.rawValue)
-    InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(shouldActivateNativeWebSocket)
+    InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
+  }
+
+  private func applyNativeCaptureSettings(enableNativeLogs: Bool, enableNativeNetwork: Bool) {
+    var nextConfig = currentConfig
+    nextConfig.enableNativeLogs = enableNativeLogs
+    nextConfig.enableNativeNetwork = enableNativeNetwork && nextConfig.enableNetworkTab
+
+    guard nextConfig != currentConfig else {
+      syncNativeCaptureStates()
+      return
+    }
+
+    currentConfig = nextConfig
+    InAppDebuggerStore.shared.update(config: nextConfig)
+    InAppDebuggerNativeLogCapture.shared.setEnabled(nextConfig.enabled && nextConfig.enableNativeLogs)
+    InAppDebuggerNativeNetworkCapture.shared.setEnabled(
+      nextConfig.enabled && nextConfig.enableNetworkTab && nextConfig.enableNativeNetwork
+    )
+    InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
+    syncNativeCaptureStates()
+    reloadFromStore()
   }
 
   private func configuredCell(for tableView: UITableView, at indexPath: IndexPath) -> UITableViewCell {
@@ -1784,7 +1804,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private func renderAppInfo(logs: [DebugLogEntry], errors: [DebugErrorEntry]) {
     let sections = buildAppInfoSections(logs: logs, errors: errors)
-    let signature = sections
+    let controlsSignature = [
+      currentConfig.enableNativeLogs ? "nativeLogs=1" : "nativeLogs=0",
+      currentConfig.enableNativeNetwork ? "nativeNetwork=1" : "nativeNetwork=0",
+      currentConfig.enableNetworkTab ? "networkTab=1" : "networkTab=0",
+    ].joined(separator: "|")
+    let signature = controlsSignature + "\n" + sections
       .map { "\($0.title)\n\($0.content)\n\($0.monospace)" }
       .joined(separator: "\n---\n")
     guard signature != renderedAppInfoSignature else {
@@ -1796,6 +1821,31 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       appInfoStackView.removeArrangedSubview(view)
       view.removeFromSuperview()
     }
+
+    nativeCaptureControlsView.configure(
+      nativeLogsEnabled: currentConfig.enableNativeLogs,
+      nativeNetworkEnabled: currentConfig.enableNativeNetwork,
+      networkTabEnabled: currentConfig.enableNetworkTab,
+      onNativeLogsChange: { [weak self] enabled in
+        guard let self else {
+          return
+        }
+        self.applyNativeCaptureSettings(
+          enableNativeLogs: enabled,
+          enableNativeNetwork: self.currentConfig.enableNativeNetwork
+        )
+      },
+      onNativeNetworkChange: { [weak self] enabled in
+        guard let self else {
+          return
+        }
+        self.applyNativeCaptureSettings(
+          enableNativeLogs: self.currentConfig.enableNativeLogs,
+          enableNativeNetwork: enabled
+        )
+      }
+    )
+    appInfoStackView.addArrangedSubview(nativeCaptureControlsView)
 
     sections.forEach { section in
       let sectionView = InAppDebuggerDetailSectionView()
@@ -1888,11 +1938,18 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private func buildDebuggerCapabilityInfo() -> String {
     var lines = [
       "JS console 日志、React 错误、全局错误与未处理 Promise rejection。",
-      "iOS 原生日志：stdout、stderr、log/native 页面激活时的 OSLog 轮询、未捕获 NSException，以及 fatal signal 崩溃标记。",
+      currentConfig.enableNativeLogs
+        ? "iOS 原生日志已启用：stdout、stderr、log/native 页面激活时的 OSLog 轮询、未捕获 NSException，以及 fatal signal 崩溃标记。"
+        : "iOS 原生日志默认关闭，可在 App Info 中临时启用。",
     ]
 
     if currentConfig.enableNetworkTab {
-      lines.append("network 面板：JS fetch/XHR、WebSocket，以及 network/native 页面激活时的 native URLSession 请求。")
+      lines.append("network 面板：默认采集 React Native 的 JS fetch/XHR/WebSocket。")
+      lines.append(
+        currentConfig.enableNativeNetwork
+          ? "iOS 原生网络已启用：network/native 页面激活时会捕获 native URLSession 请求。"
+          : "iOS 原生网络默认关闭，可在 App Info 中临时启用。"
+      )
     } else {
       lines.append("当前配置已关闭 network 面板。")
     }
@@ -1904,9 +1961,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     [
       "调试器已启用: \(currentConfig.enabled ? "是" : "否")",
       "network 面板已启用: \(currentConfig.enableNetworkTab ? "是" : "否")",
-      "原生崩溃持久化: 已启用",
-      "原生 stream 采集: 仅在选择 log/native 时激活",
-      "原生网络预览: 仅在选择 network/native 时激活",
+      "原生日志已启用: \(currentConfig.enableNativeLogs ? "是" : "否")",
+      "原生网络已启用: \(currentConfig.enableNativeNetwork ? "是" : "否")",
+      "原生崩溃持久化: \(currentConfig.enableNativeLogs ? "已启用" : "未启用")",
+      "原生 stream 采集: \(currentConfig.enableNativeLogs ? "仅在选择 log/native 时激活" : "未启用")",
+      "原生网络预览: \(currentConfig.enableNativeNetwork ? "仅在选择 network/native 时激活" : "未启用")",
       "最大日志数: \(currentConfig.maxLogs)",
       "最大错误数: \(currentConfig.maxErrors)",
       "最大请求数: \(currentConfig.maxRequests)",
@@ -1991,7 +2050,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
   private func buildLimitationsInfo() -> String {
     var lines = [
-      "为了降低宿主应用开销，native stream 与 OSLog 采集只会在 log/native 页面激活。",
+      "为了降低宿主应用开销，原生日志和原生网络采集默认关闭，需要在 App Info 中显式开启。",
       "iOS 无法完整回放调试器挂钩启动之前产生的任意日志，但会尽力保留已持久化的未捕获崩溃报告。",
       "network 面板未激活时会尽量减少 payload preview 处理，以保护运行时性能。",
     ]
@@ -2557,6 +2616,165 @@ private final class InAppDebuggerNetworkCell: UITableViewCell {
       chevronView.widthAnchor.constraint(equalToConstant: 10),
       chevronView.heightAnchor.constraint(equalToConstant: 16),
     ])
+  }
+}
+
+private final class InAppDebuggerNativeCaptureControlsView: UIView {
+  private let cardView = UIView()
+  private let titleLabel = UILabel()
+  private let nativeLogsRow = InAppDebuggerSwitchRowView()
+  private let nativeNetworkRow = InAppDebuggerSwitchRowView()
+  private var onNativeLogsChange: ((Bool) -> Void)?
+  private var onNativeNetworkChange: ((Bool) -> Void)?
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(
+    nativeLogsEnabled: Bool,
+    nativeNetworkEnabled: Bool,
+    networkTabEnabled: Bool,
+    onNativeLogsChange: @escaping (Bool) -> Void,
+    onNativeNetworkChange: @escaping (Bool) -> Void
+  ) {
+    self.onNativeLogsChange = onNativeLogsChange
+    self.onNativeNetworkChange = onNativeNetworkChange
+
+    nativeLogsRow.configure(
+      title: "原生日志",
+      detail: "临时采集 stdout/stderr、OSLog、NSException 与 fatal signal。",
+      isOn: nativeLogsEnabled,
+      isEnabled: true
+    )
+    nativeNetworkRow.configure(
+      title: "原生网络",
+      detail: networkTabEnabled
+        ? "临时捕获 native URLSession 请求；普通场景保持关闭更稳。"
+        : "network 面板已关闭，因此不可用。",
+      isOn: nativeNetworkEnabled && networkTabEnabled,
+      isEnabled: networkTabEnabled
+    )
+  }
+
+  private func buildUI() {
+    backgroundColor = .clear
+
+    cardView.backgroundColor = PanelColors.card
+    cardView.layer.cornerRadius = 8
+    cardView.layer.borderWidth = 1
+    cardView.layer.borderColor = PanelColors.border.cgColor
+    addSubview(cardView)
+
+    titleLabel.text = "原生采集"
+    titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
+    titleLabel.textColor = PanelColors.text
+
+    let divider = UIView()
+    divider.backgroundColor = PanelColors.border
+
+    let stack = UIStackView(arrangedSubviews: [titleLabel, nativeLogsRow, divider, nativeNetworkRow])
+    stack.axis = .vertical
+    stack.spacing = 10
+    cardView.addSubview(stack)
+
+    nativeLogsRow.onValueChange = { [weak self] enabled in
+      self?.onNativeLogsChange?(enabled)
+    }
+    nativeNetworkRow.onValueChange = { [weak self] enabled in
+      self?.onNativeNetworkChange?(enabled)
+    }
+
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    divider.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      cardView.topAnchor.constraint(equalTo: topAnchor),
+      cardView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      cardView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      cardView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+      stack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 12),
+      stack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
+      stack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
+      stack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
+
+      divider.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
+    ])
+  }
+}
+
+private final class InAppDebuggerSwitchRowView: UIView {
+  var onValueChange: ((Bool) -> Void)?
+
+  private let titleLabel = UILabel()
+  private let detailLabel = UILabel()
+  private let valueSwitch = UISwitch()
+  private var isConfiguring = false
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    buildUI()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(title: String, detail: String, isOn: Bool, isEnabled: Bool) {
+    isConfiguring = true
+    titleLabel.text = title
+    detailLabel.text = detail
+    valueSwitch.isOn = isOn
+    valueSwitch.isEnabled = isEnabled
+    alpha = isEnabled ? 1 : 0.55
+    isConfiguring = false
+  }
+
+  private func buildUI() {
+    titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+    titleLabel.textColor = PanelColors.text
+    titleLabel.numberOfLines = 1
+
+    detailLabel.font = .systemFont(ofSize: 13, weight: .regular)
+    detailLabel.textColor = PanelColors.mutedText
+    detailLabel.numberOfLines = 0
+
+    valueSwitch.addTarget(self, action: #selector(handleSwitchChange), for: .valueChanged)
+
+    let textStack = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
+    textStack.axis = .vertical
+    textStack.spacing = 4
+    textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    valueSwitch.setContentHuggingPriority(.required, for: .horizontal)
+    valueSwitch.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+    let rowStack = UIStackView(arrangedSubviews: [textStack, valueSwitch])
+    rowStack.axis = .horizontal
+    rowStack.spacing = 12
+    rowStack.alignment = .center
+    addSubview(rowStack)
+
+    rowStack.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      rowStack.topAnchor.constraint(equalTo: topAnchor),
+      rowStack.leadingAnchor.constraint(equalTo: leadingAnchor),
+      rowStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+      rowStack.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+  }
+
+  @objc private func handleSwitchChange() {
+    guard !isConfiguring else {
+      return
+    }
+    onValueChange?(valueSwitch.isOn)
   }
 }
 

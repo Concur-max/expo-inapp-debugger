@@ -65,6 +65,8 @@ export function resolveProviderConfig(input: {
   enabled?: boolean;
   initialVisible?: boolean;
   enableNetworkTab?: boolean;
+  enableNativeLogs?: boolean;
+  enableNativeNetwork?: boolean;
   maxLogs?: number;
   maxErrors?: number;
   maxRequests?: number;
@@ -73,10 +75,13 @@ export function resolveProviderConfig(input: {
   strings?: Partial<InAppDebugStrings>;
 }): ResolvedInAppDebugConfig {
   const resolved = resolveStrings(input.locale ?? 'zh-CN', input.strings);
+  const enableNetworkTab = input.enableNetworkTab ?? true;
   return {
     enabled: input.enabled ?? false,
     initialVisible: input.initialVisible ?? true,
-    enableNetworkTab: input.enableNetworkTab ?? true,
+    enableNetworkTab,
+    enableNativeLogs: input.enableNativeLogs ?? input.androidNativeLogs?.enabled ?? false,
+    enableNativeNetwork: enableNetworkTab && (input.enableNativeNetwork ?? false),
     maxLogs: input.maxLogs ?? 2000,
     maxErrors: input.maxErrors ?? 100,
     maxRequests: input.maxRequests ?? 100,

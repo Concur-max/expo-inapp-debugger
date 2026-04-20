@@ -17,6 +17,11 @@ class InAppDebuggerModule : Module() {
         enabled = rawConfig["enabled"] as? Boolean ?: false,
         initialVisible = rawConfig["initialVisible"] as? Boolean ?: true,
         enableNetworkTab = rawConfig["enableNetworkTab"] as? Boolean ?: true,
+        enableNativeLogs =
+          rawConfig["enableNativeLogs"] as? Boolean
+            ?: rawAndroidNativeLogs?.get("enabled") as? Boolean
+            ?: false,
+        enableNativeNetwork = rawConfig["enableNativeNetwork"] as? Boolean ?: false,
         maxLogs = (rawConfig["maxLogs"] as? Number)?.toInt() ?: 2000,
         maxErrors = (rawConfig["maxErrors"] as? Number)?.toInt() ?: 100,
         maxRequests = (rawConfig["maxRequests"] as? Number)?.toInt() ?: 100,
@@ -42,8 +47,9 @@ class InAppDebuggerModule : Module() {
       inAppDebuggerTrace("InAppDebuggerModule") {
         "configure enabled=${config.enabled} initialVisible=${config.initialVisible} " +
           "currentActivity=${appContext.currentActivity?.javaClass?.name} " +
-          "nativeLogs=${config.androidNativeLogs.enabled}/${config.androidNativeLogs.logcatScope}/" +
-          "${config.androidNativeLogs.rootMode}"
+          "nativeLogs=${config.enableNativeLogs}/${config.androidNativeLogs.enabled}/" +
+          "${config.androidNativeLogs.logcatScope}/${config.androidNativeLogs.rootMode} " +
+          "nativeNetwork=${config.enableNativeNetwork}"
       }
       if (!config.enabled && !nativeRuntimeActive) {
         return@AsyncFunction

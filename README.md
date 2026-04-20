@@ -75,7 +75,7 @@ export default function Root() {
 | `InAppDebugProvider` | 生产环境最稳妥、最小语义影响 | 不改变 React 错误处理语义 | 低 |
 | `InAppDebugBoundary` | 只想单独使用内置 Error Boundary | 会改变 React 渲染错误的处理方式 | 与调试器是否启用无强绑定 |
 
-`InAppDebugProvider` 默认是关闭的。只要挂载了 `InAppDebugProvider`，`enabled` 就是启停调试器的唯一权威开关。只有它变成 `true`，库才会创建运行时并安装 JS / native 采集 hook。
+`InAppDebugProvider` 默认是关闭的。只要挂载了 `InAppDebugProvider`，`enabled` 就是启停调试器的唯一权威开关。只有它变成 `true`，库才会创建运行时并安装 React Native 日志与网络采集。原生日志 / 原生网络采集默认关闭，需要在 App Info 面板里显式打开，或通过 Provider 显式传入 opt-in 配置。
 
 ## 生产环境按需开启
 
@@ -139,8 +139,9 @@ export default function Root() {
 | 已 import 包，但没有渲染 `Provider` / `Boundary` / `Root`，也没有调用任何 API | 只有入口包装模块求值；不会创建 `DebugRuntime`，不会安装采集 hook | 通常可忽略 |
 | 渲染 `InAppDebugProvider enabled={false}`，且本进程从未启用过 | 会有少量 React render、effect、配置解析、Context 成本；不会创建 runtime，也不会安装 collectors | 通常可忽略 |
 | 渲染 `InAppDebugRoot enabled={false}`，且本进程从未启用过 | 在上一行基础上，再多一个 Boundary 组件；同时 React 渲染错误处理语义会改变 | 性能通常可忽略，但功能影响不是零 |
-| `enabled={true}` | 会创建 runtime，并按配置安装 console / error / promise / network / native collectors | 不能视为可忽略 |
-| 同一进程里曾启用过，之后又切回 `enabled={false}` | 重采集会停止，UI/store 会释放；但 runtime 对象仍在，底层 native 网络 hook 会留在快速跳过路径 | 对普通业务通常很低，可近似忽略，但不等于“从未启用” |
+| `enabled={true}`，未显式开启 native 采集 | 会创建 runtime，安装 JS console / error / promise / fetch / XHR / WebSocket 采集；native logs / native network 保持关闭 | 有明确调试开销，但默认避开最重的原生 hook |
+| `enabled={true}`，并在 App Info 或 Provider 中开启 native 采集 | 在上一行基础上开启对应 native collector；iOS native network 会安装 URLProtocol / URLSession hook，Android native network 会启用 OkHttp 采集路径 | 不能视为可忽略，只建议临时排查 |
+| 同一进程里曾启用过 native network，之后又切回关闭 | 重采集会停止，UI/store 会释放；但 runtime 对象仍在，部分底层 native 网络 hook 可能会留在快速跳过路径 | 对普通业务通常很低，但不等于“从未启用 native network” |
 | 上一行之后再把应用进程杀掉并重启，且新进程里 `enabled={false}` | 会回到“新进程从未启用”的关闭态，只保留包体和原生注册这类构建级成本 | 通常可认为接近最干净关闭态 |
 
 如果明确传入 `enabled={false}`，并且没有主动去挂载启用态的 Provider，调试器会保持休眠：
@@ -161,6 +162,7 @@ export default function Root() {
 - `InAppDebugController.show()` / `hide()` / `clear()` / `exportSnapshot()` / `configureAndroidNativeLogs()` 第一次调用时，会创建一个 `DebugRuntime` 对象；但如果当前并未启用调试器，它们不会因此安装 collectors。
 - `inAppDebug.log()` / `inAppDebug.captureError()` 不会主动创建 runtime；如果 runtime 还不存在，它们会直接 no-op。
 - `InAppDebugBoundary` / `InAppDebugRoot` 会一直作为 React Error Boundary 存在，不以 `enabled` 为前提。
+- 原生日志 / 原生网络是独立 opt-in：默认只采集 React Native 层日志和网络；App Info 里的开关只影响当前调试会话。
 
 如果你的目标是把关闭态开销压到最低，普通用户路径上应尽量避免调用任何 `InAppDebugController` API。
 
@@ -171,8 +173,8 @@ export default function Root() {
 - 只要 Provider 的 `enabled` 重新变成 `false`，重采集部分就会停掉。
 - 但这时同一进程里并不会完全回到“从未启用”的最干净状态。
 - JS 侧已经创建过的 `DebugRuntime` 对象会继续留在内存里。
-- Android / iOS 已经安装过一次的底层 native 网络 hook 不会反安装，而是进入快速跳过路径。
-- iOS 的 native crash / signal handler 也会在“本进程已经启用过一次”后继续留到进程结束。
+- 如果当前进程里曾显式开启过 native network，Android / iOS 底层 native 网络 hook 不会反安装，而是进入快速跳过路径。
+- 如果当前进程里曾显式开启过 iOS native logs，native crash / signal handler 会继续留到进程结束。
 
 这类“历史启用残留”通常已经低到可以在普通业务路径里近似忽略，但如果你要求回到最接近“从未启用”的状态，最稳妥的方式仍然是让应用进程结束后重新进入。
 
@@ -180,16 +182,16 @@ export default function Root() {
 
 打开浮动按钮后会进入原生调试面板，当前主要有三个标签：
 
-- `log`：JS console、React Error Boundary、全局错误、Promise rejection，以及 native 日志。
-- `network`：fetch / XHR / WebSocket，以及平台可拦截到的 native 网络请求。
-- `app Info`：宿主运行环境、调试器能力、采集状态、最近崩溃 / 严重错误、限制说明。
+- `log`：JS console、React Error Boundary、全局错误、Promise rejection；显式开启后也可以查看 native 日志。
+- `network`：React Native fetch / XHR / WebSocket；显式开启后也可以查看平台可拦截到的 native 网络请求。
+- `app Info`：宿主运行环境、调试器能力、采集状态、native logs / native network 开关、最近崩溃 / 严重错误、限制说明。
 
 面板支持搜索、过滤、排序、复制、清空和网络详情查看。
 
 不同 tab 也会影响采集强度：
 
-- `log` 激活且 native 来源可见时，才会尽量启动较重的 native log 采集。
-- `network` 激活时，才会尽量处理更完整的 native request / response payload preview。
+- native logs 默认关闭；在 App Info 打开后，`log` 激活且 native 来源可见时才会启动较重的 native log 采集。
+- native network 默认关闭；在 App Info 打开后，`network/native` 激活时才会尽量处理更完整的 native request / response payload preview。
 - 不在对应 tab 时，会优先保留轻量元数据，尽量减少对宿主应用的影响。
 
 ## 可以采集什么
@@ -198,10 +200,10 @@ export default function Root() {
 - JS 错误：全局 error、未处理 Promise rejection、React Error Boundary。
 - 手动日志：通过 `inAppDebug.log()` 主动写入。
 - 网络：JS fetch、XMLHttpRequest、WebSocket。
-- iOS 原生：stdout、stderr、OSLog 轮询、未捕获 NSException、fatal signal 崩溃标记、部分 URLSession / WebSocket 信息。
-- Android 原生：当前应用进程 logcat、stdout、stderr、未捕获 Java/Kotlin 异常，部分 OkHttp HTTP / WebSocket 信息。
+- iOS 原生（显式开启后）：stdout、stderr、OSLog 轮询、未捕获 NSException、fatal signal 崩溃标记、部分 URLSession 信息。
+- Android 原生（显式开启后）：当前应用进程 logcat、stdout、stderr、未捕获 Java/Kotlin 异常，部分 OkHttp HTTP / WebSocket 信息。
 
-如果 Android 宿主 App、原生模块，或接入的部分 SDK 会自己创建 `OkHttpClient`，推荐在创建 client 时走一次官方 helper。这样不需要逐条手动上报 request，也能把这批 native 请求并入调试面板：
+如果 Android 宿主 App、原生模块，或接入的部分 SDK 会自己创建 `OkHttpClient`，可以在创建 client 时走一次官方 helper。只有 App Info 中打开 `Native network` 后，这批 native 请求才会并入调试面板；关闭时 helper 只走快速跳过路径：
 
 ```kotlin
 import expo.modules.inappdebugger.InAppDebuggerOkHttpIntegration
@@ -225,7 +227,7 @@ val instrumentedClient = InAppDebuggerOkHttpIntegration.instrument(client)
 
 这条路径适合“宿主自己可控、但不一定走 React Native 默认网络模块”的 Android native 请求。它仍然不是系统级全抓；`OkHttp` 之外的网络栈，例如 `HttpURLConnection`、`Cronet` 或某些黑盒 SDK 自带实现，仍然需要单独适配。
 
-为了降低对宿主应用的影响，部分 native 深度采集会根据面板是否打开、当前 tab 是否激活、过滤条件是否选择 native 来延迟启动或减少 payload preview。
+为了降低对宿主应用的影响，native 深度采集默认不启动；显式开启后，还会继续根据面板是否打开、当前 tab 是否激活、过滤条件是否选择 native 来延迟启动或减少 payload preview。
 
 ## Provider 配置
 
@@ -234,6 +236,8 @@ val instrumentedClient = InAppDebuggerOkHttpIntegration.instrument(client)
   enabled={__DEV__}
   initialVisible
   enableNetworkTab
+  enableNativeLogs={false}
+  enableNativeNetwork={false}
   maxLogs={2000}
   maxErrors={100}
   maxRequests={100}
@@ -249,7 +253,9 @@ val instrumentedClient = InAppDebuggerOkHttpIntegration.instrument(client)
 | --- | --- | --- |
 | `enabled` | `false` | 是否启用调试器。关闭时不会安装采集 hook。 |
 | `initialVisible` | `true` | 是否显示原生浮动入口。 |
-| `enableNetworkTab` | `true` | 是否启用网络面板和网络采集。 |
+| `enableNetworkTab` | `true` | 是否启用网络面板和 React Native 网络采集。 |
+| `enableNativeLogs` | `false` | 是否在启动时直接开启原生日志采集。通常推荐保持默认值，在 App Info 中临时打开。 |
+| `enableNativeNetwork` | `false` | 是否在启动时直接开启原生网络采集。通常推荐保持默认值，在 App Info 中临时打开。 |
 | `maxLogs` | `2000` | 保留的最大日志数量。 |
 | `maxErrors` | `100` | 保留的最大错误数量。 |
 | `maxRequests` | `100` | 保留的最大网络请求数量。 |
@@ -337,7 +343,7 @@ console.log(snapshot.logs, snapshot.errors, snapshot.network);
 
 ## Android 原生日志
 
-Android 默认会采集当前 App 进程相关的 native 日志：
+Android 原生日志默认关闭。需要时可以在 App Info 面板中打开 `Native logs`，或者通过 Provider 显式 opt-in。开启后可以采集当前 App 进程相关的 native 日志：
 
 - app 进程 `logcat`
 - `stdout`
@@ -349,6 +355,7 @@ Android 默认会采集当前 App 进程相关的 native 日志：
 ```tsx
 <InAppDebugProvider
   enabled
+  enableNativeLogs
   androidNativeLogs={{
     enabled: true,
     captureLogcat: true,
@@ -383,9 +390,10 @@ Android 面板的 `app Info` 里也提供了 root 增强模式开关，方便在
 
 iOS 侧会尽量保留低开销策略：
 
-- 调试器启用后会提前准备 native crash 持久化，尽量避免“崩了但下次打开什么都没有”。
-- stdout / stderr / OSLog 等较重采集只在 `log` 面板且 native 来源激活时运行。
-- native 网络 payload preview 只在 `network` 面板激活时尽量处理，平时优先记录轻量元数据。
+- 原生日志默认关闭；打开 App Info 的 `Native logs` 后，才会准备 native crash 持久化和相关日志采集。
+- stdout / stderr / OSLog 等较重采集只在 `Native logs` 已开启、`log` 面板且 native 来源激活时运行。
+- 原生网络默认关闭；打开 App Info 的 `Native network` 后，才会安装 URLProtocol / URLSession 相关采集路径。
+- native 网络 payload preview 只在 `Native network` 已开启且 `network/native` 面板激活时尽量处理，平时优先记录轻量元数据。
 - iOS 系统限制较多，无法保证回放调试器启动之前的任意日志，但会尽力保留未捕获崩溃报告。
 
 补充说明：一旦当前进程里启用过 iOS native log capture，崩溃 / signal handler 会保留到该进程结束。因此“启用过再关闭”在同一进程里仍然不等于“从未启用过”。
