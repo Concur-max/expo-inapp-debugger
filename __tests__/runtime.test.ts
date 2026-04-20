@@ -145,6 +145,90 @@ describe('DebugRuntime', () => {
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
   });
 
+  it('enables only the React Native network collector by default', async () => {
+    const nativeModule = {
+      configure: jest.fn().mockResolvedValue(undefined),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+    };
+    const networkCollector = {
+      enable: jest.fn(),
+      disable: jest.fn(),
+      updateOptions: jest.fn(),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => networkCollector,
+      consoleRef: {
+        log: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    });
+
+    await runtime.registerProvider(resolveProviderConfig({ enabled: true }));
+
+    expect(networkCollector.enable).toHaveBeenCalledTimes(1);
+    expect(networkCollector.disable).not.toHaveBeenCalled();
+    expect(nativeModule.configure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enableNetworkTab: true,
+        enableNativeLogs: false,
+        enableNativeNetwork: false,
+      })
+    );
+  });
+
+  it('does not install React Native network collection when the network tab is disabled', async () => {
+    const nativeModule = {
+      configure: jest.fn().mockResolvedValue(undefined),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+    };
+    const networkCollector = {
+      enable: jest.fn(),
+      disable: jest.fn(),
+      updateOptions: jest.fn(),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => networkCollector,
+      consoleRef: {
+        log: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    });
+
+    await runtime.registerProvider(
+      resolveProviderConfig({
+        enabled: true,
+        enableNetworkTab: false,
+        enableNativeNetwork: true,
+      })
+    );
+
+    expect(networkCollector.enable).not.toHaveBeenCalled();
+    expect(networkCollector.disable).toHaveBeenCalledTimes(1);
+    expect(nativeModule.configure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enableNetworkTab: false,
+        enableNativeLogs: false,
+        enableNativeNetwork: false,
+      })
+    );
+  });
+
   it('caps pending JS log batches to the configured log window', async () => {
     const nativeModule = {
       configure: jest.fn().mockResolvedValue(undefined),
