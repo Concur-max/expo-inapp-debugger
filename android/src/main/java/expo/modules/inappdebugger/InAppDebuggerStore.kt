@@ -20,6 +20,7 @@ object InAppDebuggerStore {
   private val errors = TimelineBuffer(DebugConfig().maxErrors, DebugErrorEntry::timelineSortKey)
   private val network = KeyedTimelineBuffer(DebugConfig().maxRequests, { it.id }, DebugNetworkEntry::timelineSortKey)
   private var runtimeInfo = DebugRuntimeInfo()
+  private var panelUiState = DebugPanelUiState()
 
   private var panelVisible = false
   private var activeFeed = DebugPanelFeed.None
@@ -211,6 +212,17 @@ object InAppDebuggerStore {
   @Synchronized
   fun currentConfig(): DebugConfig = config
 
+  @Synchronized
+  fun currentPanelUiState(): DebugPanelUiState = panelUiState
+
+  @Synchronized
+  fun updatePanelUiState(next: DebugPanelUiState) {
+    if (panelUiState == next) {
+      return
+    }
+    panelUiState = next
+  }
+
   fun shutdown() {
     synchronized(this) {
       cancelVisibleFeedPublishLocked()
@@ -220,6 +232,7 @@ object InAppDebuggerStore {
       errors.clear()
       network.clear()
       runtimeInfo = DebugRuntimeInfo()
+      panelUiState = DebugPanelUiState()
       panelVisible = false
       activeFeed = DebugPanelFeed.None
       logsVersion = 0L

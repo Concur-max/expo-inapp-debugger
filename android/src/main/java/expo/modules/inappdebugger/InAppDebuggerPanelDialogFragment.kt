@@ -279,6 +279,14 @@ private enum class DebugTab {
   AppInfo
 }
 
+private fun debugTabForPanelUiState(state: DebugPanelUiState, networkTabEnabled: Boolean): DebugTab {
+  return when (state.activeFeed) {
+    DebugPanelFeed.Network -> if (networkTabEnabled) DebugTab.Network else DebugTab.Logs
+    DebugPanelFeed.AppInfo -> DebugTab.AppInfo
+    else -> DebugTab.Logs
+  }
+}
+
 private enum class SortOrder {
   Asc,
   Desc
@@ -443,7 +451,15 @@ private fun DebugPanel(
   val chromeState by InAppDebuggerStore.chromeState.collectAsStateWithLifecycle()
   val locale = chromeState.config.locale
   val context = LocalContext.current
-  var activeTab by rememberSaveable { mutableStateOf(DebugTab.Logs) }
+  val initialPanelUiState = remember { InAppDebuggerStore.currentPanelUiState() }
+  var activeTab by rememberSaveable {
+    mutableStateOf(
+      debugTabForPanelUiState(
+        initialPanelUiState,
+        networkTabEnabled = chromeState.config.enableNetworkTab
+      )
+    )
+  }
   var selectedNetworkId by rememberSaveable { mutableStateOf<String?>(null) }
   var logsSearchQuery by rememberSaveable { mutableStateOf("") }
   var logsSortOrder by rememberSaveable { mutableStateOf(SortOrder.Asc) }
@@ -508,6 +524,7 @@ private fun DebugPanel(
         else -> DebugPanelFeed.AppInfo
       }
     InAppDebuggerStore.setActiveFeed(activeFeed)
+    InAppDebuggerStore.updatePanelUiState(DebugPanelUiState(activeFeed = activeFeed))
   }
 
   LaunchedEffect(chromeState.config.enableNetworkTab) {

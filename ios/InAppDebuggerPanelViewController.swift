@@ -508,7 +508,10 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private static let tableBottomInset: CGFloat = 18
   private static let legacyTabBarBaseHeight: CGFloat = 49
 
-  private var activeTab: ActiveTab = .logs
+  private var activeTab: ActiveTab = {
+    let state = InAppDebuggerStore.shared.currentPanelUIState()
+    return ActiveTab(rawValue: state.activeTabRawValue) ?? .logs
+  }()
   private var searchText = ""
   private var selectedLogLevels: Set<String> = PanelFilterPreferences.loadLogLevels()
   private var selectedLogOrigins: Set<String> = PanelFilterPreferences.loadLogOrigins()
@@ -761,6 +764,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   override func viewDidLoad() {
     super.viewDidLoad()
     currentConfig = InAppDebuggerStore.shared.currentConfig()
+    sanitizeActiveTabForCurrentConfig()
     sanitizeFiltersForCurrentConfig(persist: true)
     view.backgroundColor = PanelColors.background
     navigationItem.largeTitleDisplayMode = .never
@@ -1113,6 +1117,19 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
   }
 
+  private func persistPanelUIState() {
+    InAppDebuggerStore.shared.updatePanelUIState(
+      InAppDebuggerPanelUIState(activeTabRawValue: activeTab.rawValue)
+    )
+  }
+
+  private func sanitizeActiveTabForCurrentConfig() {
+    if activeTab == .network && !currentConfig.enableNetworkTab {
+      activeTab = .logs
+    }
+    persistPanelUIState()
+  }
+
   private func setActiveTab(_ nextTab: ActiveTab) {
     var resolvedTab = nextTab
     if resolvedTab == .network && !currentConfig.enableNetworkTab {
@@ -1120,10 +1137,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
     guard resolvedTab != activeTab else {
       updateTabBarState()
+      persistPanelUIState()
       return
     }
 
     activeTab = resolvedTab
+    persistPanelUIState()
     deactivateSearchInput()
     syncNativeCaptureStates()
     configureNavigationBar()
@@ -1433,10 +1452,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     if shouldRefreshChrome {
       currentConfig = config
       sanitizeFiltersForCurrentConfig(persist: true)
-
-      if !currentConfig.enableNetworkTab && activeTab == .network {
-        activeTab = .logs
-      }
+      sanitizeActiveTabForCurrentConfig()
 
       configureNavigationBar()
       updateContentVisibility()

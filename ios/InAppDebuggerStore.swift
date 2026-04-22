@@ -44,6 +44,10 @@ struct DebugLogRetentionState: Equatable {
   }
 }
 
+struct InAppDebuggerPanelUIState: Equatable {
+  var activeTabRawValue: Int = 0
+}
+
 extension Notification.Name {
   static let inAppDebuggerStoreDidChange = Notification.Name("InAppDebuggerStoreDidChange")
 }
@@ -163,6 +167,7 @@ final class InAppDebuggerStore {
   private var notificationScheduled = false
   private var pendingChangeMask: InAppDebuggerStoreChangeMask = []
   private var pendingChangedNetworkIDs: Set<String> = []
+  private var panelUIState = InAppDebuggerPanelUIState()
   private var droppedLogCount = 0
   private var nextNativeSequence = 0
   private var cachedNativeTimestampSecond = -1
@@ -211,6 +216,21 @@ final class InAppDebuggerStore {
     return config
   }
 
+  func currentPanelUIState() -> InAppDebuggerPanelUIState {
+    lock.lock()
+    defer { lock.unlock() }
+    return panelUIState
+  }
+
+  func updatePanelUIState(_ next: InAppDebuggerPanelUIState) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard panelUIState != next else {
+      return
+    }
+    panelUIState = next
+  }
+
   func nextNativeTimelineSequence() -> Int {
     lock.lock()
     defer { lock.unlock() }
@@ -240,6 +260,7 @@ final class InAppDebuggerStore {
     notificationScheduled = false
     pendingChangeMask = []
     pendingChangedNetworkIDs.removeAll(keepingCapacity: true)
+    panelUIState = InAppDebuggerPanelUIState()
     droppedLogCount = 0
     nextNativeSequence = 0
     cachedNativeTimestampSecond = -1

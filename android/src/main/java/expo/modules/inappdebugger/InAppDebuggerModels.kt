@@ -137,6 +137,10 @@ enum class DebugPanelFeed {
   AppInfo
 }
 
+data class DebugPanelUiState(
+  val activeFeed: DebugPanelFeed = DebugPanelFeed.Logs
+)
+
 data class DebugPanelChromeState(
   val config: DebugConfig = DebugConfig(),
   val runtimeInfo: DebugRuntimeInfo = DebugRuntimeInfo()
