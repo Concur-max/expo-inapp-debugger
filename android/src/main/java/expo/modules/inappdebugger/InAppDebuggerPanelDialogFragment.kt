@@ -52,6 +52,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -62,6 +63,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -99,6 +101,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -259,6 +262,16 @@ private const val LOGS_SEARCH_PLACEHOLDER = "Search logs..."
 private const val NETWORK_SEARCH_PLACEHOLDER = "Search network requests..."
 private val APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
 private val NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
+private val LOG_LIST_CHIP_TEXT_SIZE = 10.sp
+private val LOG_LIST_CHIP_LINE_HEIGHT = 12.sp
+private val LOG_LIST_META_TEXT_SIZE = 11.sp
+private val LOG_LIST_META_LINE_HEIGHT = 14.sp
+private val LOG_LIST_BODY_TEXT_SIZE = 12.sp
+private val LOG_LIST_BODY_LINE_HEIGHT = 16.sp
+private val REQUEST_DETAIL_TITLE_TEXT_SIZE = 13.sp
+private val REQUEST_DETAIL_TITLE_LINE_HEIGHT = 16.sp
+private val REQUEST_DETAIL_BODY_TEXT_SIZE = 12.sp
+private val REQUEST_DETAIL_BODY_LINE_HEIGHT = 16.sp
 
 private enum class DebugTab {
   Logs,
@@ -275,6 +288,11 @@ private enum class NetworkKindFilter(val rawValue: String) {
   Http("http"),
   WebSocket("websocket"),
   Other("other")
+}
+
+private enum class NativeCaptureConfirmationTarget {
+  Logs,
+  Network
 }
 
 private object PanelColors {
@@ -800,6 +818,9 @@ private fun AppInfoTab(
   val scope = rememberCoroutineScope()
   var nativeCaptureTogglePending by remember { mutableStateOf(false) }
   var rootTogglePending by remember { mutableStateOf(false) }
+  var nativeCaptureConfirmationTarget by remember {
+    mutableStateOf<NativeCaptureConfirmationTarget?>(null)
+  }
   val rootEnhancedEnabled = remember(config.androidNativeLogs.logcatScope, config.androidNativeLogs.rootMode) {
     isRootEnhancedRequested(config)
   }
@@ -826,54 +847,62 @@ private fun AppInfoTab(
       }
   }
 
+  fun applyNativeCaptureChange(enableNativeLogs: Boolean, enableNativeNetwork: Boolean) {
+    if (!nativeCaptureTogglePending) {
+      nativeCaptureTogglePending = true
+      scope.launch {
+        try {
+          withContext(Dispatchers.Default) {
+            applyPanelNativeCaptureMode(
+              context.applicationContext,
+              enableNativeLogs = enableNativeLogs,
+              enableNativeNetwork = enableNativeNetwork
+            )
+          }
+        } finally {
+          nativeCaptureTogglePending = false
+        }
+      }
+    }
+  }
+
+  nativeCaptureConfirmationTarget?.let { target ->
+    NativeCaptureConfirmationDialog(
+      target = target,
+      locale = locale,
+      onConfirm = {
+        nativeCaptureConfirmationTarget = null
+        when (target) {
+          NativeCaptureConfirmationTarget.Logs -> applyNativeCaptureChange(
+            enableNativeLogs = true,
+            enableNativeNetwork = config.enableNativeNetwork
+          )
+          NativeCaptureConfirmationTarget.Network -> applyNativeCaptureChange(
+            enableNativeLogs = config.enableNativeLogs,
+            enableNativeNetwork = true
+          )
+        }
+      },
+      onDismiss = {
+        nativeCaptureConfirmationTarget = null
+      }
+    )
+  }
+
   LazyColumn(
     modifier = Modifier.fillMaxSize(),
     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp)
   ) {
-    item("app_info_native_capture_control") {
-      NativeCaptureControlCard(
-        nativeLogsChecked = config.enableNativeLogs,
-        nativeNetworkChecked = config.enableNativeNetwork,
-        nativeNetworkEnabled = config.enableNetworkTab,
-        pending = nativeCaptureTogglePending,
-        locale = locale,
-        onNativeLogsChange = { enabled ->
-          if (!nativeCaptureTogglePending) {
-            nativeCaptureTogglePending = true
-            scope.launch {
-              try {
-                withContext(Dispatchers.Default) {
-                  applyPanelNativeCaptureMode(
-                    context.applicationContext,
-                    enableNativeLogs = enabled,
-                    enableNativeNetwork = config.enableNativeNetwork
-                  )
-                }
-              } finally {
-                nativeCaptureTogglePending = false
-              }
-            }
-          }
-        },
-        onNativeNetworkChange = { enabled ->
-          if (!nativeCaptureTogglePending) {
-            nativeCaptureTogglePending = true
-            scope.launch {
-              try {
-                withContext(Dispatchers.Default) {
-                  applyPanelNativeCaptureMode(
-                    context.applicationContext,
-                    enableNativeLogs = config.enableNativeLogs,
-                    enableNativeNetwork = enabled
-                  )
-                }
-              } finally {
-                nativeCaptureTogglePending = false
-              }
-            }
-          }
-        }
+    items(
+      items = sections,
+      key = { it.title }
+    ) { section ->
+      DetailSection(
+        title = section.title,
+        content = section.content,
+        monospace = section.monospace,
+        contentMaxHeight = section.contentMaxHeight
       )
     }
     if (runtimeInfo.rootStatus == "root") {
@@ -900,21 +929,76 @@ private fun AppInfoTab(
         )
       }
     }
-    items(
-      items = sections,
-      key = { it.title }
-    ) { section ->
-      DetailSection(
-        title = section.title,
-        content = section.content,
-        monospace = section.monospace,
-        contentMaxHeight = section.contentMaxHeight
+    item("app_info_native_capture_control") {
+      NativeCaptureControlCard(
+        nativeLogsChecked = config.enableNativeLogs,
+        nativeNetworkChecked = config.enableNativeNetwork,
+        nativeNetworkEnabled = config.enableNetworkTab,
+        pending = nativeCaptureTogglePending,
+        locale = locale,
+        onNativeLogsChange = { enabled ->
+          if (enabled) {
+            nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Logs
+          } else {
+            applyNativeCaptureChange(
+              enableNativeLogs = false,
+              enableNativeNetwork = config.enableNativeNetwork
+            )
+          }
+        },
+        onNativeNetworkChange = { enabled ->
+          if (enabled) {
+            nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Network
+          } else {
+            applyNativeCaptureChange(
+              enableNativeLogs = config.enableNativeLogs,
+              enableNativeNetwork = false
+            )
+          }
+        }
       )
     }
     item("app_info_footer") {
       Spacer(modifier = Modifier.height(12.dp))
     }
   }
+}
+
+@Composable
+private fun NativeCaptureConfirmationDialog(
+  target: NativeCaptureConfirmationTarget,
+  locale: String,
+  onConfirm: () -> Unit,
+  onDismiss: () -> Unit
+) {
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = {
+      Text(
+        text = localizedNativeCaptureConfirmationTitle(target, locale),
+        color = PanelColors.Text
+      )
+    },
+    text = {
+      Text(
+        text = localizedNativeCaptureConfirmationMessage(target, locale),
+        color = PanelColors.MutedText
+      )
+    },
+    confirmButton = {
+      TextButton(onClick = onConfirm) {
+        Text(localizedNativeCaptureConfirmationConfirmLabel(locale))
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) {
+        Text(localizedNativeCaptureConfirmationCancelLabel(locale))
+      }
+    },
+    containerColor = PanelColors.Surface,
+    titleContentColor = PanelColors.Text,
+    textContentColor = PanelColors.MutedText
+  )
 }
 
 @Composable
@@ -1318,7 +1402,8 @@ private fun NetworkDetailScreen(
           title = item.title,
           content = item.content,
           monospace = item.monospace,
-          contentMaxHeight = item.contentMaxHeight
+          contentMaxHeight = item.contentMaxHeight,
+          compact = true
         )
       }
       item("network_detail_footer") {
@@ -1601,18 +1686,23 @@ private fun LogCard(
               PanelChip(
                 text = localizedOriginTitle(log.origin),
                 background = if (isNativeOrigin(log.origin)) PanelColors.Primary else PanelColors.Control,
-                foreground = if (isNativeOrigin(log.origin)) Color.White else PanelColors.MutedText
+                foreground = if (isNativeOrigin(log.origin)) Color.White else PanelColors.MutedText,
+                compact = true
               )
               Spacer(modifier = Modifier.width(8.dp))
               PanelChip(
                 text = log.type.uppercase(Locale.ROOT),
                 background = tone.background,
-                foreground = tone.foreground
+                foreground = tone.foreground,
+                compact = true
               )
               Spacer(modifier = Modifier.weight(1f))
               Text(
                 text = log.timestamp,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelMedium.copy(
+                  fontSize = LOG_LIST_META_TEXT_SIZE,
+                  lineHeight = LOG_LIST_META_LINE_HEIGHT
+                ),
                 color = PanelColors.MutedText
               )
               DisableSelection {
@@ -1640,7 +1730,10 @@ private fun LogCard(
               if (details.isNotBlank()) {
                 Text(
                   text = details,
-                  style = MaterialTheme.typography.labelMedium,
+                  style = MaterialTheme.typography.labelMedium.copy(
+                    fontSize = LOG_LIST_META_TEXT_SIZE,
+                    lineHeight = LOG_LIST_META_LINE_HEIGHT
+                  ),
                   color = PanelColors.MutedText,
                   maxLines = if (expanded) Int.MAX_VALUE else 2,
                   overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
@@ -1655,6 +1748,10 @@ private fun LogCard(
 
               Text(
                 text = log.message,
+                style = MaterialTheme.typography.bodySmall.copy(
+                  fontSize = LOG_LIST_BODY_TEXT_SIZE,
+                  lineHeight = LOG_LIST_BODY_LINE_HEIGHT
+                ),
                 color = PanelColors.Text,
                 fontFamily = FontFamily.Monospace,
                 maxLines = if (expanded) Int.MAX_VALUE else 6,
@@ -1675,7 +1772,13 @@ private fun LogCard(
         if (canExpand) {
           DisableSelection {
             TextButton(onClick = { expanded = !expanded }) {
-              Text(if (expanded) localizedCollapseLabel() else localizedExpandLabel())
+              Text(
+                text = if (expanded) localizedCollapseLabel() else localizedExpandLabel(),
+                style = MaterialTheme.typography.labelMedium.copy(
+                  fontSize = LOG_LIST_META_TEXT_SIZE,
+                  lineHeight = LOG_LIST_META_LINE_HEIGHT
+                )
+              )
             }
           }
         }
@@ -1791,9 +1894,26 @@ private fun DetailSection(
   title: String,
   content: String,
   monospace: Boolean = false,
-  contentMaxHeight: Dp? = null
+  contentMaxHeight: Dp? = null,
+  compact: Boolean = false
 ) {
   val scrollState = rememberScrollState()
+  val titleStyle = if (compact) {
+    MaterialTheme.typography.titleSmall.copy(
+      fontSize = REQUEST_DETAIL_TITLE_TEXT_SIZE,
+      lineHeight = REQUEST_DETAIL_TITLE_LINE_HEIGHT
+    )
+  } else {
+    MaterialTheme.typography.titleSmall
+  }
+  val contentStyle = if (compact) {
+    MaterialTheme.typography.bodySmall.copy(
+      fontSize = REQUEST_DETAIL_BODY_TEXT_SIZE,
+      lineHeight = REQUEST_DETAIL_BODY_LINE_HEIGHT
+    )
+  } else {
+    LocalTextStyle.current
+  }
   val contentModifier = Modifier.fillMaxWidth().let { modifier ->
     if (contentMaxHeight != null) {
       modifier
@@ -1814,13 +1934,14 @@ private fun DetailSection(
     Column(modifier = Modifier.padding(12.dp)) {
       Text(
         text = title,
-        style = MaterialTheme.typography.titleSmall,
+        style = titleStyle,
         color = PanelColors.Text
       )
       Spacer(modifier = Modifier.height(6.dp))
       SelectionContainer(modifier = Modifier.fillMaxWidth()) {
         Text(
           text = content,
+          style = contentStyle,
           color = PanelColors.Text,
           fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
           modifier = contentModifier
@@ -1908,8 +2029,18 @@ private fun EmptyState(
 private fun PanelChip(
   text: String,
   background: Color,
-  foreground: Color
+  foreground: Color,
+  compact: Boolean = false
 ) {
+  val textStyle = if (compact) {
+    MaterialTheme.typography.labelSmall.copy(
+      fontSize = LOG_LIST_CHIP_TEXT_SIZE,
+      lineHeight = LOG_LIST_CHIP_LINE_HEIGHT
+    )
+  } else {
+    MaterialTheme.typography.labelMedium
+  }
+
   Surface(
     color = background,
     shape = RoundedCornerShape(8.dp)
@@ -1917,7 +2048,7 @@ private fun PanelChip(
     Text(
       text = text,
       color = foreground,
-      style = MaterialTheme.typography.labelMedium,
+      style = textStyle,
       modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
     )
   }
@@ -2663,6 +2794,72 @@ private fun localizedNativeCaptureControlTitle(locale: String): String {
     locale.startsWith("ja") -> "ネイティブ採集"
     locale == "zh-TW" -> "原生採集"
     else -> "原生采集"
+  }
+}
+
+private fun localizedNativeCaptureConfirmationTitle(
+  target: NativeCaptureConfirmationTarget,
+  locale: String
+): String {
+  return when (target) {
+    NativeCaptureConfirmationTarget.Logs -> when {
+      locale.startsWith("en") -> "Enable native logs?"
+      locale.startsWith("ja") -> "ネイティブログを有効にしますか？"
+      locale == "zh-TW" -> "確認開啟原生日誌？"
+      else -> "确认开启原生日志？"
+    }
+    NativeCaptureConfirmationTarget.Network -> when {
+      locale.startsWith("en") -> "Enable native network?"
+      locale.startsWith("ja") -> "ネイティブ通信を有効にしますか？"
+      locale == "zh-TW" -> "確認開啟原生網路？"
+      else -> "确认开启原生网络？"
+    }
+  }
+}
+
+private fun localizedNativeCaptureConfirmationMessage(
+  target: NativeCaptureConfirmationTarget,
+  locale: String
+): String {
+  return when (target) {
+    NativeCaptureConfirmationTarget.Logs -> when {
+      locale.startsWith("en") ->
+        "Native log capture enables heavier native hooks and may cause the host app to become unstable or crash. Enable it only temporarily for special debugging cases."
+      locale.startsWith("ja") ->
+        "ネイティブログ採集は重いネイティブフックを有効にするため、ホストアプリが不安定になったりクラッシュしたりする可能性があります。特殊な調査時だけ一時的に有効にしてください。"
+      locale == "zh-TW" ->
+        "原生日誌採集會啟用較重的原生 hook，可能導致宿主應用不穩定甚至崩潰。請僅在特殊排查場景中臨時開啟。"
+      else ->
+        "原生日志采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+    }
+    NativeCaptureConfirmationTarget.Network -> when {
+      locale.startsWith("en") ->
+        "Native network capture enables heavier native hooks and may cause the host app to become unstable or crash. Enable it only temporarily for special debugging cases."
+      locale.startsWith("ja") ->
+        "ネイティブ通信採集は重いネイティブフックを有効にするため、ホストアプリが不安定になったりクラッシュしたりする可能性があります。特殊な調査時だけ一時的に有効にしてください。"
+      locale == "zh-TW" ->
+        "原生網路採集會啟用較重的原生 hook，可能導致宿主應用不穩定甚至崩潰。請僅在特殊排查場景中臨時開啟。"
+      else ->
+        "原生网络采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+    }
+  }
+}
+
+private fun localizedNativeCaptureConfirmationConfirmLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Enable"
+    locale.startsWith("ja") -> "有効にする"
+    locale == "zh-TW" -> "仍要開啟"
+    else -> "仍要开启"
+  }
+}
+
+private fun localizedNativeCaptureConfirmationCancelLabel(locale: String): String {
+  return when {
+    locale.startsWith("en") -> "Cancel"
+    locale.startsWith("ja") -> "キャンセル"
+    locale == "zh-TW" -> "取消"
+    else -> "取消"
   }
 }
 
