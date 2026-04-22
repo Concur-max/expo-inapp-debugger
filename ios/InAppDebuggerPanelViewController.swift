@@ -232,6 +232,92 @@ private func combinedLogCellDetails(context: String?, details: String?) -> Strin
   }
 }
 
+private func readableLogMessage(_ message: String) -> String {
+  for index in message.indices {
+    guard message[index] == "{" || message[index] == "[" else {
+      continue
+    }
+
+    let candidate = String(message[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let renderedPayload = readableJSONPayload(candidate) else {
+      continue
+    }
+
+    let prefix = String(message[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
+    return prefix.isEmpty ? renderedPayload : "\(prefix)\n\(renderedPayload)"
+  }
+
+  return message
+}
+
+private func readableJSONPayload(_ payload: String) -> String? {
+  guard let data = payload.data(using: .utf8),
+        let object = try? JSONSerialization.jsonObject(with: data),
+        object is [Any] || object is [String: Any] || object is NSDictionary || object is NSArray else {
+    return nil
+  }
+  return readableJSONValue(object, indentationLevel: 0)
+}
+
+private func readableJSONValue(_ value: Any, indentationLevel: Int) -> String {
+  let indentation = String(repeating: "  ", count: indentationLevel)
+  let childIndentation = String(repeating: "  ", count: indentationLevel + 1)
+
+  if value is NSNull {
+    return "null"
+  }
+
+  if let string = value as? String {
+    return string
+  }
+
+  if let number = value as? NSNumber {
+    if CFGetTypeID(number) == CFBooleanGetTypeID() {
+      return number.boolValue ? "true" : "false"
+    }
+    return number.stringValue
+  }
+
+  if let array = value as? [Any] {
+    guard !array.isEmpty else {
+      return "[]"
+    }
+
+    let rows = array.map { item -> String in
+      let rendered = readableJSONValue(item, indentationLevel: indentationLevel + 1)
+      return rendered.contains("\n")
+        ? indentMultiline(rendered, indentationLevel: indentationLevel + 1)
+        : "\(childIndentation)\(rendered)"
+    }
+    return "[\n\(rows.joined(separator: ",\n"))\n\(indentation)]"
+  }
+
+  if let dictionary = value as? [String: Any] {
+    guard !dictionary.isEmpty else {
+      return "{}"
+    }
+
+    let rows = dictionary.map { key, item -> String in
+      let rendered = readableJSONValue(item, indentationLevel: indentationLevel + 1)
+      if rendered.contains("\n") {
+        return "\(childIndentation)\(key):\n\(indentMultiline(rendered, indentationLevel: indentationLevel + 2))"
+      }
+      return "\(childIndentation)\(key): \(rendered)"
+    }
+    return "{\n\(rows.joined(separator: "\n"))\n\(indentation)}"
+  }
+
+  return String(describing: value)
+}
+
+private func indentMultiline(_ text: String, indentationLevel: Int) -> String {
+  let prefix = String(repeating: "  ", count: indentationLevel)
+  return text
+    .split(separator: "\n", omittingEmptySubsequences: false)
+    .map { prefix + String($0) }
+    .joined(separator: "\n")
+}
+
 private let panelByteCountFormatter: ByteCountFormatter = {
   let formatter = ByteCountFormatter()
   formatter.allowedUnits = [.useBytes, .useKB, .useMB]
@@ -1279,15 +1365,22 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
 
     let logID = displayedLogs[indexPath.row].id
+    let nextExpanded: Bool
     if expandedLogIDs.contains(logID) {
       expandedLogIDs.remove(logID)
+      nextExpanded = false
     } else {
       expandedLogIDs.insert(logID)
+      nextExpanded = true
     }
 
-    UIView.performWithoutAnimation {
+    guard let cell = tableView.cellForRow(at: indexPath) as? InAppDebuggerLogCell else {
       tableView.reloadRows(at: [indexPath], with: .none)
+      return
     }
+
+    cell.setExpanded(nextExpanded)
+    tableView.performBatchUpdates(nil)
   }
 
   private func reloadFromStore(
@@ -2549,6 +2642,8 @@ private final class InAppDebuggerLogCell: UITableViewCell {
   private let timeLabel = UILabel()
   private let detailsTextView = InAppDebuggerSelectableTextView()
   private let messageTextView = InAppDebuggerSelectableTextView()
+  private let heightTransitionSpacer = UIView()
+  private let expansionFooterStack = UIStackView()
   private let expansionButton = UIButton(type: .system)
   private var isExpanded = false
   private var currentDetailsText = ""
@@ -2585,12 +2680,28 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     levelLabel.backgroundColor = tone.background
     timeLabel.text = entry.timestamp
     currentDetailsText = combinedLogCellDetails(context: entry.context, details: entry.details)
-    currentMessageText = entry.message
+    currentMessageText = readableLogMessage(entry.message)
     detailsTextView.text = currentDetailsText
     detailsTextView.isHidden = currentDetailsText.isEmpty
-    messageTextView.text = entry.message
+    messageTextView.text = currentMessageText
+    messageTextView.overrideCopyText = currentMessageText
+    detailsTextView.overrideCopyText = currentDetailsText
     applyExpansionState()
     updateExpansionButtonVisibility()
+  }
+
+  func setExpanded(_ expanded: Bool) {
+    guard isExpanded != expanded else {
+      return
+    }
+
+    isExpanded = expanded
+    applyExpansionState()
+    updateExpansionButtonVisibility()
+    setNeedsUpdateConstraints()
+    contentView.setNeedsUpdateConstraints()
+    setNeedsLayout()
+    contentView.setNeedsLayout()
   }
 
   private func buildUI() {
@@ -2621,29 +2732,59 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     detailsTextView.textColor = PanelColors.mutedText
     detailsTextView.presentsSelectionMenuAutomatically = true
     detailsTextView.textContainer.lineBreakMode = .byTruncatingTail
+    detailsTextView.setContentHuggingPriority(.required, for: .vertical)
 
     messageTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
     messageTextView.textColor = PanelColors.text
     messageTextView.presentsSelectionMenuAutomatically = true
     messageTextView.textContainer.lineBreakMode = .byTruncatingTail
+    messageTextView.setContentHuggingPriority(.required, for: .vertical)
+
+    heightTransitionSpacer.isUserInteractionEnabled = false
+    heightTransitionSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+    heightTransitionSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
 
     var buttonConfiguration = UIButton.Configuration.plain()
-    buttonConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
-    buttonConfiguration.imagePlacement = .trailing
-    buttonConfiguration.imagePadding = 4
+    buttonConfiguration.baseForegroundColor = PanelColors.primary
+    buttonConfiguration.background.backgroundColor = PanelColors.controlBackground
+    buttonConfiguration.background.cornerRadius = 14
+    buttonConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
+    buttonConfiguration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+      pointSize: 13,
+      weight: .semibold
+    )
     expansionButton.configuration = buttonConfiguration
-    expansionButton.contentHorizontalAlignment = .leading
-    expansionButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+    expansionButton.tintColor = PanelColors.primary
+    expansionButton.contentHorizontalAlignment = .center
+    expansionButton.accessibilityTraits.insert(.button)
+    expansionButton.setContentCompressionResistancePriority(.required, for: .vertical)
     expansionButton.addTarget(self, action: #selector(toggleExpansionTapped), for: .touchUpInside)
 
     let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView()])
     headerStack.axis = .horizontal
     headerStack.alignment = .center
     headerStack.spacing = 8
+    headerStack.setContentHuggingPriority(.required, for: .vertical)
 
-    let bodyStack = UIStackView(arrangedSubviews: [headerStack, detailsTextView, messageTextView, expansionButton])
+    expansionFooterStack.axis = .horizontal
+    expansionFooterStack.alignment = .center
+    expansionFooterStack.spacing = 0
+    expansionFooterStack.addArrangedSubview(UIView())
+    expansionFooterStack.addArrangedSubview(expansionButton)
+    expansionFooterStack.setContentHuggingPriority(.required, for: .vertical)
+
+    let bodyStack = UIStackView(
+      arrangedSubviews: [
+        headerStack,
+        detailsTextView,
+        messageTextView,
+        heightTransitionSpacer,
+        expansionFooterStack,
+      ]
+    )
     bodyStack.axis = .vertical
     bodyStack.spacing = 8
+    bodyStack.setCustomSpacing(0, after: heightTransitionSpacer)
 
     cardView.addSubview(accentView)
     cardView.addSubview(bodyStack)
@@ -2667,6 +2808,8 @@ private final class InAppDebuggerLogCell: UITableViewCell {
       bodyStack.leadingAnchor.constraint(equalTo: accentView.trailingAnchor, constant: 12),
       bodyStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -12),
       bodyStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -12),
+      expansionButton.widthAnchor.constraint(equalToConstant: 32),
+      expansionButton.heightAnchor.constraint(equalToConstant: 28),
     ])
   }
 
@@ -2684,11 +2827,14 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     messageTextView.textContainer.lineBreakMode = isExpanded ? .byCharWrapping : .byTruncatingTail
 
     var configuration = expansionButton.configuration ?? UIButton.Configuration.plain()
-    configuration.title = isExpanded ? localizedCollapseLabel() : localizedExpandLabel()
+    configuration.title = nil
     configuration.image = UIImage(systemName: isExpanded ? "chevron.up" : "chevron.down")
     expansionButton.configuration = configuration
+    expansionButton.accessibilityLabel = isExpanded ? localizedCollapseLabel() : localizedExpandLabel()
     detailsTextView.invalidateIntrinsicContentSize()
     messageTextView.invalidateIntrinsicContentSize()
+    detailsTextView.setNeedsLayout()
+    messageTextView.setNeedsLayout()
   }
 
   private func updateExpansionButtonVisibility() {
@@ -2709,7 +2855,10 @@ private final class InAppDebuggerLogCell: UITableViewCell {
       width: fittingWidth,
       lineLimit: Self.collapsedMessageLineLimit
     )
-    expansionButton.isHidden = !isExpanded && !detailsOverflow && !messageOverflow
+    let hidesExpansionControl = !isExpanded && !detailsOverflow && !messageOverflow
+    heightTransitionSpacer.isHidden = hidesExpansionControl
+    expansionFooterStack.isHidden = hidesExpansionControl
+    expansionButton.isHidden = hidesExpansionControl
   }
 
   private static func textExceedsLineLimit(

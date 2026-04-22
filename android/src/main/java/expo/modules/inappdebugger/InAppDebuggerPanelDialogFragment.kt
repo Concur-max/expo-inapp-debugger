@@ -829,8 +829,8 @@ private fun AppInfoTab(
     InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
   }
 
-  val sections by produceState(
-    initialValue = emptyList<DetailItem>(),
+  val sections by produceState<List<DetailItem>?>(
+    initialValue = null,
     runtimeInfo,
     config,
     errorsWindowState.version,
@@ -889,13 +889,19 @@ private fun AppInfoTab(
     )
   }
 
+  val readySections = sections
+  if (readySections == null) {
+    Box(modifier = Modifier.fillMaxSize())
+    return
+  }
+
   LazyColumn(
     modifier = Modifier.fillMaxSize(),
     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp)
   ) {
     items(
-      items = sections,
+      items = readySections,
       key = { it.title }
     ) { section ->
       DetailSection(
