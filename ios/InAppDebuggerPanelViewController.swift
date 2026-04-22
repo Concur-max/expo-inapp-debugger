@@ -209,6 +209,29 @@ private func localizedOriginTitle(_ origin: String) -> String {
   return "JS"
 }
 
+private func localizedExpandLabel() -> String {
+  "Expand"
+}
+
+private func localizedCollapseLabel() -> String {
+  "Collapse"
+}
+
+private func combinedLogCellDetails(context: String?, details: String?) -> String {
+  let contextText = context?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  let detailsText = details?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  switch (contextText.isEmpty, detailsText.isEmpty) {
+  case (true, true):
+    return ""
+  case (true, false):
+    return detailsText
+  case (false, true):
+    return contextText
+  case (false, false):
+    return contextText + "\n" + detailsText
+  }
+}
+
 private let panelByteCountFormatter: ByteCountFormatter = {
   let formatter = ByteCountFormatter()
   formatter.allowedUnits = [.useBytes, .useKB, .useMB]
@@ -416,6 +439,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
   private var displayedLogs: [DebugLogEntry] = []
   private var displayedNetwork: [DebugNetworkEntry] = []
+  private var expandedLogIDs: Set<String> = []
   private var currentLogRetentionState = DebugLogRetentionState.empty
   private var notificationObserver: NSObjectProtocol?
   private var currentConfig = DebugConfig()
@@ -1168,12 +1192,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         withIdentifier: InAppDebuggerLogCell.reuseIdentifier,
         for: indexPath
       ) as? InAppDebuggerLogCell
-      cell?.configure(entry: entry)
-      cell?.onMessageTap = { [weak self, weak tableView, weak cell] in
+      cell?.configure(entry: entry, expanded: expandedLogIDs.contains(entry.id))
+      cell?.onExpansionToggle = { [weak self, weak tableView, weak cell] in
         guard let self, let tableView, let cell, let currentIndexPath = tableView.indexPath(for: cell) else {
           return
         }
-        self.tableView(tableView, didSelectRowAt: currentIndexPath)
+        self.toggleLogExpansion(at: currentIndexPath)
       }
       return cell ?? UITableViewCell()
     case .network:
@@ -1246,6 +1270,23 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
           }
         }
       }
+    }
+  }
+
+  private func toggleLogExpansion(at indexPath: IndexPath) {
+    guard activeTab == .logs, displayedLogs.indices.contains(indexPath.row) else {
+      return
+    }
+
+    let logID = displayedLogs[indexPath.row].id
+    if expandedLogIDs.contains(logID) {
+      expandedLogIDs.remove(logID)
+    } else {
+      expandedLogIDs.insert(logID)
+    }
+
+    UIView.performWithoutAnimation {
+      tableView.reloadRows(at: [indexPath], with: .none)
     }
   }
 
@@ -1720,6 +1761,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     let previousLogs = displayedLogs
     let shouldReconfigureAll = changeSummary.mask.contains(.config)
     displayedLogs = nextLogs
+    expandedLogIDs.formIntersection(Set(nextLogs.map(\.id)))
     currentLogRetentionState = logRetentionState
     updateLogRetentionNoticeIfNeeded()
     let reloadIDs = shouldReconfigureAll ? Set(nextLogs.map(\.id)) : []
@@ -1880,17 +1922,6 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     }
 
     return result
-  }
-
-  private func logDetailBody(for entry: DebugLogEntry) -> String {
-    var metadataLines = ["timestamp: \(entry.fullTimestamp)"]
-    if let context = entry.context, !context.isEmpty {
-      metadataLines.append("context: \(context)")
-    }
-    if let details = entry.details, !details.isEmpty {
-      metadataLines.append(details)
-    }
-    return metadataLines.joined(separator: "\n") + "\n\n" + entry.message
   }
 
   private func renderAppInfo(logs: [DebugLogEntry], errors: [DebugErrorEntry]) {
@@ -2411,15 +2442,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     tableView.deselectRow(at: indexPath, animated: true)
     switch activeTab {
     case .logs:
-      guard displayedLogs.indices.contains(indexPath.row) else {
-        return
-      }
-      let entry = displayedLogs[indexPath.row]
-      let detail = InAppDebuggerTextDetailViewController(
-        titleText: "[\(localizedOriginTitle(entry.origin))] [\(entry.type.uppercased())] \(entry.timestamp)",
-        bodyText: logDetailBody(for: entry)
-      )
-      navigationController?.pushViewController(detail, animated: true)
+      return
     case .network:
       guard displayedNetwork.indices.contains(indexPath.row) else {
         return
@@ -2516,22 +2539,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
 private final class InAppDebuggerLogCell: UITableViewCell {
   static let reuseIdentifier = "InAppDebuggerLogCell"
+  private static let collapsedDetailsLineLimit = 2
+  private static let collapsedMessageLineLimit = 6
 
   private let cardView = UIView()
   private let accentView = UIView()
   private let originLabel = InAppDebuggerPaddedLabel()
   private let levelLabel = InAppDebuggerPaddedLabel()
   private let timeLabel = UILabel()
-  private let contextLabel = UILabel()
+  private let detailsTextView = InAppDebuggerSelectableTextView()
   private let messageTextView = InAppDebuggerSelectableTextView()
-  var onMessageTap: (() -> Void)?
-
-  private lazy var messageTapGestureRecognizer: UITapGestureRecognizer = {
-    let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleMessageTap(_:)))
-    recognizer.cancelsTouchesInView = false
-    recognizer.delegate = self
-    return recognizer
-  }()
+  private let expansionButton = UIButton(type: .system)
+  private var isExpanded = false
+  private var currentDetailsText = ""
+  private var currentMessageText = ""
+  var onExpansionToggle: (() -> Void)?
 
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
     super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -2544,13 +2566,16 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
   override func prepareForReuse() {
     super.prepareForReuse()
-    onMessageTap = nil
+    onExpansionToggle = nil
     messageTextView.selectedRange = NSRange(location: 0, length: 0)
     messageTextView.overrideCopyText = nil
+    detailsTextView.selectedRange = NSRange(location: 0, length: 0)
+    detailsTextView.overrideCopyText = nil
   }
 
-  func configure(entry: DebugLogEntry) {
+  func configure(entry: DebugLogEntry, expanded: Bool) {
     let tone = toneForLogLevel(entry.type)
+    isExpanded = expanded
     accentView.backgroundColor = tone.foreground
     originLabel.text = localizedOriginTitle(entry.origin)
     originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
@@ -2559,10 +2584,13 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     levelLabel.textColor = tone.foreground
     levelLabel.backgroundColor = tone.background
     timeLabel.text = entry.timestamp
-    let contextText = entry.context ?? ""
-    contextLabel.text = contextText
-    contextLabel.isHidden = entry.origin != "native" || contextText.isEmpty
+    currentDetailsText = combinedLogCellDetails(context: entry.context, details: entry.details)
+    currentMessageText = entry.message
+    detailsTextView.text = currentDetailsText
+    detailsTextView.isHidden = currentDetailsText.isEmpty
     messageTextView.text = entry.message
+    applyExpansionState()
+    updateExpansionButtonVisibility()
   }
 
   private func buildUI() {
@@ -2577,43 +2605,43 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     cardView.layer.masksToBounds = true
     contentView.addSubview(cardView)
 
-    originLabel.font = .systemFont(ofSize: 11, weight: .bold)
+    originLabel.font = .systemFont(ofSize: 10, weight: .bold)
     originLabel.layer.cornerRadius = 8
     originLabel.layer.masksToBounds = true
 
-    levelLabel.font = .systemFont(ofSize: 12, weight: .bold)
+    levelLabel.font = .systemFont(ofSize: 10, weight: .bold)
     levelLabel.layer.cornerRadius = 8
     levelLabel.layer.masksToBounds = true
 
-    timeLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    timeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
     timeLabel.textColor = PanelColors.mutedText
     timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-    contextLabel.font = .systemFont(ofSize: 11, weight: .medium)
-    contextLabel.textColor = PanelColors.mutedText
-    contextLabel.numberOfLines = 1
-    contextLabel.lineBreakMode = .byTruncatingMiddle
+    detailsTextView.font = .systemFont(ofSize: 11, weight: .medium)
+    detailsTextView.textColor = PanelColors.mutedText
+    detailsTextView.presentsSelectionMenuAutomatically = true
+    detailsTextView.textContainer.lineBreakMode = .byTruncatingTail
 
-    messageTextView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+    messageTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
     messageTextView.textColor = PanelColors.text
     messageTextView.presentsSelectionMenuAutomatically = true
-    messageTextView.textContainer.maximumNumberOfLines = 4
     messageTextView.textContainer.lineBreakMode = .byTruncatingTail
-    messageTextView.addGestureRecognizer(messageTapGestureRecognizer)
-    messageTextView.gestureRecognizers?.forEach { recognizer in
-      guard recognizer !== messageTapGestureRecognizer,
-            recognizer is UILongPressGestureRecognizer else {
-        return
-      }
-      messageTapGestureRecognizer.require(toFail: recognizer)
-    }
+
+    var buttonConfiguration = UIButton.Configuration.plain()
+    buttonConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+    buttonConfiguration.imagePlacement = .trailing
+    buttonConfiguration.imagePadding = 4
+    expansionButton.configuration = buttonConfiguration
+    expansionButton.contentHorizontalAlignment = .leading
+    expansionButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+    expansionButton.addTarget(self, action: #selector(toggleExpansionTapped), for: .touchUpInside)
 
     let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView()])
     headerStack.axis = .horizontal
     headerStack.alignment = .center
     headerStack.spacing = 8
 
-    let bodyStack = UIStackView(arrangedSubviews: [headerStack, contextLabel, messageTextView])
+    let bodyStack = UIStackView(arrangedSubviews: [headerStack, detailsTextView, messageTextView, expansionButton])
     bodyStack.axis = .vertical
     bodyStack.spacing = 8
 
@@ -2642,18 +2670,74 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     ])
   }
 
-  override func gestureRecognizer(
-    _ gestureRecognizer: UIGestureRecognizer,
-    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-  ) -> Bool {
-    gestureRecognizer === messageTapGestureRecognizer || otherGestureRecognizer === messageTapGestureRecognizer
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    updateExpansionButtonVisibility()
   }
 
-  @objc private func handleMessageTap(_ recognizer: UITapGestureRecognizer) {
-    guard recognizer.state == .ended, messageTextView.selectedRange.length == 0 else {
-      return
+  private func applyExpansionState() {
+    let detailsLineLimit = isExpanded ? 0 : Self.collapsedDetailsLineLimit
+    let messageLineLimit = isExpanded ? 0 : Self.collapsedMessageLineLimit
+    detailsTextView.textContainer.maximumNumberOfLines = detailsLineLimit
+    messageTextView.textContainer.maximumNumberOfLines = messageLineLimit
+    detailsTextView.textContainer.lineBreakMode = isExpanded ? .byCharWrapping : .byTruncatingTail
+    messageTextView.textContainer.lineBreakMode = isExpanded ? .byCharWrapping : .byTruncatingTail
+
+    var configuration = expansionButton.configuration ?? UIButton.Configuration.plain()
+    configuration.title = isExpanded ? localizedCollapseLabel() : localizedExpandLabel()
+    configuration.image = UIImage(systemName: isExpanded ? "chevron.up" : "chevron.down")
+    expansionButton.configuration = configuration
+    detailsTextView.invalidateIntrinsicContentSize()
+    messageTextView.invalidateIntrinsicContentSize()
+  }
+
+  private func updateExpansionButtonVisibility() {
+    let fittingWidth = messageTextView.bounds.width > 0
+      ? messageTextView.bounds.width
+      : max(1, contentView.bounds.width - 28)
+    let detailsOverflow =
+      !currentDetailsText.isEmpty &&
+      Self.textExceedsLineLimit(
+        currentDetailsText,
+        font: detailsTextView.font ?? .systemFont(ofSize: 11, weight: .medium),
+        width: fittingWidth,
+        lineLimit: Self.collapsedDetailsLineLimit
+      )
+    let messageOverflow = Self.textExceedsLineLimit(
+      currentMessageText,
+      font: messageTextView.font ?? .monospacedSystemFont(ofSize: 12, weight: .regular),
+      width: fittingWidth,
+      lineLimit: Self.collapsedMessageLineLimit
+    )
+    expansionButton.isHidden = !isExpanded && !detailsOverflow && !messageOverflow
+  }
+
+  private static func textExceedsLineLimit(
+    _ text: String,
+    font: UIFont,
+    width: CGFloat,
+    lineLimit: Int
+  ) -> Bool {
+    guard !text.isEmpty, width > 0, lineLimit > 0 else {
+      return false
     }
-    onMessageTap?()
+
+    let paragraphStyle = NSMutableParagraphStyle()
+    paragraphStyle.lineBreakMode = .byCharWrapping
+    let boundingRect = (text as NSString).boundingRect(
+      with: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude),
+      options: [.usesLineFragmentOrigin, .usesFontLeading],
+      attributes: [
+        .font: font,
+        .paragraphStyle: paragraphStyle,
+      ],
+      context: nil
+    )
+    return ceil(boundingRect.height) > ceil(font.lineHeight * CGFloat(lineLimit)) + 1
+  }
+
+  @objc private func toggleExpansionTapped() {
+    onExpansionToggle?()
   }
 }
 
@@ -3133,55 +3217,6 @@ private final class InAppDebuggerPaddedLabel: UILabel {
 
   override func drawText(in rect: CGRect) {
     super.drawText(in: rect.inset(by: contentInsets))
-  }
-}
-
-final class InAppDebuggerTextDetailViewController: UIViewController {
-  private let bodyText: String
-
-  init(titleText: String, bodyText: String) {
-    self.bodyText = bodyText
-    super.init(nibName: nil, bundle: nil)
-    title = titleText
-  }
-
-  required init?(coder: NSCoder) {
-    nil
-  }
-
-  override func viewDidLoad() {
-    super.viewDidLoad()
-    view.backgroundColor = PanelColors.background
-    navigationItem.largeTitleDisplayMode = .never
-    applyPanelNavigationItemAppearance(navigationItem)
-
-    let textView = InAppDebuggerSelectableTextView()
-    let paragraphStyle = NSMutableParagraphStyle()
-    paragraphStyle.lineSpacing = 4
-    paragraphStyle.lineBreakMode = .byCharWrapping
-    textView.attributedText = NSAttributedString(
-      string: bodyText,
-      attributes: [
-        .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-        .foregroundColor: PanelColors.text,
-        .paragraphStyle: paragraphStyle,
-      ]
-    )
-    textView.overrideCopyText = bodyText
-    textView.presentsSelectionMenuAutomatically = true
-    textView.isScrollEnabled = true
-    textView.alwaysBounceVertical = true
-    textView.showsVerticalScrollIndicator = true
-    textView.contentInsetAdjustmentBehavior = .automatic
-    textView.textContainerInset = UIEdgeInsets(top: 18, left: 18, bottom: 32, right: 18)
-    view.addSubview(textView)
-    textView.translatesAutoresizingMaskIntoConstraints = false
-    NSLayoutConstraint.activate([
-      textView.topAnchor.constraint(equalTo: view.topAnchor),
-      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      textView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-    ])
   }
 }
 
