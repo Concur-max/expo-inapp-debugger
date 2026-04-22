@@ -70,6 +70,11 @@ private enum NetworkKindFilter: String, CaseIterable {
   case other
 }
 
+private enum NativeCaptureConfirmationTarget {
+  case logs
+  case network
+}
+
 private func normalizedNetworkKind(_ kind: String) -> NetworkKindFilter {
   switch kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
   case "", "http", "https", "xhr", "xmlhttprequest", "fetch":
@@ -1908,6 +1913,17 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       view.removeFromSuperview()
     }
 
+    sections.forEach { section in
+      let sectionView = InAppDebuggerDetailSectionView()
+      sectionView.configure(title: section.title, body: section.content, monospace: section.monospace)
+      appInfoStackView.addArrangedSubview(sectionView)
+    }
+
+    configureNativeCaptureControls()
+    appInfoStackView.addArrangedSubview(nativeCaptureControlsView)
+  }
+
+  private func configureNativeCaptureControls() {
     nativeCaptureControlsView.configure(
       nativeLogsEnabled: currentConfig.enableNativeLogs,
       nativeNetworkEnabled: currentConfig.enableNativeNetwork,
@@ -1916,8 +1932,21 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         guard let self else {
           return
         }
+        if enabled {
+          self.configureNativeCaptureControls()
+          self.presentNativeCaptureConfirmation(for: .logs) { [weak self] in
+            guard let self else {
+              return
+            }
+            self.applyNativeCaptureSettings(
+              enableNativeLogs: true,
+              enableNativeNetwork: self.currentConfig.enableNativeNetwork
+            )
+          }
+          return
+        }
         self.applyNativeCaptureSettings(
-          enableNativeLogs: enabled,
+          enableNativeLogs: false,
           enableNativeNetwork: self.currentConfig.enableNativeNetwork
         )
       },
@@ -1925,18 +1954,65 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         guard let self else {
           return
         }
+        if enabled {
+          self.configureNativeCaptureControls()
+          self.presentNativeCaptureConfirmation(for: .network) { [weak self] in
+            guard let self else {
+              return
+            }
+            self.applyNativeCaptureSettings(
+              enableNativeLogs: self.currentConfig.enableNativeLogs,
+              enableNativeNetwork: true
+            )
+          }
+          return
+        }
         self.applyNativeCaptureSettings(
           enableNativeLogs: self.currentConfig.enableNativeLogs,
-          enableNativeNetwork: enabled
+          enableNativeNetwork: false
         )
       }
     )
-    appInfoStackView.addArrangedSubview(nativeCaptureControlsView)
+  }
 
-    sections.forEach { section in
-      let sectionView = InAppDebuggerDetailSectionView()
-      sectionView.configure(title: section.title, body: section.content, monospace: section.monospace)
-      appInfoStackView.addArrangedSubview(sectionView)
+  private func presentNativeCaptureConfirmation(
+    for target: NativeCaptureConfirmationTarget,
+    onConfirm: @escaping () -> Void
+  ) {
+    guard presentedViewController == nil else {
+      configureNativeCaptureControls()
+      return
+    }
+
+    let alert = UIAlertController(
+      title: nativeCaptureConfirmationTitle(for: target),
+      message: nativeCaptureConfirmationMessage(for: target),
+      preferredStyle: .alert
+    )
+    alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+      self?.configureNativeCaptureControls()
+    })
+    alert.addAction(UIAlertAction(title: "仍要开启", style: .destructive) { _ in
+      onConfirm()
+    })
+    present(alert, animated: true)
+  }
+
+  private func nativeCaptureConfirmationTitle(for target: NativeCaptureConfirmationTarget) -> String {
+    switch target {
+    case .logs:
+      return "确认开启原生日志？"
+    case .network:
+      return "确认开启原生网络？"
+    }
+  }
+
+  private func nativeCaptureConfirmationMessage(for target: NativeCaptureConfirmationTarget) -> String {
+    switch target {
+    case .logs:
+      return "原生日志采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+    case .network:
+      return "原生网络采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
     }
   }
 
