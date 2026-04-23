@@ -845,7 +845,7 @@ private fun AppInfoTab(
   }
 
   LaunchedEffect(Unit) {
-    InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(context.applicationContext)
   }
 
   LaunchedEffect(config.enableNativeLogs) {
@@ -2042,7 +2042,7 @@ private fun applyPanelRootEnhancedMode(context: Context?, enabled: Boolean) {
   )
 
   if (nextAndroidNativeLogs == currentConfig.androidNativeLogs) {
-    InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(context?.applicationContext)
     return
   }
 
@@ -2050,7 +2050,7 @@ private fun applyPanelRootEnhancedMode(context: Context?, enabled: Boolean) {
   InAppDebuggerStore.updateConfig(nextConfig)
   InAppDebuggerNativeLogCapture.applyConfig(context?.applicationContext, nextConfig)
   InAppDebuggerNativeNetworkCapture.applyConfig(context?.applicationContext, nextConfig)
-  InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+  InAppDebuggerNativeLogCapture.refreshRuntimeInfo(context?.applicationContext)
 }
 
 private fun applyPanelNativeCaptureMode(
@@ -2065,14 +2065,14 @@ private fun applyPanelNativeCaptureMode(
   )
 
   if (nextConfig == currentConfig) {
-    InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+    InAppDebuggerNativeLogCapture.refreshRuntimeInfo(context?.applicationContext)
     return
   }
 
   InAppDebuggerStore.updateConfig(nextConfig)
   InAppDebuggerNativeLogCapture.applyConfig(context?.applicationContext, nextConfig)
   InAppDebuggerNativeNetworkCapture.applyConfig(context?.applicationContext, nextConfig)
-  InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+  InAppDebuggerNativeLogCapture.refreshRuntimeInfo(context?.applicationContext)
 }
 
 private fun isRootEnhancedRequested(config: DebugConfig): Boolean {

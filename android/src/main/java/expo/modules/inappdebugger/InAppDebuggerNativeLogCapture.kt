@@ -52,7 +52,30 @@ object InAppDebuggerNativeLogCapture {
   private var rootStatus = "not_requested"
   private var rootDetails: String? = null
   private var rootProbeInFlight = false
+  private var runtimeInfoInitialized = false
+  private var crashHistorySourcePath: String? = null
   private var crashHistory = emptyList<DebugCrashRecord>()
+
+  fun applyConfigIfNeeded(context: Context?, config: DebugConfig) {
+    val nextCaptureEnabled =
+      config.enabled && config.enableNativeLogs && config.androidNativeLogs.enabled
+    var shouldApply = true
+    synchronized(lock) {
+      if (!nextCaptureEnabled && !captureEnabled && !runtimeInfoInitialized && !hasCaptureResourcesLocked()) {
+        context?.let {
+          appContextRef = WeakReference(it.applicationContext)
+        }
+        debugConfig = config
+        nativeConfig = sanitizeConfig(config.androidNativeLogs)
+        shouldApply = false
+      }
+    }
+
+    if (!shouldApply) {
+      return
+    }
+    applyConfig(context, config)
+  }
 
   fun applyConfig(context: Context?, config: DebugConfig) {
     synchronized(lock) {
@@ -65,7 +88,11 @@ object InAppDebuggerNativeLogCapture {
       debugConfig = config
       nativeConfig = nextConfig
       captureEnabled = nextCaptureEnabled
-      updateContextLocked(context, replayCrashReport = nextCaptureEnabled)
+      updateContextLocked(
+        context = context,
+        replayCrashReport = nextCaptureEnabled,
+        loadCrashHistory = nextCaptureEnabled || runtimeInfoInitialized
+      )
       val resolvedContext = appContextRef?.get()
       val shouldRefresh =
         previousNativeConfig != nextConfig ||
@@ -77,13 +104,37 @@ object InAppDebuggerNativeLogCapture {
       } else {
         publishRuntimeInfoLocked()
       }
+
+      if (!config.enabled && !nextCaptureEnabled) {
+        runtimeInfoInitialized = false
+      }
     }
+  }
+
+  fun updateContextIfNeeded(context: Context?) {
+    var shouldUpdate = true
+    synchronized(lock) {
+      if (!captureEnabled && !runtimeInfoInitialized && !hasCaptureResourcesLocked()) {
+        context?.let {
+          appContextRef = WeakReference(it.applicationContext)
+        }
+        shouldUpdate = false
+      }
+    }
+
+    if (!shouldUpdate) {
+      return
+    }
+    updateContext(context)
   }
 
   fun updateContext(context: Context?) {
     synchronized(lock) {
       val previousContext = appContextRef?.get()
-      updateContextLocked(context)
+      updateContextLocked(
+        context = context,
+        loadCrashHistory = captureEnabled || runtimeInfoInitialized
+      )
       val resolvedContext = appContextRef?.get()
       if (captureEnabled && resolvedContext != null && resolvedContext !== previousContext) {
         refreshCaptureStateLocked()
@@ -93,8 +144,14 @@ object InAppDebuggerNativeLogCapture {
     }
   }
 
-  fun refreshRuntimeInfo(forceRootProbe: Boolean = false) {
+  fun refreshRuntimeInfo(context: Context? = null, forceRootProbe: Boolean = false) {
     synchronized(lock) {
+      runtimeInfoInitialized = true
+      updateContextLocked(
+        context = context,
+        replayCrashReport = captureEnabled,
+        loadCrashHistory = true
+      )
       if (forceRootProbe) {
         ensureRootStatusProbeLocked(force = true)
       }
@@ -109,6 +166,7 @@ object InAppDebuggerNativeLogCapture {
       stopAllLocked()
       restoreUncaughtExceptionHandlerLocked()
       publishRuntimeInfoLocked()
+      runtimeInfoInitialized = false
     }
   }
 
@@ -212,18 +270,33 @@ object InAppDebuggerNativeLogCapture {
     publishRuntimeInfoLocked()
   }
 
-  private fun updateContextLocked(context: Context?, replayCrashReport: Boolean = captureEnabled) {
+  private fun updateContextLocked(
+    context: Context?,
+    replayCrashReport: Boolean = captureEnabled,
+    loadCrashHistory: Boolean = replayCrashReport || runtimeInfoInitialized
+  ) {
     if (context != null) {
       appContextRef = WeakReference(context.applicationContext)
     }
     val actualContext = appContextRef?.get() ?: return
-    crashHistory = loadCrashHistory(actualContext)
+    if (loadCrashHistory) {
+      loadCrashHistoryIfNeededLocked(actualContext)
+    }
     if (crashReplayLoaded || !replayCrashReport) {
       return
     }
 
     replayPersistedCrashReportIfNeeded(actualContext)
     crashReplayLoaded = true
+  }
+
+  private fun loadCrashHistoryIfNeededLocked(context: Context) {
+    val sourcePath = crashHistoryFile(context).absolutePath
+    if (crashHistorySourcePath == sourcePath) {
+      return
+    }
+    crashHistory = loadCrashHistory(context)
+    crashHistorySourcePath = sourcePath
   }
 
   private fun stopAllLocked() {
@@ -239,7 +312,17 @@ object InAppDebuggerNativeLogCapture {
   }
 
   private fun publishRuntimeInfoLocked() {
+    runtimeInfoInitialized = true
     InAppDebuggerStore.updateRuntimeInfo(buildRuntimeInfoLocked())
+  }
+
+  private fun hasCaptureResourcesLocked(): Boolean {
+    return uncaughtExceptionHandlerInstalled ||
+      stdoutCapture != null ||
+      stderrCapture != null ||
+      appLogcatReader != null ||
+      rootLogcatReader != null ||
+      rootProbeInFlight
   }
 
   private fun buildRuntimeInfoLocked(): DebugRuntimeInfo {
@@ -1085,6 +1168,7 @@ object InAppDebuggerNativeLogCapture {
           }
         }
       }.take(MAX_CRASH_HISTORY)
+      crashHistorySourcePath = crashHistoryFile(context).absolutePath
       persistCrashHistory(context, crashHistory)
       publishRuntimeInfoLocked()
     }

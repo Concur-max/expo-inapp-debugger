@@ -58,8 +58,8 @@ class InAppDebuggerModule : Module() {
         nativeRuntimeActive = true
       }
       InAppDebuggerOverlayManager.applyConfig(appContext, config)
-      InAppDebuggerNativeLogCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
-      InAppDebuggerNativeNetworkCapture.applyConfig(appContext.currentActivity?.applicationContext, config)
+      InAppDebuggerNativeLogCapture.applyConfigIfNeeded(appContext.currentActivity?.applicationContext, config)
+      InAppDebuggerNativeNetworkCapture.applyConfigIfNeeded(appContext.currentActivity?.applicationContext, config)
       if (!config.enabled) {
         InAppDebuggerStore.shutdown()
         nativeRuntimeActive = false
@@ -129,8 +129,8 @@ class InAppDebuggerModule : Module() {
       if (!nativeRuntimeActive) {
         return@OnActivityEntersForeground
       }
-      InAppDebuggerNativeLogCapture.updateContext(appContext.currentActivity?.applicationContext)
-      InAppDebuggerNativeNetworkCapture.applyConfig(
+      InAppDebuggerNativeLogCapture.updateContextIfNeeded(appContext.currentActivity?.applicationContext)
+      InAppDebuggerNativeNetworkCapture.applyConfigIfNeeded(
         appContext.currentActivity?.applicationContext,
         InAppDebuggerStore.currentConfig()
       )

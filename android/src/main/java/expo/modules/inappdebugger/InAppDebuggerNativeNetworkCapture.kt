@@ -61,6 +61,21 @@ object InAppDebuggerNativeNetworkCapture {
   private var panelRequestedActive = false
   private val activeCalls = mutableMapOf<Call, NativeOkHttpCallState>()
 
+  fun applyConfigIfNeeded(context: Context?, config: DebugConfig) {
+    val nextEnabled = config.enabled && config.enableNetworkTab && config.enableNativeNetwork
+    var shouldApply = true
+    synchronized(lock) {
+      if (!nextEnabled && !enabled && !hooksInstalled && activeCalls.isEmpty() && !panelRequestedActive) {
+        shouldApply = false
+      }
+    }
+
+    if (!shouldApply) {
+      return
+    }
+    applyConfig(context, config)
+  }
+
   fun applyConfig(context: Context?, config: DebugConfig) {
     var shouldRefreshVisibleEntries = false
     synchronized(lock) {
