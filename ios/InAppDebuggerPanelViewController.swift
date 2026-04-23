@@ -3561,10 +3561,16 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let usesCodeBlockStyle: Bool
   }
 
+  private struct JSONTreePayload {
+    let root: InAppDebuggerJSONTreeValue
+    let copyText: String
+  }
+
   private let entryId: String
   private var entry: DebugNetworkEntry
   private let scrollView = UIScrollView()
   private let stack = UIStackView()
+  private var expandedJSONNodeIDs: Set<String> = []
   private var notificationObserver: NSObjectProtocol?
   private var scheduledReloadWorkItem: DispatchWorkItem?
 
@@ -3668,6 +3674,13 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
         stack.addArrangedSubview(
           makeWebSocketMessagesSection(title: title, raw: entry.messages, fallback: noMessagesText)
         )
+      } else if isHTTPBodySection(title),
+                let treeSection = makeJSONTreeSection(
+                  title: title,
+                  body: body,
+                  bodyMaxHeight: maxBodyHeight(forSectionTitle: title)
+                ) {
+        stack.addArrangedSubview(treeSection)
       } else {
         stack.addArrangedSubview(
           makeSection(
@@ -3710,6 +3723,10 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
 
     return sections
+  }
+
+  private func isHTTPBodySection(_ title: String) -> Bool {
+    title == "Request Body" || title == "Response Body"
   }
 
   private func webSocketSections() -> [(title: String, body: String, monospace: Bool)] {
@@ -4194,6 +4211,48 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return formatter.formatTopLevelObjectOrArray()
   }
 
+  private func jsonTreePayload(from text: String) -> JSONTreePayload? {
+    let rawTrimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !rawTrimmed.isEmpty else {
+      return nil
+    }
+
+    var candidates: [String] = []
+    appendJSONCandidate(rawTrimmed, to: &candidates)
+    if let structuredJSON = extractedStructuredJSON(from: rawTrimmed) {
+      appendJSONCandidate(structuredJSON, to: &candidates)
+    }
+
+    let normalizedTrimmed = normalizedPlainText(text).trimmingCharacters(in: .whitespacesAndNewlines)
+    if normalizedTrimmed != rawTrimmed {
+      appendJSONCandidate(normalizedTrimmed, to: &candidates)
+      if let structuredJSON = extractedStructuredJSON(from: normalizedTrimmed) {
+        appendJSONCandidate(structuredJSON, to: &candidates)
+      }
+    }
+
+    for candidate in candidates {
+      var parser = InAppDebuggerJSONTreeParser(source: candidate)
+      guard let root = parser.parseTopLevelObjectOrArray() else {
+        continue
+      }
+      return JSONTreePayload(
+        root: root,
+        copyText: prettyPrintedJSONObjectOrArray(candidate) ?? candidate
+      )
+    }
+
+    return nil
+  }
+
+  private func appendJSONCandidate(_ candidate: String, to candidates: inout [String]) {
+    let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !candidates.contains(trimmed) else {
+      return
+    }
+    candidates.append(trimmed)
+  }
+
   private func extractedStructuredJSON(from text: String) -> String? {
     guard let start = firstStructuredPayloadStart(in: text) else {
       return nil
@@ -4405,11 +4464,94 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return bodyTextView
   }
 
+  private func makeJSONTreeSection(
+    title: String,
+    body: String,
+    bodyMaxHeight: CGFloat?
+  ) -> UIView? {
+    guard let payload = jsonTreePayload(from: body) else {
+      return nil
+    }
+
+    let treeView = InAppDebuggerJSONTreeView(
+      root: payload.root,
+      nodeIDPrefix: "\(entryId):\(title)",
+      expandedNodeIDs: expandedJSONNodeIDs
+    ) { [weak self] nodeID in
+      guard let self else {
+        return
+      }
+      if self.expandedJSONNodeIDs.contains(nodeID) {
+        self.expandedJSONNodeIDs.remove(nodeID)
+      } else {
+        self.expandedJSONNodeIDs.insert(nodeID)
+      }
+      self.renderSections()
+    }
+
+    let scrollContentView = UIView()
+    let scrollView = InAppDebuggerIntrinsicScrollView()
+    scrollView.maxHeight = bodyMaxHeight ?? Self.maxScrollableSectionHeight
+    scrollView.alwaysBounceVertical = true
+    scrollView.showsVerticalScrollIndicator = true
+    scrollView.showsHorizontalScrollIndicator = false
+    scrollView.delaysContentTouches = false
+    scrollView.clipsToBounds = true
+    scrollView.backgroundColor = UIColor(red: 0.985, green: 0.99, blue: 1.00, alpha: 1)
+    scrollView.layer.cornerRadius = 8
+    scrollView.layer.borderWidth = 1
+    scrollView.layer.borderColor = UIColor(red: 0.80, green: 0.87, blue: 1.00, alpha: 1).cgColor
+    scrollView.addSubview(scrollContentView)
+    scrollContentView.addSubview(treeView)
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollContentView.translatesAutoresizingMaskIntoConstraints = false
+    treeView.translatesAutoresizingMaskIntoConstraints = false
+
+    NSLayoutConstraint.activate([
+      scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: bodyMaxHeight ?? Self.maxScrollableSectionHeight),
+      scrollContentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+      scrollContentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+      scrollContentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+      scrollContentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+      scrollContentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+
+      treeView.topAnchor.constraint(equalTo: scrollContentView.topAnchor, constant: 12),
+      treeView.leadingAnchor.constraint(equalTo: scrollContentView.leadingAnchor, constant: 12),
+      treeView.trailingAnchor.constraint(equalTo: scrollContentView.trailingAnchor, constant: -12),
+      treeView.bottomAnchor.constraint(equalTo: scrollContentView.bottomAnchor, constant: -12),
+    ])
+
+    return makeSection(
+      title: title,
+      bodyView: scrollView,
+      copyText: payload.copyText
+    )
+  }
+
   private func makeSection(
     title: String,
     body: String,
     monospace: Bool,
     bodyMaxHeight: CGFloat? = nil
+  ) -> UIView {
+    let bodyTextView = makeSectionBodyView(
+      body: body,
+      monospace: monospace,
+      scrollable: bodyMaxHeight != nil
+    )
+    bodyTextView.accessibilityLabel = title
+    if let bodyMaxHeight {
+      bodyTextView.translatesAutoresizingMaskIntoConstraints = false
+      bodyTextView.heightAnchor.constraint(lessThanOrEqualToConstant: bodyMaxHeight).isActive = true
+    }
+
+    return makeSection(title: title, bodyView: bodyTextView, copyText: nil)
+  }
+
+  private func makeSection(
+    title: String,
+    bodyView: UIView,
+    copyText: String?
   ) -> UIView {
     let container = UIView()
     container.backgroundColor = PanelColors.card
@@ -4422,18 +4564,31 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     titleLabel.textColor = PanelColors.text
     titleLabel.text = title
 
-    let bodyTextView = makeSectionBodyView(
-      body: body,
-      monospace: monospace,
-      scrollable: bodyMaxHeight != nil
-    )
-    bodyTextView.accessibilityLabel = title
-    if let bodyMaxHeight {
-      bodyTextView.translatesAutoresizingMaskIntoConstraints = false
-      bodyTextView.heightAnchor.constraint(lessThanOrEqualToConstant: bodyMaxHeight).isActive = true
+    let titleRow = UIStackView()
+    titleRow.axis = .horizontal
+    titleRow.alignment = .center
+    titleRow.spacing = 8
+    titleRow.addArrangedSubview(titleLabel)
+
+    if let copyText {
+      let copyButton = UIButton(type: .system)
+      copyButton.tintColor = PanelColors.primary
+      copyButton.accessibilityLabel = "Copy \(title)"
+      copyButton.setImage(UIImage(systemName: "doc.on.doc"), for: .normal)
+      copyButton.addAction(
+        UIAction { _ in
+          UIPasteboard.general.string = copyText
+        },
+        for: .touchUpInside
+      )
+      NSLayoutConstraint.activate([
+        copyButton.widthAnchor.constraint(equalToConstant: 28),
+        copyButton.heightAnchor.constraint(equalToConstant: 28),
+      ])
+      titleRow.addArrangedSubview(copyButton)
     }
 
-    let stack = UIStackView(arrangedSubviews: [titleLabel, bodyTextView])
+    let stack = UIStackView(arrangedSubviews: [titleRow, bodyView])
     stack.axis = .vertical
     stack.spacing = 8
     container.addSubview(stack)
@@ -4748,6 +4903,630 @@ private struct InAppDebuggerJSONPrettyPrinter {
       return false
     }
     return scalar.value < 0x20
+  }
+}
+
+private struct InAppDebuggerJSONTreeMember {
+  let key: String
+  let value: InAppDebuggerJSONTreeValue
+}
+
+private enum InAppDebuggerJSONTreeValue {
+  case object([InAppDebuggerJSONTreeMember])
+  case array([InAppDebuggerJSONTreeValue])
+  case primitive(String)
+
+  var isExpandable: Bool {
+    switch self {
+    case .object(let members):
+      return !members.isEmpty
+    case .array(let values):
+      return !values.isEmpty
+    case .primitive:
+      return false
+    }
+  }
+
+  var openingToken: String {
+    switch self {
+    case .object:
+      return "{"
+    case .array:
+      return "["
+    case .primitive:
+      return ""
+    }
+  }
+
+  var closingToken: String {
+    switch self {
+    case .object:
+      return "}"
+    case .array:
+      return "]"
+    case .primitive:
+      return ""
+    }
+  }
+
+  var compactToken: String {
+    switch self {
+    case .object(let members):
+      return members.isEmpty ? "{}" : "{...}"
+    case .array(let values):
+      return values.isEmpty ? "[]" : "[...]"
+    case .primitive(let literal):
+      return literal
+    }
+  }
+}
+
+private struct InAppDebuggerJSONTreeParser {
+  private let source: String
+  private var index: String.Index
+
+  init(source: String) {
+    self.source = source
+    self.index = source.startIndex
+  }
+
+  mutating func parseTopLevelObjectOrArray() -> InAppDebuggerJSONTreeValue? {
+    skipWhitespace()
+
+    let value: InAppDebuggerJSONTreeValue?
+    switch currentCharacter {
+    case "{":
+      value = parseObject()
+    case "[":
+      value = parseArray()
+    default:
+      value = nil
+    }
+
+    guard let value else {
+      return nil
+    }
+
+    skipWhitespace()
+    guard index == source.endIndex else {
+      return nil
+    }
+    return value
+  }
+
+  private var currentCharacter: Character? {
+    guard index < source.endIndex else {
+      return nil
+    }
+    return source[index]
+  }
+
+  private mutating func advance() {
+    index = source.index(after: index)
+  }
+
+  private mutating func skipWhitespace() {
+    while let character = currentCharacter,
+          character == " " || character == "\n" || character == "\r" || character == "\t" {
+      advance()
+    }
+  }
+
+  private mutating func parseValue() -> InAppDebuggerJSONTreeValue? {
+    skipWhitespace()
+
+    switch currentCharacter {
+    case "{":
+      return parseObject()
+    case "[":
+      return parseArray()
+    case "\"":
+      return parseStringLiteral().map(InAppDebuggerJSONTreeValue.primitive)
+    case "t":
+      return parseKeyword("true").map(InAppDebuggerJSONTreeValue.primitive)
+    case "f":
+      return parseKeyword("false").map(InAppDebuggerJSONTreeValue.primitive)
+    case "n":
+      return parseKeyword("null").map(InAppDebuggerJSONTreeValue.primitive)
+    case "-", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+      return parseNumberLiteral().map(InAppDebuggerJSONTreeValue.primitive)
+    default:
+      return nil
+    }
+  }
+
+  private mutating func parseObject() -> InAppDebuggerJSONTreeValue? {
+    guard currentCharacter == "{" else {
+      return nil
+    }
+    advance()
+    skipWhitespace()
+
+    if currentCharacter == "}" {
+      advance()
+      return .object([])
+    }
+
+    var members: [InAppDebuggerJSONTreeMember] = []
+
+    while true {
+      skipWhitespace()
+      guard let key = parseStringLiteral() else {
+        return nil
+      }
+
+      skipWhitespace()
+      guard currentCharacter == ":" else {
+        return nil
+      }
+      advance()
+
+      guard let value = parseValue() else {
+        return nil
+      }
+      members.append(InAppDebuggerJSONTreeMember(key: key, value: value))
+
+      skipWhitespace()
+      if currentCharacter == "," {
+        advance()
+        continue
+      }
+      if currentCharacter == "}" {
+        advance()
+        break
+      }
+      return nil
+    }
+
+    return .object(members)
+  }
+
+  private mutating func parseArray() -> InAppDebuggerJSONTreeValue? {
+    guard currentCharacter == "[" else {
+      return nil
+    }
+    advance()
+    skipWhitespace()
+
+    if currentCharacter == "]" {
+      advance()
+      return .array([])
+    }
+
+    var values: [InAppDebuggerJSONTreeValue] = []
+
+    while true {
+      guard let value = parseValue() else {
+        return nil
+      }
+      values.append(value)
+
+      skipWhitespace()
+      if currentCharacter == "," {
+        advance()
+        continue
+      }
+      if currentCharacter == "]" {
+        advance()
+        break
+      }
+      return nil
+    }
+
+    return .array(values)
+  }
+
+  private mutating func parseStringLiteral() -> String? {
+    guard currentCharacter == "\"" else {
+      return nil
+    }
+
+    let start = index
+    advance()
+
+    while let character = currentCharacter {
+      if character == "\"" {
+        advance()
+        return String(source[start..<index])
+      }
+
+      if character == "\\" {
+        advance()
+        guard let escapedCharacter = currentCharacter else {
+          return nil
+        }
+
+        switch escapedCharacter {
+        case "\"", "\\", "/", "b", "f", "n", "r", "t":
+          advance()
+        case "u":
+          advance()
+          for _ in 0..<4 {
+            guard let hex = currentCharacter, isHexDigit(hex) else {
+              return nil
+            }
+            advance()
+          }
+        default:
+          return nil
+        }
+        continue
+      }
+
+      if isDisallowedStringCharacter(character) {
+        return nil
+      }
+
+      advance()
+    }
+
+    return nil
+  }
+
+  private mutating func parseKeyword(_ keyword: String) -> String? {
+    guard source[index...].hasPrefix(keyword) else {
+      return nil
+    }
+    index = source.index(index, offsetBy: keyword.count)
+    return keyword
+  }
+
+  private mutating func parseNumberLiteral() -> String? {
+    let start = index
+
+    if currentCharacter == "-" {
+      advance()
+    }
+
+    guard let firstDigit = currentCharacter else {
+      return nil
+    }
+
+    if firstDigit == "0" {
+      advance()
+    } else if isDigitOneToNine(firstDigit) {
+      advance()
+      while let digit = currentCharacter, isDigit(digit) {
+        advance()
+      }
+    } else {
+      return nil
+    }
+
+    if currentCharacter == "." {
+      advance()
+      guard let digit = currentCharacter, isDigit(digit) else {
+        return nil
+      }
+      while let digit = currentCharacter, isDigit(digit) {
+        advance()
+      }
+    }
+
+    if currentCharacter == "e" || currentCharacter == "E" {
+      advance()
+      if currentCharacter == "+" || currentCharacter == "-" {
+        advance()
+      }
+      guard let digit = currentCharacter, isDigit(digit) else {
+        return nil
+      }
+      while let digit = currentCharacter, isDigit(digit) {
+        advance()
+      }
+    }
+
+    return String(source[start..<index])
+  }
+
+  private func isDigit(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    return scalar.value >= 48 && scalar.value <= 57
+  }
+
+  private func isDigitOneToNine(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    return scalar.value >= 49 && scalar.value <= 57
+  }
+
+  private func isHexDigit(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    switch scalar.value {
+    case 48...57, 65...70, 97...102:
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func isDisallowedStringCharacter(_ character: Character) -> Bool {
+    guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else {
+      return false
+    }
+    return scalar.value < 0x20
+  }
+}
+
+private final class InAppDebuggerJSONTreeView: UIView {
+  private struct LineSegment {
+    let text: String
+    let color: UIColor
+  }
+
+  private static let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+  private static let punctuationColor = UIColor(red: 0.24, green: 0.30, blue: 0.39, alpha: 1)
+  private static let keyColor = UIColor(red: 0.75, green: 0.23, blue: 0.16, alpha: 1)
+  private static let valueColor = UIColor(red: 0.66, green: 0.35, blue: 0.08, alpha: 1)
+  private static let guideColor = UIColor(red: 0.49, green: 0.59, blue: 0.73, alpha: 1)
+  private static let indentationWidth: CGFloat = 16
+  private static let disclosureWidth: CGFloat = 18
+
+  private let root: InAppDebuggerJSONTreeValue
+  private let nodeIDPrefix: String
+  private let expandedNodeIDs: Set<String>
+  private let onToggle: (String) -> Void
+  private let stack = UIStackView()
+
+  init(
+    root: InAppDebuggerJSONTreeValue,
+    nodeIDPrefix: String,
+    expandedNodeIDs: Set<String>,
+    onToggle: @escaping (String) -> Void
+  ) {
+    self.root = root
+    self.nodeIDPrefix = nodeIDPrefix
+    self.expandedNodeIDs = expandedNodeIDs
+    self.onToggle = onToggle
+    super.init(frame: .zero)
+
+    stack.axis = .vertical
+    stack.spacing = 2
+    addSubview(stack)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      stack.topAnchor.constraint(equalTo: topAnchor),
+      stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+      stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+      stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+
+    render()
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  private func render() {
+    renderValue(root, key: nil, depth: 0, path: "root", trailingComma: false)
+  }
+
+  private func renderValue(
+    _ value: InAppDebuggerJSONTreeValue,
+    key: String?,
+    depth: Int,
+    path: String,
+    trailingComma: Bool
+  ) {
+    switch value {
+    case .primitive(let literal):
+      addLine(
+        key: key,
+        valueSegments: [LineSegment(text: literal, color: Self.valueColor)],
+        depth: depth,
+        trailingComma: trailingComma,
+        disclosure: nil
+      )
+
+    case .object(let members):
+      renderContainer(
+        value: value,
+        key: key,
+        depth: depth,
+        path: path,
+        trailingComma: trailingComma
+      ) {
+        for (index, member) in members.enumerated() {
+          renderValue(
+            member.value,
+            key: member.key,
+            depth: depth + 1,
+            path: "\(path)/m\(index)",
+            trailingComma: index < members.count - 1
+          )
+        }
+      }
+
+    case .array(let values):
+      renderContainer(
+        value: value,
+        key: key,
+        depth: depth,
+        path: path,
+        trailingComma: trailingComma
+      ) {
+        for (index, item) in values.enumerated() {
+          renderValue(
+            item,
+            key: nil,
+            depth: depth + 1,
+            path: "\(path)/i\(index)",
+            trailingComma: index < values.count - 1
+          )
+        }
+      }
+    }
+  }
+
+  private func renderContainer(
+    value: InAppDebuggerJSONTreeValue,
+    key: String?,
+    depth: Int,
+    path: String,
+    trailingComma: Bool,
+    renderChildren: () -> Void
+  ) {
+    guard value.isExpandable else {
+      addLine(
+        key: key,
+        valueSegments: tokenSegments(value.compactToken),
+        depth: depth,
+        trailingComma: trailingComma,
+        disclosure: nil
+      )
+      return
+    }
+
+    let nodeID = "\(nodeIDPrefix):\(path)"
+    let expanded = depth == 0 || expandedNodeIDs.contains(nodeID)
+    let disclosure = depth == 0
+      ? nil
+      : (nodeID: nodeID, expanded: expanded)
+
+    if !expanded {
+      addLine(
+        key: key,
+        valueSegments: tokenSegments(value.compactToken),
+        depth: depth,
+        trailingComma: trailingComma,
+        disclosure: disclosure
+      )
+      return
+    }
+
+    addLine(
+      key: key,
+      valueSegments: tokenSegments(value.openingToken),
+      depth: depth,
+      trailingComma: false,
+      disclosure: disclosure
+    )
+    renderChildren()
+    addLine(
+      key: nil,
+      valueSegments: tokenSegments(value.closingToken),
+      depth: depth,
+      trailingComma: trailingComma,
+      disclosure: nil
+    )
+  }
+
+  private func tokenSegments(_ token: String) -> [LineSegment] {
+    guard token.contains("...") else {
+      return [LineSegment(text: token, color: Self.punctuationColor)]
+    }
+
+    var segments: [LineSegment] = []
+    for character in token {
+      let text = String(character)
+      segments.append(
+        LineSegment(
+          text: text,
+          color: text == "." ? Self.guideColor : Self.punctuationColor
+        )
+      )
+    }
+    return segments
+  }
+
+  private func addLine(
+    key: String?,
+    valueSegments: [LineSegment],
+    depth: Int,
+    trailingComma: Bool,
+    disclosure: (nodeID: String, expanded: Bool)?
+  ) {
+    let row = UIStackView()
+    row.axis = .horizontal
+    row.alignment = .top
+    row.spacing = 2
+    row.isLayoutMarginsRelativeArrangement = true
+    row.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0)
+
+    let indentationView = UIView()
+    indentationView.translatesAutoresizingMaskIntoConstraints = false
+    indentationView.widthAnchor.constraint(equalToConstant: CGFloat(depth) * Self.indentationWidth).isActive = true
+    row.addArrangedSubview(indentationView)
+
+    if let disclosure {
+      let button = UIButton(type: .system)
+      button.tintColor = Self.guideColor
+      button.accessibilityLabel = disclosure.expanded ? "Collapse JSON node" : "Expand JSON node"
+      button.setImage(
+        UIImage(systemName: disclosure.expanded ? "chevron.down" : "chevron.right"),
+        for: .normal
+      )
+      button.addAction(
+        UIAction { [onToggle] _ in
+          onToggle(disclosure.nodeID)
+        },
+        for: .touchUpInside
+      )
+      button.translatesAutoresizingMaskIntoConstraints = false
+      NSLayoutConstraint.activate([
+        button.widthAnchor.constraint(equalToConstant: Self.disclosureWidth),
+        button.heightAnchor.constraint(equalToConstant: 18),
+      ])
+      row.addArrangedSubview(button)
+    } else {
+      let disclosureSpacer = UIView()
+      disclosureSpacer.translatesAutoresizingMaskIntoConstraints = false
+      disclosureSpacer.widthAnchor.constraint(equalToConstant: Self.disclosureWidth).isActive = true
+      row.addArrangedSubview(disclosureSpacer)
+    }
+
+    let label = UILabel()
+    label.numberOfLines = 0
+    label.lineBreakMode = .byCharWrapping
+    label.attributedText = attributedLine(
+      key: key,
+      valueSegments: valueSegments,
+      trailingComma: trailingComma
+    )
+    label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    row.addArrangedSubview(label)
+    stack.addArrangedSubview(row)
+  }
+
+  private func attributedLine(
+    key: String?,
+    valueSegments: [LineSegment],
+    trailingComma: Bool
+  ) -> NSAttributedString {
+    let result = NSMutableAttributedString()
+
+    if let key {
+      append(key, color: Self.keyColor, to: result)
+      append(": ", color: Self.punctuationColor, to: result)
+    }
+
+    for segment in valueSegments {
+      append(segment.text, color: segment.color, to: result)
+    }
+
+    if trailingComma {
+      append(",", color: Self.punctuationColor, to: result)
+    }
+
+    return result
+  }
+
+  private func append(_ text: String, color: UIColor, to result: NSMutableAttributedString) {
+    result.append(
+      NSAttributedString(
+        string: text,
+        attributes: [
+          .font: Self.codeFont,
+          .foregroundColor: color,
+        ]
+      )
+    )
   }
 }
 
