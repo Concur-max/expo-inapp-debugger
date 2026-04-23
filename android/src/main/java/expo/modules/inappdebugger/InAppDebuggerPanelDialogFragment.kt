@@ -835,6 +835,8 @@ private fun AppInfoTab(
   val scope = rememberCoroutineScope()
   var nativeCaptureTogglePending by remember { mutableStateOf(false) }
   var rootTogglePending by remember { mutableStateOf(false) }
+  var nativeLogsEnableArmed by remember { mutableStateOf(false) }
+  var nativeNetworkEnableArmed by remember { mutableStateOf(false) }
   var nativeCaptureConfirmationTarget by remember {
     mutableStateOf<NativeCaptureConfirmationTarget?>(null)
   }
@@ -844,6 +846,18 @@ private fun AppInfoTab(
 
   LaunchedEffect(Unit) {
     InAppDebuggerNativeLogCapture.refreshRuntimeInfo()
+  }
+
+  LaunchedEffect(config.enableNativeLogs) {
+    if (config.enableNativeLogs) {
+      nativeLogsEnableArmed = false
+    }
+  }
+
+  LaunchedEffect(config.enableNativeNetwork, config.enableNetworkTab) {
+    if (config.enableNativeNetwork || !config.enableNetworkTab) {
+      nativeNetworkEnableArmed = false
+    }
   }
 
   val sections by produceState<List<DetailItem>?>(
@@ -890,14 +904,8 @@ private fun AppInfoTab(
       onConfirm = {
         nativeCaptureConfirmationTarget = null
         when (target) {
-          NativeCaptureConfirmationTarget.Logs -> applyNativeCaptureChange(
-            enableNativeLogs = true,
-            enableNativeNetwork = config.enableNativeNetwork
-          )
-          NativeCaptureConfirmationTarget.Network -> applyNativeCaptureChange(
-            enableNativeLogs = config.enableNativeLogs,
-            enableNativeNetwork = true
-          )
+          NativeCaptureConfirmationTarget.Logs -> nativeLogsEnableArmed = true
+          NativeCaptureConfirmationTarget.Network -> nativeNetworkEnableArmed = true
         }
       },
       onDismiss = {
@@ -957,12 +965,23 @@ private fun AppInfoTab(
         nativeLogsChecked = config.enableNativeLogs,
         nativeNetworkChecked = config.enableNativeNetwork,
         nativeNetworkEnabled = config.enableNetworkTab,
+        nativeLogsEnableRequiresConfirmation = !config.enableNativeLogs && !nativeLogsEnableArmed,
+        nativeNetworkEnableRequiresConfirmation = !config.enableNativeNetwork && !nativeNetworkEnableArmed,
         pending = nativeCaptureTogglePending,
         locale = locale,
         onNativeLogsChange = { enabled ->
           if (enabled) {
-            nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Logs
+            if (nativeLogsEnableArmed) {
+              nativeLogsEnableArmed = false
+              applyNativeCaptureChange(
+                enableNativeLogs = true,
+                enableNativeNetwork = config.enableNativeNetwork
+              )
+            } else {
+              nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Logs
+            }
           } else {
+            nativeLogsEnableArmed = false
             applyNativeCaptureChange(
               enableNativeLogs = false,
               enableNativeNetwork = config.enableNativeNetwork
@@ -971,13 +990,28 @@ private fun AppInfoTab(
         },
         onNativeNetworkChange = { enabled ->
           if (enabled) {
-            nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Network
+            if (nativeNetworkEnableArmed) {
+              nativeNetworkEnableArmed = false
+              applyNativeCaptureChange(
+                enableNativeLogs = config.enableNativeLogs,
+                enableNativeNetwork = true
+              )
+            } else {
+              nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Network
+            }
           } else {
+            nativeNetworkEnableArmed = false
             applyNativeCaptureChange(
               enableNativeLogs = config.enableNativeLogs,
               enableNativeNetwork = false
             )
           }
+        },
+        onNativeLogsEnableIntercept = {
+          nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Logs
+        },
+        onNativeNetworkEnableIntercept = {
+          nativeCaptureConfirmationTarget = NativeCaptureConfirmationTarget.Network
         }
       )
     }
@@ -1029,10 +1063,14 @@ private fun NativeCaptureControlCard(
   nativeLogsChecked: Boolean,
   nativeNetworkChecked: Boolean,
   nativeNetworkEnabled: Boolean,
+  nativeLogsEnableRequiresConfirmation: Boolean,
+  nativeNetworkEnableRequiresConfirmation: Boolean,
   pending: Boolean,
   locale: String,
   onNativeLogsChange: (Boolean) -> Unit,
-  onNativeNetworkChange: (Boolean) -> Unit
+  onNativeNetworkChange: (Boolean) -> Unit,
+  onNativeLogsEnableIntercept: () -> Unit,
+  onNativeNetworkEnableIntercept: () -> Unit
 ) {
   Card(
     modifier = Modifier.fillMaxWidth(),
@@ -1053,7 +1091,9 @@ private fun NativeCaptureControlCard(
         summary = localizedNativeLogsControlSummary(locale),
         checked = nativeLogsChecked,
         enabled = !pending,
-        onCheckedChange = onNativeLogsChange
+        interceptOffClick = nativeLogsEnableRequiresConfirmation,
+        onCheckedChange = onNativeLogsChange,
+        onOffClickIntercept = onNativeLogsEnableIntercept
       )
       HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = PanelColors.Border)
       NativeCaptureSwitchRow(
@@ -1061,24 +1101,30 @@ private fun NativeCaptureControlCard(
         summary = localizedNativeNetworkControlSummary(nativeNetworkEnabled, locale),
         checked = nativeNetworkChecked && nativeNetworkEnabled,
         enabled = !pending && nativeNetworkEnabled,
-        onCheckedChange = onNativeNetworkChange
+        interceptOffClick = nativeNetworkEnableRequiresConfirmation,
+        onCheckedChange = onNativeNetworkChange,
+        onOffClickIntercept = onNativeNetworkEnableIntercept
       )
     }
   }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun NativeCaptureSwitchRow(
   title: String,
   summary: String,
   checked: Boolean,
   enabled: Boolean,
-  onCheckedChange: (Boolean) -> Unit
+  interceptOffClick: Boolean,
+  onCheckedChange: (Boolean) -> Unit,
+  onOffClickIntercept: () -> Unit
 ) {
   Row(
     modifier = Modifier.fillMaxWidth(),
     verticalAlignment = Alignment.CenterVertically
   ) {
+    val shouldInterceptOffClick = interceptOffClick && enabled && !checked
     Column(modifier = Modifier.weight(1f)) {
       Text(
         text = title,
@@ -1093,11 +1139,25 @@ private fun NativeCaptureSwitchRow(
       )
     }
     Spacer(modifier = Modifier.width(12.dp))
-    Switch(
-      checked = checked,
-      enabled = enabled,
-      onCheckedChange = onCheckedChange
-    )
+    Box(contentAlignment = Alignment.Center) {
+      Switch(
+        checked = checked,
+        enabled = enabled,
+        onCheckedChange = if (shouldInterceptOffClick) null else onCheckedChange
+      )
+      if (shouldInterceptOffClick) {
+        Box(
+          modifier = Modifier
+            .matchParentSize()
+            .pointerInteropFilter { event ->
+              if (event.actionMasked == MotionEvent.ACTION_UP) {
+                onOffClickIntercept()
+              }
+              true
+            }
+        )
+      }
+    }
   }
 }
 
@@ -2847,31 +2907,31 @@ private fun localizedNativeCaptureConfirmationMessage(
   return when (target) {
     NativeCaptureConfirmationTarget.Logs -> when {
       locale.startsWith("en") ->
-        "Native log capture enables heavier native hooks and may cause the host app to become unstable or crash. Enable it only temporarily for special debugging cases."
+        "Native log capture enables heavier native hooks and may cause the host app to become unstable or crash. Enable it only temporarily for special debugging cases.\n\nIf you still want to enable it, confirm this dialog, then tap the switch again. It will only turn on after the second tap."
       locale.startsWith("ja") ->
-        "ネイティブログ採集は重いネイティブフックを有効にするため、ホストアプリが不安定になったりクラッシュしたりする可能性があります。特殊な調査時だけ一時的に有効にしてください。"
+        "ネイティブログ採集は重いネイティブフックを有効にするため、ホストアプリが不安定になったりクラッシュしたりする可能性があります。特殊な調査時だけ一時的に有効にしてください。\n\nそれでも有効にする場合は、この確認を承認してからもう一度スイッチをタップしてください。2 回目のタップで有効になります。"
       locale == "zh-TW" ->
-        "原生日誌採集會啟用較重的原生 hook，可能導致宿主應用不穩定甚至崩潰。請僅在特殊排查場景中臨時開啟。"
+        "原生日誌採集會啟用較重的原生 hook，可能導致宿主應用不穩定甚至崩潰。請僅在特殊排查場景中臨時開啟。\n\n如果確認仍要開啟，請關閉此提示後再次點擊開關；第二次點擊才會真正開啟。"
       else ->
-        "原生日志采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+        "原生日志采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。\n\n如果确认仍要开启，请关闭此提示后再次点击开关；第二次点击才会真正开启。"
     }
     NativeCaptureConfirmationTarget.Network -> when {
       locale.startsWith("en") ->
-        "Native network capture enables heavier native hooks and may cause the host app to become unstable or crash. Enable it only temporarily for special debugging cases."
+        "Native network capture enables heavier native hooks and may cause the host app to become unstable or crash. Enable it only temporarily for special debugging cases.\n\nIf you still want to enable it, confirm this dialog, then tap the switch again. It will only turn on after the second tap."
       locale.startsWith("ja") ->
-        "ネイティブ通信採集は重いネイティブフックを有効にするため、ホストアプリが不安定になったりクラッシュしたりする可能性があります。特殊な調査時だけ一時的に有効にしてください。"
+        "ネイティブ通信採集は重いネイティブフックを有効にするため、ホストアプリが不安定になったりクラッシュしたりする可能性があります。特殊な調査時だけ一時的に有効にしてください。\n\nそれでも有効にする場合は、この確認を承認してからもう一度スイッチをタップしてください。2 回目のタップで有効になります。"
       locale == "zh-TW" ->
-        "原生網路採集會啟用較重的原生 hook，可能導致宿主應用不穩定甚至崩潰。請僅在特殊排查場景中臨時開啟。"
+        "原生網路採集會啟用較重的原生 hook，可能導致宿主應用不穩定甚至崩潰。請僅在特殊排查場景中臨時開啟。\n\n如果確認仍要開啟，請關閉此提示後再次點擊開關；第二次點擊才會真正開啟。"
       else ->
-        "原生网络采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+        "原生网络采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。\n\n如果确认仍要开启，请关闭此提示后再次点击开关；第二次点击才会真正开启。"
     }
   }
 }
 
 private fun localizedNativeCaptureConfirmationConfirmLabel(locale: String): String {
   return when {
-    locale.startsWith("en") -> "Enable"
-    locale.startsWith("ja") -> "有効にする"
+    locale.startsWith("en") -> "Still enable"
+    locale.startsWith("ja") -> "それでも有効にする"
     locale == "zh-TW" -> "仍要開啟"
     else -> "仍要开启"
   }

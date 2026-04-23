@@ -524,6 +524,8 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   private var visibleRenderGeneration = 0
   private var isSuspendingLiveUpdatesForScroll = false
   private var renderedAppInfoSignature = ""
+  private var nativeLogsEnableArmed = false
+  private var nativeNetworkEnableArmed = false
   private var renderedTableTab: ActiveTab?
   private var lastAppliedBottomBarInset: CGFloat = -1
   private var pendingPanelDismissAfterSearchDeactivation = false
@@ -1221,6 +1223,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     var nextConfig = currentConfig
     nextConfig.enableNativeLogs = enableNativeLogs
     nextConfig.enableNativeNetwork = enableNativeNetwork && nextConfig.enableNetworkTab
+    if enableNativeLogs {
+      nativeLogsEnableArmed = false
+    }
+    if enableNativeNetwork || !nextConfig.enableNetworkTab {
+      nativeNetworkEnableArmed = false
+    }
 
     guard nextConfig != currentConfig else {
       syncNativeCaptureStates()
@@ -2055,27 +2063,43 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func configureNativeCaptureControls() {
+    if currentConfig.enableNativeLogs {
+      nativeLogsEnableArmed = false
+    }
+    if currentConfig.enableNativeNetwork || !currentConfig.enableNetworkTab {
+      nativeNetworkEnableArmed = false
+    }
+
     nativeCaptureControlsView.configure(
       nativeLogsEnabled: currentConfig.enableNativeLogs,
       nativeNetworkEnabled: currentConfig.enableNativeNetwork,
       networkTabEnabled: currentConfig.enableNetworkTab,
+      nativeLogsEnableRequiresConfirmation: !currentConfig.enableNativeLogs && !nativeLogsEnableArmed,
+      nativeNetworkEnableRequiresConfirmation: !currentConfig.enableNativeNetwork && !nativeNetworkEnableArmed,
       onNativeLogsChange: { [weak self] enabled in
         guard let self else {
           return
         }
         if enabled {
-          self.configureNativeCaptureControls()
-          self.presentNativeCaptureConfirmation(for: .logs) { [weak self] in
-            guard let self else {
-              return
+          guard self.nativeLogsEnableArmed else {
+            self.configureNativeCaptureControls()
+            self.presentNativeCaptureConfirmation(for: .logs) { [weak self] in
+              guard let self else {
+                return
+              }
+              self.nativeLogsEnableArmed = true
+              self.configureNativeCaptureControls()
             }
-            self.applyNativeCaptureSettings(
-              enableNativeLogs: true,
-              enableNativeNetwork: self.currentConfig.enableNativeNetwork
-            )
+            return
           }
+          self.nativeLogsEnableArmed = false
+          self.applyNativeCaptureSettings(
+            enableNativeLogs: true,
+            enableNativeNetwork: self.currentConfig.enableNativeNetwork
+          )
           return
         }
+        self.nativeLogsEnableArmed = false
         self.applyNativeCaptureSettings(
           enableNativeLogs: false,
           enableNativeNetwork: self.currentConfig.enableNativeNetwork
@@ -2086,22 +2110,53 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
           return
         }
         if enabled {
-          self.configureNativeCaptureControls()
-          self.presentNativeCaptureConfirmation(for: .network) { [weak self] in
-            guard let self else {
-              return
+          guard self.nativeNetworkEnableArmed else {
+            self.configureNativeCaptureControls()
+            self.presentNativeCaptureConfirmation(for: .network) { [weak self] in
+              guard let self else {
+                return
+              }
+              self.nativeNetworkEnableArmed = true
+              self.configureNativeCaptureControls()
             }
-            self.applyNativeCaptureSettings(
-              enableNativeLogs: self.currentConfig.enableNativeLogs,
-              enableNativeNetwork: true
-            )
+            return
           }
+          self.nativeNetworkEnableArmed = false
+          self.applyNativeCaptureSettings(
+            enableNativeLogs: self.currentConfig.enableNativeLogs,
+            enableNativeNetwork: true
+          )
           return
         }
+        self.nativeNetworkEnableArmed = false
         self.applyNativeCaptureSettings(
           enableNativeLogs: self.currentConfig.enableNativeLogs,
           enableNativeNetwork: false
         )
+      },
+      onNativeLogsEnableIntercept: { [weak self] in
+        guard let self else {
+          return
+        }
+        self.presentNativeCaptureConfirmation(for: .logs) { [weak self] in
+          guard let self else {
+            return
+          }
+          self.nativeLogsEnableArmed = true
+          self.configureNativeCaptureControls()
+        }
+      },
+      onNativeNetworkEnableIntercept: { [weak self] in
+        guard let self else {
+          return
+        }
+        self.presentNativeCaptureConfirmation(for: .network) { [weak self] in
+          guard let self else {
+            return
+          }
+          self.nativeNetworkEnableArmed = true
+          self.configureNativeCaptureControls()
+        }
       }
     )
   }
@@ -2139,11 +2194,12 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   }
 
   private func nativeCaptureConfirmationMessage(for target: NativeCaptureConfirmationTarget) -> String {
+    let retryInstruction = "如果确认仍要开启，请关闭此提示后再次点击开关；第二次点击才会真正开启。"
     switch target {
     case .logs:
-      return "原生日志采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+      return "原生日志采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。\n\n\(retryInstruction)"
     case .network:
-      return "原生网络采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。"
+      return "原生网络采集会启用较重的原生 hook，可能导致宿主应用不稳定甚至崩溃。请仅在特殊排查场景中临时开启。\n\n\(retryInstruction)"
     }
   }
 
@@ -3105,6 +3161,8 @@ private final class InAppDebuggerNativeCaptureControlsView: UIView {
   private let nativeNetworkRow = InAppDebuggerSwitchRowView()
   private var onNativeLogsChange: ((Bool) -> Void)?
   private var onNativeNetworkChange: ((Bool) -> Void)?
+  private var onNativeLogsEnableIntercept: (() -> Void)?
+  private var onNativeNetworkEnableIntercept: (() -> Void)?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -3119,17 +3177,24 @@ private final class InAppDebuggerNativeCaptureControlsView: UIView {
     nativeLogsEnabled: Bool,
     nativeNetworkEnabled: Bool,
     networkTabEnabled: Bool,
+    nativeLogsEnableRequiresConfirmation: Bool,
+    nativeNetworkEnableRequiresConfirmation: Bool,
     onNativeLogsChange: @escaping (Bool) -> Void,
-    onNativeNetworkChange: @escaping (Bool) -> Void
+    onNativeNetworkChange: @escaping (Bool) -> Void,
+    onNativeLogsEnableIntercept: @escaping () -> Void,
+    onNativeNetworkEnableIntercept: @escaping () -> Void
   ) {
     self.onNativeLogsChange = onNativeLogsChange
     self.onNativeNetworkChange = onNativeNetworkChange
+    self.onNativeLogsEnableIntercept = onNativeLogsEnableIntercept
+    self.onNativeNetworkEnableIntercept = onNativeNetworkEnableIntercept
 
     nativeLogsRow.configure(
       title: "原生日志",
       detail: "临时采集 stdout/stderr、OSLog、NSException 与 fatal signal。",
       isOn: nativeLogsEnabled,
-      isEnabled: true
+      isEnabled: true,
+      interceptsOffTap: nativeLogsEnableRequiresConfirmation
     )
     nativeNetworkRow.configure(
       title: "原生网络",
@@ -3137,7 +3202,8 @@ private final class InAppDebuggerNativeCaptureControlsView: UIView {
         ? "临时捕获 native URLSession 请求；普通场景保持关闭更稳。"
         : "network 面板已关闭，因此不可用。",
       isOn: nativeNetworkEnabled && networkTabEnabled,
-      isEnabled: networkTabEnabled
+      isEnabled: networkTabEnabled,
+      interceptsOffTap: nativeNetworkEnableRequiresConfirmation
     )
   }
 
@@ -3168,6 +3234,12 @@ private final class InAppDebuggerNativeCaptureControlsView: UIView {
     nativeNetworkRow.onValueChange = { [weak self] enabled in
       self?.onNativeNetworkChange?(enabled)
     }
+    nativeLogsRow.onOffTapIntercept = { [weak self] in
+      self?.onNativeLogsEnableIntercept?()
+    }
+    nativeNetworkRow.onOffTapIntercept = { [weak self] in
+      self?.onNativeNetworkEnableIntercept?()
+    }
 
     cardView.translatesAutoresizingMaskIntoConstraints = false
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -3191,10 +3263,12 @@ private final class InAppDebuggerNativeCaptureControlsView: UIView {
 
 private final class InAppDebuggerSwitchRowView: UIView {
   var onValueChange: ((Bool) -> Void)?
+  var onOffTapIntercept: (() -> Void)?
 
   private let titleLabel = UILabel()
   private let detailLabel = UILabel()
   private let valueSwitch = UISwitch()
+  private let switchTapInterceptView = UIControl()
   private var isConfiguring = false
 
   override init(frame: CGRect) {
@@ -3206,12 +3280,16 @@ private final class InAppDebuggerSwitchRowView: UIView {
     nil
   }
 
-  func configure(title: String, detail: String, isOn: Bool, isEnabled: Bool) {
+  func configure(title: String, detail: String, isOn: Bool, isEnabled: Bool, interceptsOffTap: Bool = false) {
     isConfiguring = true
     titleLabel.text = title
     detailLabel.text = detail
     valueSwitch.isOn = isOn
     valueSwitch.isEnabled = isEnabled
+    let shouldInterceptOffTap = interceptsOffTap && !isOn && isEnabled
+    valueSwitch.isUserInteractionEnabled = !shouldInterceptOffTap
+    switchTapInterceptView.isHidden = !shouldInterceptOffTap
+    switchTapInterceptView.isUserInteractionEnabled = !switchTapInterceptView.isHidden
     alpha = isEnabled ? 1 : 0.55
     isConfiguring = false
   }
@@ -3226,6 +3304,11 @@ private final class InAppDebuggerSwitchRowView: UIView {
     detailLabel.numberOfLines = 0
 
     valueSwitch.addTarget(self, action: #selector(handleSwitchChange), for: .valueChanged)
+    switchTapInterceptView.backgroundColor = .clear
+    switchTapInterceptView.accessibilityElementsHidden = true
+    switchTapInterceptView.isHidden = true
+    switchTapInterceptView.isUserInteractionEnabled = false
+    switchTapInterceptView.addTarget(self, action: #selector(handleInterceptedOffTap), for: .touchUpInside)
 
     let textStack = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
     textStack.axis = .vertical
@@ -3239,13 +3322,20 @@ private final class InAppDebuggerSwitchRowView: UIView {
     rowStack.spacing = 12
     rowStack.alignment = .center
     addSubview(rowStack)
+    addSubview(switchTapInterceptView)
 
     rowStack.translatesAutoresizingMaskIntoConstraints = false
+    switchTapInterceptView.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       rowStack.topAnchor.constraint(equalTo: topAnchor),
       rowStack.leadingAnchor.constraint(equalTo: leadingAnchor),
       rowStack.trailingAnchor.constraint(equalTo: trailingAnchor),
       rowStack.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+      switchTapInterceptView.topAnchor.constraint(equalTo: valueSwitch.topAnchor),
+      switchTapInterceptView.leadingAnchor.constraint(equalTo: valueSwitch.leadingAnchor),
+      switchTapInterceptView.trailingAnchor.constraint(equalTo: valueSwitch.trailingAnchor),
+      switchTapInterceptView.bottomAnchor.constraint(equalTo: valueSwitch.bottomAnchor),
     ])
   }
 
@@ -3254,6 +3344,13 @@ private final class InAppDebuggerSwitchRowView: UIView {
       return
     }
     onValueChange?(valueSwitch.isOn)
+  }
+
+  @objc private func handleInterceptedOffTap() {
+    guard !isConfiguring else {
+      return
+    }
+    onOffTapIntercept?()
   }
 }
 
