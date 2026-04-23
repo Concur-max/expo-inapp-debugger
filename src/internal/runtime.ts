@@ -394,17 +394,11 @@ export class DebugRuntime {
 
     if (nextConfig.enabled) {
       this.installCollectors(nextConfig.enableNetworkTab);
-      if (nextConfig.initialVisible) {
-        await this.dependencies.nativeModule.show();
-      } else {
-        await this.dependencies.nativeModule.hide();
-      }
       this.lastAppliedConfig = nextConfig;
       return;
     }
 
     this.removeCollectors();
-    await this.dependencies.nativeModule.hide();
     this.lastAppliedConfig = nextConfig;
   }
 

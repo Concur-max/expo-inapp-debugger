@@ -347,6 +347,28 @@ private final class InAppDebuggerNativeHTTPURLProtocol: URLProtocol, URLSessionD
 
 final class InAppDebuggerNativeNetworkCapture {
   static let shared = InAppDebuggerNativeNetworkCapture()
+  private static var didCreateShared = false
+
+  static func setEnabledIfNeeded(_ enabled: Bool) {
+    guard enabled || didCreateShared else {
+      return
+    }
+    shared.setEnabled(enabled)
+  }
+
+  static func setPanelActiveIfNeeded(_ active: Bool) {
+    guard active || didCreateShared else {
+      return
+    }
+    shared.setPanelActive(active)
+  }
+
+  static func refreshVisibleEntriesIfNeeded() {
+    guard didCreateShared else {
+      return
+    }
+    shared.refreshVisibleEntries()
+  }
 
   private enum StoreEmissionPolicy {
     case visibleImmediate
@@ -361,7 +383,9 @@ final class InAppDebuggerNativeNetworkCapture {
   private var activeNativeWebSockets: [String: InAppDebuggerNativeURLSessionWebSocketState] = [:]
   private let liveUpdateThrottleMs = 120
 
-  private init() {}
+  private init() {
+    Self.didCreateShared = true
+  }
 
   func setEnabled(_ enabled: Bool) {
     lock.lock()

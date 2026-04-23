@@ -168,6 +168,28 @@ private func inAppDebuggerContainsASCIIKeyword(_ value: String, keyword: [UInt8]
 
 final class InAppDebuggerNativeLogCapture {
   static let shared = InAppDebuggerNativeLogCapture()
+  private static var didCreateShared = false
+
+  static func setEnabledIfNeeded(_ enabled: Bool) {
+    guard enabled || didCreateShared else {
+      return
+    }
+    shared.setEnabled(enabled)
+  }
+
+  static func setPanelActiveIfNeeded(_ active: Bool) {
+    guard active || didCreateShared else {
+      return
+    }
+    shared.setPanelActive(active)
+  }
+
+  static func shutdownIfNeeded() {
+    guard didCreateShared else {
+      return
+    }
+    shared.shutdown()
+  }
 
   private let queue = DispatchQueue(label: "expo-inapp-debugger.native-log-capture")
   private var stdoutPipe: Pipe?
@@ -192,7 +214,9 @@ final class InAppDebuggerNativeLogCapture {
   private let processIdentifier = ProcessInfo.processInfo.processIdentifier
   private var streamMetadataCache: [String: (context: String, details: String?)] = [:]
 
-  private init() {}
+  private init() {
+    Self.didCreateShared = true
+  }
 
   func prepare() {
     queue.sync {
@@ -1358,6 +1382,28 @@ private final class TrackedWebSocketState {
 
 final class InAppDebuggerNativeWebSocketCapture {
   static let shared = InAppDebuggerNativeWebSocketCapture()
+  private static var didCreateShared = false
+
+  static func setEnabledIfNeeded(_ enabled: Bool) {
+    guard enabled || didCreateShared else {
+      return
+    }
+    shared.setEnabled(enabled)
+  }
+
+  static func setPanelActiveIfNeeded(_ active: Bool) {
+    guard active || didCreateShared else {
+      return
+    }
+    shared.setPanelActive(active)
+  }
+
+  static func refreshVisibleEntriesIfNeeded() {
+    guard didCreateShared else {
+      return
+    }
+    shared.refreshVisibleEntries()
+  }
 
   private let lock = NSLock()
   private var enabled = false
@@ -1366,7 +1412,9 @@ final class InAppDebuggerNativeWebSocketCapture {
   private var pendingSockets: [String: PendingWebSocketMetadata] = [:]
   private let liveUpdateThrottleMs = 120
 
-  private init() {}
+  private init() {
+    Self.didCreateShared = true
+  }
 
   func setEnabled(_ enabled: Bool) {
     lock.lock()

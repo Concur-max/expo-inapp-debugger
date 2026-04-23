@@ -315,7 +315,7 @@ describe('DebugRuntime', () => {
     );
 
     expect(nativeModule.configure).toHaveBeenCalledTimes(1);
-    expect(nativeModule.show).toHaveBeenCalledTimes(1);
+    expect(nativeModule.show).not.toHaveBeenCalled();
     expect(nativeModule.hide).not.toHaveBeenCalled();
   });
 

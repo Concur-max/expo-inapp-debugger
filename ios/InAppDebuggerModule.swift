@@ -21,9 +21,9 @@ public final class InAppDebuggerModule: Module {
         return
       }
       if !config.enabled {
-        InAppDebuggerNativeLogCapture.shared.shutdown()
-        InAppDebuggerNativeNetworkCapture.shared.setEnabled(false)
-        InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
+        InAppDebuggerNativeLogCapture.shutdownIfNeeded()
+        InAppDebuggerNativeNetworkCapture.setEnabledIfNeeded(false)
+        InAppDebuggerNativeWebSocketCapture.setEnabledIfNeeded(false)
         InAppDebuggerOverlayManager.shared.shutdown()
         InAppDebuggerStore.shared.shutdown()
         inAppDebuggerNativeRuntimeActive = false
@@ -31,9 +31,9 @@ public final class InAppDebuggerModule: Module {
       }
 
       inAppDebuggerNativeRuntimeActive = true
-      InAppDebuggerNativeLogCapture.shared.setEnabled(config.enabled && config.enableNativeLogs)
-      InAppDebuggerNativeNetworkCapture.shared.setEnabled(config.enabled && config.enableNetworkTab && config.enableNativeNetwork)
-      InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
+      InAppDebuggerNativeLogCapture.setEnabledIfNeeded(config.enableNativeLogs)
+      InAppDebuggerNativeNetworkCapture.setEnabledIfNeeded(config.enableNetworkTab && config.enableNativeNetwork)
+      InAppDebuggerNativeWebSocketCapture.setEnabledIfNeeded(false)
       InAppDebuggerOverlayManager.shared.apply(config: config)
     }
 
@@ -81,9 +81,9 @@ public final class InAppDebuggerModule: Module {
       guard inAppDebuggerNativeRuntimeActive else {
         return
       }
-      InAppDebuggerNativeLogCapture.shared.shutdown()
-      InAppDebuggerNativeNetworkCapture.shared.setEnabled(false)
-      InAppDebuggerNativeWebSocketCapture.shared.setEnabled(false)
+      InAppDebuggerNativeLogCapture.shutdownIfNeeded()
+      InAppDebuggerNativeNetworkCapture.setEnabledIfNeeded(false)
+      InAppDebuggerNativeWebSocketCapture.setEnabledIfNeeded(false)
       InAppDebuggerOverlayManager.shared.shutdown()
       InAppDebuggerStore.shared.shutdown()
       inAppDebuggerNativeRuntimeActive = false
