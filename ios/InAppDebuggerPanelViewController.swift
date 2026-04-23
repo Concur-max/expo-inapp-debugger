@@ -3538,6 +3538,7 @@ private final class InAppDebuggerPaddedLabel: UILabel {
 
 final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private static let maxScrollableSectionHeight: CGFloat = 280
+  private static let responseBodyMaxScrollableSectionHeight: CGFloat = 420
   private static let asyncJSONBodyRenderThreshold = 24_000
   private static let jsonTreeRenderQueue = DispatchQueue(
     label: "expo.inappdebugger.network-detail.json-tree",
@@ -3838,7 +3839,10 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     let requestBodyTitle = "Request Body"
     let responseBodyTitle = "Response Body"
     let messagesTitle = "Messages"
-    if title == requestBodyTitle || title == responseBodyTitle || title == messagesTitle {
+    if title == responseBodyTitle {
+      return Self.responseBodyMaxScrollableSectionHeight
+    }
+    if title == requestBodyTitle || title == messagesTitle {
       return Self.maxScrollableSectionHeight
     }
     return nil
@@ -4507,6 +4511,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return makeLargeBodyPlaceholderSection(
         title: title,
         body: body,
+        bodyMaxHeight: bodyMaxHeight,
         message: "Rendering JSON tree..."
       )
     }
@@ -4553,7 +4558,12 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
   }
 
-  private func makeLargeBodyPlaceholderSection(title: String, body: String, message: String) -> UIView {
+  private func makeLargeBodyPlaceholderSection(
+    title: String,
+    body: String,
+    bodyMaxHeight: CGFloat?,
+    message: String
+  ) -> UIView {
     let bodyTextView = makeSectionBodyView(
       body: message,
       monospace: true,
@@ -4562,7 +4572,9 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     )
     bodyTextView.accessibilityLabel = title
     bodyTextView.translatesAutoresizingMaskIntoConstraints = false
-    bodyTextView.heightAnchor.constraint(lessThanOrEqualToConstant: Self.maxScrollableSectionHeight).isActive = true
+    bodyTextView.heightAnchor.constraint(
+      lessThanOrEqualToConstant: bodyMaxHeight ?? Self.maxScrollableSectionHeight
+    ).isActive = true
     return makeSection(title: title, bodyView: bodyTextView, copyText: body)
   }
 
@@ -5087,7 +5099,14 @@ private enum InAppDebuggerJSONTreeValue {
     case .object(let members):
       return members.isEmpty ? "{}" : "{...}"
     case .array(let values):
-      return values.isEmpty ? "[]" : "[...]"
+      guard !values.isEmpty else {
+        return "[]"
+      }
+      let countText = NumberFormatter.localizedString(
+        from: NSNumber(value: values.count),
+        number: .decimal
+      )
+      return "[ \(countText) \(values.count == 1 ? "item" : "items") ]"
     case .primitive(let literal):
       return literal
     }
@@ -5773,10 +5792,33 @@ private final class InAppDebuggerJSONTreeView: UIView, UIGestureRecognizerDelega
   }
 
   private func appendCompactToken(_ token: String, to result: NSMutableAttributedString) {
+    if appendArrayCountToken(token, to: result) {
+      return
+    }
+
     for character in token {
       let text = String(character)
       append(text, color: text == "." ? Self.guideColor : Self.punctuationColor, to: result)
     }
+  }
+
+  private func appendArrayCountToken(_ token: String, to result: NSMutableAttributedString) -> Bool {
+    guard token.hasPrefix("[ "), token.hasSuffix(" ]") else {
+      return false
+    }
+
+    let summary = String(token.dropFirst(2).dropLast(2))
+    guard let separatorIndex = summary.firstIndex(of: " ") else {
+      return false
+    }
+
+    append("[", color: Self.punctuationColor, to: result)
+    append(" ", color: Self.guideColor, to: result)
+    append(String(summary[..<separatorIndex]), color: Self.numberColor, to: result)
+    append(String(summary[separatorIndex...]), color: Self.guideColor, to: result)
+    append(" ", color: Self.guideColor, to: result)
+    append("]", color: Self.punctuationColor, to: result)
+    return true
   }
 
   private func primitiveColor(for token: String) -> UIColor {
