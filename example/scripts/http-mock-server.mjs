@@ -70,6 +70,51 @@ function sendJSON(response, statusCode, payload) {
   response.end(body);
 }
 
+function integerQueryParam(url, name, fallback, min, max) {
+  const value = Number(url.searchParams.get(name));
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function createLargeJsonPayload(request, url, startedAt) {
+  const count = integerQueryParam(url, 'count', 1500, 1, 10000);
+  const noteLength = integerQueryParam(url, 'noteLength', 96, 0, 2048);
+  const note = 'large-json-response-body-fixture '.repeat(Math.ceil(noteLength / 33)).slice(0, noteLength);
+  const items = Array.from({ length: count }, (_, index) => ({
+    index,
+    id: `large_item_${String(index).padStart(5, '0')}`,
+    sku: `sku-${index % 97}-${index}`,
+    quantity: (index % 9) + 1,
+    priceCents: 199 + (index % 37) * 83,
+    flags: {
+      hot: index % 7 === 0,
+      archived: index % 19 === 0,
+      channel: url.searchParams.get('channel') || 'unknown',
+    },
+    nested: {
+      batch: Math.floor(index / 100),
+      tags: [`tag-${index % 5}`, `bucket-${index % 13}`, `row-${index}`],
+      note,
+    },
+  }));
+
+  return {
+    ok: true,
+    type: 'mock.large-json',
+    serverTime: startedAt,
+    summary: {
+      ...requestSummary(request, url),
+      itemCount: count,
+      noteLength,
+      generatedBy: 'Array.from',
+    },
+    items,
+    message: 'Large JSON response body from local mock server',
+  };
+}
+
 function requestSummary(request, url) {
   return {
     method: request.method || 'GET',
@@ -104,6 +149,16 @@ const server = http.createServer(async (request, response) => {
       message: 'GET response body from local mock server',
     };
     console.log(`[http:mock] GET ${url.pathname}${url.search} -> 200`);
+    sendJSON(response, 200, payload);
+    return;
+  }
+
+  if (method === 'GET' && url.pathname === '/debug-http/large-json') {
+    await delay(120);
+    const payload = createLargeJsonPayload(request, url, startedAt);
+    console.log(
+      `[http:mock] GET ${url.pathname}${url.search} -> 200 items=${payload.summary.itemCount}`
+    );
     sendJSON(response, 200, payload);
     return;
   }

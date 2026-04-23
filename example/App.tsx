@@ -127,6 +127,25 @@ function formatJSONText(text: string) {
   }
 }
 
+function summarizeLargeJSONResponse(text: string) {
+  try {
+    const payload = JSON.parse(text) as {
+      type?: string;
+      summary?: { itemCount?: number; noteLength?: number };
+      items?: unknown[];
+    };
+    return [
+      `type: ${payload.type ?? '-'}`,
+      `items: ${payload.items?.length ?? payload.summary?.itemCount ?? '-'}`,
+      `noteLength: ${payload.summary?.noteLength ?? '-'}`,
+      `bytes: ${text.length}`,
+      '完整响应体请在调试器 Network 详情页查看 Response Body。',
+    ].join('\n');
+  } catch {
+    return `bytes: ${text.length}\n完整响应体请在调试器 Network 详情页查看 Response Body。`;
+  }
+}
+
 export default function App() {
   const [enabled, setEnabled] = React.useState(true);
   const [shouldCrash, setShouldCrash] = React.useState(false);
@@ -295,8 +314,55 @@ export default function App() {
     }
   }, [appendHttpEvent, httpBaseUrl, httpBody]);
 
+  const runLocalLargeFetchGet = React.useCallback(async () => {
+    const baseUrl = normalizeBaseUrl(httpBaseUrl);
+    if (!baseUrl) {
+      Alert.alert('HTTP 地址不能为空', '请先输入本地 mock server 地址。');
+      return;
+    }
+
+    const requestUrl = `${baseUrl}/debug-http/large-json?channel=fetch&demo=large-json&count=1500&noteLength=160&at=${Date.now()}`;
+    setHttpStatus('large fetching');
+    appendHttpEvent(`Large GET ${requestUrl}`);
+    if (isLoopbackUrl(requestUrl)) {
+      setHttpHint('如果你现在连的是 iPhone 真机，127.0.0.1 指向手机自己。请改成电脑局域网 IP。');
+    } else {
+      setHttpHint('正在请求本地超长 JSON 响应体接口...');
+    }
+
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'X-Debug-Demo': 'fetch-large-json',
+        },
+      });
+      const text = await response.text();
+      setHttpStatus(`LARGE ${response.status}`);
+      setHttpResponsePreview(summarizeLargeJSONResponse(text));
+      setHttpHint('超长 JSON 已完成。现在去 network 面板看这条 fetch 记录的完整 Response Body。');
+      appendHttpEvent(`Large GET ${response.status} bytes=${text.length}`);
+      console.info('本地超长 JSON 响应', {
+        status: response.status,
+        url: requestUrl,
+        bytes: text.length,
+      });
+    } catch (error) {
+      setHttpStatus('large get error');
+      setHttpResponsePreview(String(error));
+      if (isLoopbackUrl(requestUrl)) {
+        setHttpHint('超长 GET 失败：真机不能用 127.0.0.1，请改成电脑局域网 IP，并先启动 `pnpm http:mock`。');
+      } else {
+        setHttpHint('超长 GET 失败，请确认 `pnpm http:mock` 正在运行，并且手机和电脑在同一网络。');
+      }
+      appendHttpEvent('Large GET error');
+      console.error('本地超长 JSON 失败', error);
+    }
+  }, [appendHttpEvent, httpBaseUrl]);
+
   const queueNativeModuleRequest = React.useCallback(
-    async (method: 'GET' | 'POST') => {
+    async (method: 'GET' | 'POST', variant: 'normal' | 'large-json' = 'normal') => {
       const baseUrl = normalizeBaseUrl(httpBaseUrl);
       if (!baseUrl) {
         Alert.alert('HTTP 地址不能为空', '请先输入本地 mock server 地址。');
@@ -304,13 +370,21 @@ export default function App() {
       }
 
       const requestUrl =
-        method === 'GET'
+        variant === 'large-json'
+          ? `${baseUrl}/debug-http/large-json?channel=native-module&demo=large-json&count=1500&noteLength=160&at=${Date.now()}`
+          : method === 'GET'
           ? `${baseUrl}/debug-http/get?channel=native-module&demo=get&at=${Date.now()}`
           : `${baseUrl}/debug-http/post?channel=native-module&demo=post&at=${Date.now()}`;
       const requestBody = method === 'POST' ? httpBody.trim() || createDemoPostPayload() : undefined;
 
-      setHttpStatus(method === 'GET' ? 'native get queued' : 'native post queued');
-      appendHttpEvent(`Native ${method} queued ${requestUrl}`);
+      setHttpStatus(
+        variant === 'large-json'
+          ? 'native large queued'
+          : method === 'GET'
+            ? 'native get queued'
+            : 'native post queued'
+      );
+      appendHttpEvent(`Native ${variant === 'large-json' ? 'LARGE GET' : method} queued ${requestUrl}`);
       if (isLoopbackUrl(requestUrl)) {
         setHttpHint('如果你现在连的是 iPhone 真机，127.0.0.1 指向手机自己。请改成电脑局域网 IP。');
       } else {
@@ -324,7 +398,12 @@ export default function App() {
           body: requestBody,
           headers: {
             Accept: 'application/json',
-            'X-Debug-Demo': method === 'GET' ? 'native-module-get' : 'native-module-post',
+            'X-Debug-Demo':
+              variant === 'large-json'
+                ? 'native-module-large-json'
+                : method === 'GET'
+                  ? 'native-module-get'
+                  : 'native-module-post',
             ...(method === 'POST'
               ? {
                   'Content-Type': 'application/json; charset=utf-8',
@@ -334,7 +413,9 @@ export default function App() {
         });
         setHttpBody(requestBody ?? httpBody);
         setHttpResponsePreview(
-          method === 'GET'
+          variant === 'large-json'
+            ? '原生超长 GET 已从 example 本地 Expo module 发出。若抓包链路正常，network 面板里会出现一条 origin=native 的大 JSON 响应体记录。'
+            : method === 'GET'
             ? '原生 GET 已从 example 本地 Expo module 发出。若抓包链路正常，network 面板里会出现一条 origin=native 的 GET 记录。'
             : '原生 POST 已从 example 本地 Expo module 发出。若抓包链路正常，network 面板里会出现一条 origin=native 的 POST 记录，请求体就是当前输入框里的 JSON。'
         );
@@ -347,7 +428,7 @@ export default function App() {
         setHttpStatus('native queue error');
         setHttpResponsePreview(String(error));
         setHttpHint('原生请求没有成功排队。通常是本地 Expo module 还没 autolink，重新构建 example 即可。');
-        appendHttpEvent(`Native ${method} queue error`);
+        appendHttpEvent(`Native ${variant === 'large-json' ? 'LARGE GET' : method} queue error`);
         console.error('原生 Expo module 请求排队失败', error);
       }
     },
@@ -360,6 +441,10 @@ export default function App() {
 
   const runNativeModulePost = React.useCallback(() => {
     return queueNativeModuleRequest('POST');
+  }, [queueNativeModuleRequest]);
+
+  const runNativeModuleLargeGet = React.useCallback(() => {
+    return queueNativeModuleRequest('GET', 'large-json');
   }, [queueNativeModuleRequest]);
 
   const connectSocket = React.useCallback(() => {
@@ -547,8 +632,10 @@ export default function App() {
 
               <View style={styles.socketActionGrid}>
                 <ActionButton label="本地 GET(fetch)" onPress={runLocalFetchGet} />
+                <ActionButton label="超长 JSON(fetch)" onPress={runLocalLargeFetchGet} />
                 <ActionButton label="本地 POST(XHR)" onPress={runLocalXhrPost} />
                 <ActionButton label="原生 GET(Expo)" onPress={runNativeModuleGet} />
+                <ActionButton label="超长 JSON(原生)" onPress={runNativeModuleLargeGet} />
                 <ActionButton label="原生 POST(Expo)" onPress={runNativeModulePost} />
                 <ActionButton
                   label="重置 POST 请求体"

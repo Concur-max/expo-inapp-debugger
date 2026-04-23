@@ -37,7 +37,6 @@ type NetworkCollectorOptions = {
 };
 
 const MAX_WEBSOCKET_MESSAGE_HISTORY = 100;
-const MAX_HTTP_BODY_PREVIEW_LENGTH = 32_000;
 const MAX_WEBSOCKET_MESSAGE_PREVIEW_LENGTH = 4_000;
 
 class CappedStringBuffer {
@@ -87,13 +86,76 @@ type XHRShell = {
   responseHeaders?: HeaderMap;
 };
 
+type BlobLike = {
+  data?: {
+    blobId?: string;
+    offset?: number;
+    size?: number;
+  };
+  _data?: {
+    blobId?: string;
+    offset?: number;
+    size?: number;
+  };
+};
+
 function now() {
   return Date.now();
 }
 
-function safeStringify(value: unknown) {
+function safeHttpBodyPreview(value: unknown) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
   return formatDebugValue(value, {
-    maxLength: MAX_HTTP_BODY_PREVIEW_LENGTH,
+    maxLength: Number.MAX_SAFE_INTEGER,
+    maxStringLength: Number.MAX_SAFE_INTEGER,
+    maxObjectKeys: Number.MAX_SAFE_INTEGER,
+    maxArrayItems: Number.MAX_SAFE_INTEGER,
+    maxDepth: 32,
+  });
+}
+
+function isBlobLike(value: unknown): value is BlobLike {
+  if (typeof value !== 'object' || value == null) {
+    return false;
+  }
+
+  const candidate = value as BlobLike;
+  const data = candidate.data ?? candidate._data;
+  return typeof data?.blobId === 'string' && typeof data.size === 'number';
+}
+
+function shouldReadBlobResponseAsText(contentType: string | undefined, responseType: string) {
+  const normalizedContentType = contentType?.toLowerCase() ?? '';
+  return (
+    responseType === 'blob' &&
+    (normalizedContentType.includes('json') ||
+      normalizedContentType.startsWith('text/') ||
+      normalizedContentType.includes('xml') ||
+      normalizedContentType.includes('javascript'))
+  );
+}
+
+function readBlobAsText(blob: BlobLike): Promise<string> {
+  const FileReaderCtor = (globalThis as { FileReader?: new () => any }).FileReader;
+  if (!FileReaderCtor) {
+    return Promise.reject(new Error('FileReader is not available'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReaderCtor();
+    reader.onload = () => {
+      resolve(typeof reader.result === 'string' ? reader.result : String(reader.result ?? ''));
+    };
+    reader.onerror = () => {
+      reject(reader.error ?? new Error('Failed to read Blob response body'));
+    };
+    reader.onabort = () => {
+      reject(new Error('Blob response body read was aborted'));
+    };
+    reader.readAsText(blob);
   });
 }
 
@@ -230,7 +292,7 @@ export class NetworkCollector {
       const entry = this.getXHRRequest(xhr);
       if (!entry) return;
       const timestamp = now();
-      entry.requestBody = safeStringify(data);
+      entry.requestBody = safeHttpBodyPreview(data);
       entry.startedAt = timestamp;
       entry.updatedAt = timestamp;
       entry.timelineSequence = this.nextTimelineSequence();
@@ -263,7 +325,6 @@ export class NetworkCollector {
         if (!entry) return;
         const endedAt = now();
         entry.status = status;
-        entry.responseBody = safeStringify(response);
         entry.responseType = responseType;
         entry.url = responseURL || entry.url;
         entry.endedAt = endedAt;
@@ -277,7 +338,25 @@ export class NetworkCollector {
           'JSNetwork',
           `xhr complete id=${entry.id} status=${status} state=${entry.state} url=${entry.url}`
         );
+        const shouldReadBlobAsText =
+          isBlobLike(response) && shouldReadBlobResponseAsText(entry.responseContentType, responseType);
+        if (!shouldReadBlobAsText) {
+          entry.responseBody = safeHttpBodyPreview(response);
+        }
         this.emit(entry);
+        if (shouldReadBlobAsText) {
+          readBlobAsText(response)
+            .then((text) => {
+              entry.responseBody = text;
+              entry.updatedAt = now();
+              this.emit(entry);
+            })
+            .catch((error) => {
+              entry.responseBody = `[Blob response body unavailable: ${String(error)}]`;
+              entry.updatedAt = now();
+              this.emit(entry);
+            });
+        }
         this.releaseXHRRequest(entry.id);
       }
     );

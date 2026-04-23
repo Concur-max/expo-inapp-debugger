@@ -1,5 +1,9 @@
 type NetworkModule = typeof import('../src/internal/network');
 
+function flushPromises() {
+  return Promise.resolve().then(() => undefined);
+}
+
 type WebSocketCallbacks = {
   connect?: (url: string, protocols: string[] | null, options: unknown, socketId: number) => void;
   send?: (data: unknown, socketId: number) => void;
@@ -110,6 +114,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
   afterEach(() => {
     jest.resetModules();
     jest.clearAllMocks();
+    delete (globalThis as any).FileReader;
   });
 
   it('tracks Android websocket connections using lifecycle states', () => {
@@ -271,6 +276,79 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     expect(latestEntry()?.endedAt).toEqual(expect.any(Number));
   });
 
+  it('reads Blob JSON responses as full text instead of showing Blob metadata', async () => {
+    const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push({ ...entry });
+      },
+    });
+    const latestEntry = () => entries[entries.length - 1];
+    const largeJson = JSON.stringify({
+      ok: true,
+      items: Array.from({ length: 1500 }, (_, index) => ({ index, id: `item-${index}` })),
+    });
+
+    class MockFileReader {
+      result: string | null = null;
+      error: unknown = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+
+      readAsText(blob: any) {
+        Promise.resolve().then(() => {
+          this.result = blob.__text;
+          this.onload?.();
+        });
+      }
+    }
+    (globalThis as any).FileReader = MockFileReader;
+
+    collector.enable();
+
+    const xhr: Record<string, unknown> = {};
+    xhrCallbacks.open?.('GET', 'https://example.com/large-json', xhr);
+    xhrCallbacks.send?.(null, xhr);
+    xhrCallbacks.headerReceived?.(
+      'application/json',
+      largeJson.length,
+      `content-type: application/json\r\ncontent-length: ${largeJson.length}\r\n`,
+      xhr
+    );
+    xhrCallbacks.response?.(
+      200,
+      0,
+      {
+        __text: largeJson,
+        _data: {
+          size: largeJson.length,
+          offset: 0,
+          blobId: 'blob-large-json',
+          __collector: {},
+        },
+      },
+      'https://example.com/large-json',
+      'blob',
+      xhr
+    );
+
+    expect(latestEntry()).toMatchObject({
+      id: 'http_1',
+      status: 200,
+      responseType: 'blob',
+    });
+    expect(latestEntry()?.responseBody).toBeUndefined();
+
+    await flushPromises();
+
+    expect(latestEntry()?.responseBody).toBe(largeJson);
+    expect(String(latestEntry()?.responseBody)).not.toContain('blobId');
+    expect(String(latestEntry()?.responseBody)).not.toContain('...[truncated]');
+  });
+
   it('keeps XHR requests successful when a timeout is configured but the response is 200', () => {
     const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
     const entries: Array<Record<string, unknown>> = [];
@@ -299,7 +377,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     expect(latestEntry()?.error).toBeUndefined();
   });
 
-  it('caps oversized XHR previews and tolerates circular payloads', () => {
+  it('keeps full oversized XHR text bodies and tolerates circular payloads', () => {
     const { NetworkCollector, xhrCallbacks } = loadNetworkCollector();
     const entries: Array<Record<string, unknown>> = [];
     const collector = new NetworkCollector({
@@ -326,8 +404,8 @@ describe('NetworkCollector WebSocket lifecycle', () => {
       status: 200,
     });
     expect(String(latestEntry()?.requestBody)).toContain('"self":[Circular]');
-    expect(String(latestEntry()?.responseBody)).toContain('...[truncated]');
-    expect(String(latestEntry()?.responseBody).length).toBeLessThanOrEqual(32_000);
+    expect(String(latestEntry()?.responseBody)).not.toContain('...[truncated]');
+    expect(String(latestEntry()?.responseBody)).toHaveLength(40_000);
   });
 
   it('marks XHR requests with status 0 as errors', () => {

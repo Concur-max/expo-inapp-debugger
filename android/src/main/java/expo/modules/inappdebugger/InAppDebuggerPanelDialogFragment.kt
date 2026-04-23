@@ -262,6 +262,8 @@ private const val LOGS_SEARCH_PLACEHOLDER = "Search logs..."
 private const val NETWORK_SEARCH_PLACEHOLDER = "Search network requests..."
 private val APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
 private val NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
+private const val DETAIL_LAZY_TEXT_CHUNK_SIZE = 8_000
+private const val DETAIL_LAZY_TEXT_THRESHOLD = 24_000
 private val LOG_LIST_CHIP_TEXT_SIZE = 10.sp
 private val LOG_LIST_CHIP_LINE_HEIGHT = 12.sp
 private val LOG_LIST_META_TEXT_SIZE = 11.sp
@@ -1990,13 +1992,58 @@ private fun DetailSection(
         color = PanelColors.Text
       )
       Spacer(modifier = Modifier.height(6.dp))
+      if (contentMaxHeight != null && content.length > DETAIL_LAZY_TEXT_THRESHOLD) {
+        ChunkedDetailText(
+          content = content,
+          style = contentStyle,
+          monospace = monospace,
+          modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = contentMaxHeight)
+        )
+      } else {
+        SelectionContainer(modifier = Modifier.fillMaxWidth()) {
+          Text(
+            text = content,
+            style = contentStyle,
+            color = PanelColors.Text,
+            fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+            modifier = contentModifier
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ChunkedDetailText(
+  content: String,
+  style: androidx.compose.ui.text.TextStyle,
+  monospace: Boolean,
+  modifier: Modifier = Modifier
+) {
+  val chunkCount = remember(content) {
+    ((content.length + DETAIL_LAZY_TEXT_CHUNK_SIZE - 1) / DETAIL_LAZY_TEXT_CHUNK_SIZE).coerceAtLeast(1)
+  }
+
+  LazyColumn(
+    modifier = modifier,
+    verticalArrangement = Arrangement.spacedBy(0.dp)
+  ) {
+    items(
+      count = chunkCount,
+      key = { index -> index }
+    ) { index ->
+      val start = index * DETAIL_LAZY_TEXT_CHUNK_SIZE
+      val end = minOf(content.length, start + DETAIL_LAZY_TEXT_CHUNK_SIZE)
       SelectionContainer(modifier = Modifier.fillMaxWidth()) {
         Text(
-          text = content,
-          style = contentStyle,
+          text = content.substring(start, end),
+          style = style,
           color = PanelColors.Text,
           fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
-          modifier = contentModifier
+          modifier = Modifier.fillMaxWidth()
         )
       }
     }
@@ -3941,6 +3988,36 @@ private fun prettyJsonOrOriginal(raw: String): String {
 }
 
 private fun prettyJsonOrNull(raw: String): String? {
+  val candidates = ArrayList<String>(6)
+
+  fun addCandidate(candidate: String?) {
+    val trimmed = candidate?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    if (trimmed !in candidates) {
+      candidates += trimmed
+    }
+  }
+
+  fun addStructuredCandidates(candidate: String?) {
+    val trimmed = candidate?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    addCandidate(trimmed)
+    addCandidate(extractedStructuredJson(trimmed))
+  }
+
+  addStructuredCandidates(raw)
+  addStructuredCandidates(normalizedPlainText(raw))
+  addStructuredCandidates(decodedJsonStringLiteral(raw))
+  addStructuredCandidates(normalizedEscapedJsonContainer(raw))
+
+  for (candidate in candidates) {
+    formatTopLevelJsonOrNull(candidate)?.let { formatted ->
+      return formatted
+    }
+  }
+
+  return null
+}
+
+private fun formatTopLevelJsonOrNull(raw: String): String? {
   if (!hasJsonContainerBounds(raw) || !isValidJson(raw)) {
     return null
   }
@@ -3950,6 +4027,62 @@ private fun prettyJsonOrNull(raw: String): String? {
 private fun hasJsonContainerBounds(raw: String): Boolean {
   return (raw.startsWith("{") && raw.endsWith("}")) ||
     (raw.startsWith("[") && raw.endsWith("]"))
+}
+
+private fun extractedStructuredJson(raw: String): String? {
+  val objectIndex = raw.indexOf('{').takeIf { it >= 0 }
+  val arrayIndex = raw.indexOf('[').takeIf { it >= 0 }
+  val start = when {
+    objectIndex != null && arrayIndex != null -> minOf(objectIndex, arrayIndex)
+    objectIndex != null -> objectIndex
+    arrayIndex != null -> arrayIndex
+    else -> return null
+  }
+  return raw.substring(start).trim().takeIf { it.isNotEmpty() }
+}
+
+private fun normalizedPlainText(raw: String): String {
+  if (!raw.contains("\\n") && !raw.contains("\\r") && !raw.contains("\\t")) {
+    return raw
+  }
+  return raw
+    .replace("\\r\\n", "\n")
+    .replace("\\n", "\n")
+    .replace("\\r", "\n")
+    .replace("\\t", "  ")
+}
+
+private fun decodedJsonStringLiteral(raw: String): String? {
+  val trimmed = raw.trim()
+  if (!trimmed.startsWith("\"")) {
+    return null
+  }
+
+  return runCatching {
+    JsonReader(StringReader(trimmed)).use { reader ->
+      reader.setLenient(false)
+      if (reader.peek() != JsonToken.STRING) {
+        return@use null
+      }
+      val decoded = reader.nextString()
+      if (reader.peek() == JsonToken.END_DOCUMENT) {
+        decoded
+      } else {
+        null
+      }
+    }
+  }.getOrNull()
+}
+
+private fun normalizedEscapedJsonContainer(raw: String): String? {
+  if (!raw.contains("\\\"")) {
+    return null
+  }
+
+  val normalized = normalizedPlainText(raw)
+    .replace("\\\"", "\"")
+    .replace("\\/", "/")
+  return normalized.takeIf { it != raw }
 }
 
 private fun isValidJson(raw: String): Boolean {

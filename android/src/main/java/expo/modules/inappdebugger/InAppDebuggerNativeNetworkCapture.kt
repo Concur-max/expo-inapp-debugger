@@ -36,7 +36,7 @@ import okio.buffer
 
 private const val NATIVE_HTTP_ID_PREFIX = "native_http_"
 private const val NATIVE_WS_ID_PREFIX = "native_ws_"
-private const val MAX_BODY_PREVIEW_BYTES = 32_000L
+private const val MAX_BODY_PREVIEW_BYTES = Long.MAX_VALUE
 private const val MAX_BINARY_PREVIEW_BYTES = 48
 private const val MAX_EVENT_REDIRECTS = 8
 private const val MAX_EVENT_LINES = 48
@@ -1506,13 +1506,7 @@ private fun decodeBodyPreview(
     .replace("\r\n", "\n")
     .replace('\r', '\n')
 
-  val suffix =
-    if (declaredLength > data.size.toLong()) {
-      "\n...[truncated at ${formatPreviewByteCount(data.size.toLong())}]"
-    } else {
-      ""
-    }
-  return text + suffix
+  return text
 }
 
 private fun binaryPreview(data: ByteArray, declaredLength: Long): String {
