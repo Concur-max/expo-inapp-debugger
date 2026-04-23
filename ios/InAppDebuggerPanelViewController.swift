@@ -5246,7 +5246,7 @@ private struct InAppDebuggerJSONTreeParser {
   }
 }
 
-private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UITableViewDelegate {
+private final class InAppDebuggerJSONTreeView: UIView, UIGestureRecognizerDelegate {
   private enum TokenKind {
     case primitive
     case punctuation
@@ -5263,7 +5263,6 @@ private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UI
     let trailingComma: Bool
   }
 
-  private static let cellReuseIdentifier = "InAppDebuggerJSONTreeCell"
   private static let rowHeight: CGFloat = 24
   private static let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
   private static let punctuationColor = UIColor(red: 0.31, green: 0.35, blue: 0.42, alpha: 1)
@@ -5279,16 +5278,12 @@ private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UI
   private let onNodeExpansionChanged: (String, Bool) -> Void
   private var expandedNodeIDs: Set<String>
   private var rows: [RenderedRow] = []
-  private let tableView = UITableView(frame: .zero, style: .plain)
+  private var rowRanges: [NSRange] = []
+  private let textView = InAppDebuggerSelectableTextView()
   private var lastMeasuredContentHeight: CGFloat = 0
 
   override var intrinsicContentSize: CGSize {
-    let estimatedHeight = CGFloat(rows.count) * Self.rowHeight
-      + tableView.contentInset.top
-      + tableView.contentInset.bottom
-    let contentHeight = tableView.contentSize.height > 0
-      ? tableView.contentSize.height
-      : estimatedHeight
+    let contentHeight = measuredContentHeight()
     return CGSize(
       width: UIView.noIntrinsicMetric,
       height: ceil(min(max(contentHeight, Self.rowHeight), maxHeight))
@@ -5315,34 +5310,32 @@ private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UI
     layer.borderColor = UIColor(red: 0.83, green: 0.87, blue: 0.93, alpha: 1).cgColor
     clipsToBounds = true
 
-    tableView.backgroundColor = .clear
-    tableView.separatorStyle = .none
-    tableView.rowHeight = UITableView.automaticDimension
-    tableView.estimatedRowHeight = Self.rowHeight
-    tableView.dataSource = self
-    tableView.delegate = self
-    tableView.showsVerticalScrollIndicator = true
-    tableView.showsHorizontalScrollIndicator = false
-    tableView.delaysContentTouches = false
-    tableView.alwaysBounceVertical = false
-    tableView.contentInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
-    tableView.register(
-      InAppDebuggerJSONTreeCell.self,
-      forCellReuseIdentifier: Self.cellReuseIdentifier
-    )
+    textView.presentsSelectionMenuAutomatically = true
+    textView.textContainerInset = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 8)
+    textView.textContainer.lineBreakMode = .byCharWrapping
+    textView.textContainer.maximumNumberOfLines = 0
+    textView.showsVerticalScrollIndicator = true
+    textView.showsHorizontalScrollIndicator = false
+    textView.alwaysBounceVertical = false
 
-    addSubview(tableView)
-    tableView.translatesAutoresizingMaskIntoConstraints = false
+    let tapRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTextTap(_:)))
+    tapRecognizer.cancelsTouchesInView = false
+    tapRecognizer.delaysTouchesBegan = false
+    tapRecognizer.delaysTouchesEnded = false
+    tapRecognizer.delegate = self
+    textView.addGestureRecognizer(tapRecognizer)
+
+    addSubview(textView)
+    textView.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      tableView.topAnchor.constraint(equalTo: topAnchor),
-      tableView.leadingAnchor.constraint(equalTo: leadingAnchor),
-      tableView.trailingAnchor.constraint(equalTo: trailingAnchor),
-      tableView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      textView.topAnchor.constraint(equalTo: topAnchor),
+      textView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      textView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      textView.bottomAnchor.constraint(equalTo: bottomAnchor),
       heightAnchor.constraint(lessThanOrEqualToConstant: maxHeight),
     ])
 
     rebuildRows()
-    tableView.reloadData()
   }
 
   required init?(coder: NSCoder) {
@@ -5351,56 +5344,17 @@ private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UI
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    let contentHeight = tableView.contentSize.height
+    let contentHeight = measuredContentHeight()
     guard abs(contentHeight - lastMeasuredContentHeight) > 0.5 else {
       return
     }
     lastMeasuredContentHeight = contentHeight
-    tableView.isScrollEnabled = contentHeight > maxHeight
+    updateScrollState(contentHeight: contentHeight)
     invalidateIntrinsicContentSize()
   }
 
-  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    rows.count
-  }
-
-  func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-    guard indexPath.row < rows.count,
-          let cell = tableView.dequeueReusableCell(
-            withIdentifier: Self.cellReuseIdentifier,
-            for: indexPath
-          ) as? InAppDebuggerJSONTreeCell else {
-      return UITableViewCell()
-    }
-
-    let row = rows[indexPath.row]
-    cell.configure(
-      depth: row.depth,
-      isExpandable: row.disclosureExpanded != nil,
-      attributedText: attributedLine(for: row)
-    )
-    return cell
-  }
-
-  func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
-    guard indexPath.row < rows.count else {
-      return false
-    }
-    return rows[indexPath.row].disclosureExpanded != nil
-  }
-
-  func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-    tableView.deselectRow(at: indexPath, animated: true)
-    guard indexPath.row < rows.count,
-          let nodeID = rows[indexPath.row].nodeID,
-          rows[indexPath.row].disclosureExpanded != nil else {
-      return
-    }
-    toggleNode(nodeID)
-  }
-
   private func toggleNode(_ nodeID: String) {
-    let previousOffset = tableView.contentOffset
+    let previousOffset = textView.contentOffset
     let isExpanded: Bool
     if expandedNodeIDs.contains(nodeID) {
       expandedNodeIDs.remove(nodeID)
@@ -5413,34 +5367,117 @@ private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UI
     rebuildRows()
     onNodeExpansionChanged(nodeID, isExpanded)
     UIView.performWithoutAnimation {
-      tableView.reloadData()
-      tableView.layoutIfNeeded()
+      textView.layoutIfNeeded()
     }
     invalidateIntrinsicContentSize()
-    restoreTableOffset(previousOffset)
+    restoreTextOffset(previousOffset)
   }
 
-  private func restoreTableOffset(_ previousOffset: CGPoint) {
-    let minY = -tableView.adjustedContentInset.top
+  private func restoreTextOffset(_ previousOffset: CGPoint) {
+    let minY = -textView.adjustedContentInset.top
     let maxY = max(
       minY,
-      tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
+      measuredContentHeight() - textView.bounds.height + textView.adjustedContentInset.bottom
     )
     let restoredY = min(max(previousOffset.y, minY), maxY)
-    tableView.setContentOffset(CGPoint(x: previousOffset.x, y: restoredY), animated: false)
+    textView.setContentOffset(CGPoint(x: previousOffset.x, y: restoredY), animated: false)
   }
 
   private func rebuildRows() {
     rows.removeAll(keepingCapacity: true)
     appendValue(root, key: nil, depth: 0, path: "root", trailingComma: false)
-    let estimatedHeight = CGFloat(rows.count) * Self.rowHeight
-      + tableView.contentInset.top
-      + tableView.contentInset.bottom
-    let contentHeight = tableView.contentSize.height > 0
-      ? tableView.contentSize.height
-      : estimatedHeight
-    tableView.isScrollEnabled = contentHeight > maxHeight
+    rebuildAttributedText()
+    updateScrollState(contentHeight: measuredContentHeight())
     invalidateIntrinsicContentSize()
+  }
+
+  private func rebuildAttributedText() {
+    let result = NSMutableAttributedString()
+    rowRanges.removeAll(keepingCapacity: true)
+
+    for (index, row) in rows.enumerated() {
+      let start = result.length
+      if row.depth > 0 {
+        append(String(repeating: "  ", count: row.depth), color: Self.punctuationColor, to: result)
+      }
+      result.append(attributedLine(for: row))
+      if index < rows.count - 1 {
+        append("\n", color: Self.punctuationColor, to: result)
+      }
+      rowRanges.append(NSRange(location: start, length: max(1, result.length - start)))
+    }
+
+    textView.attributedText = result
+    textView.overrideCopyText = result.string
+  }
+
+  private func measuredContentHeight() -> CGFloat {
+    let fallbackWidth = UIScreen.main.bounds.width - 52
+    let width = textView.bounds.width > 0 ? textView.bounds.width : fallbackWidth
+    let size = textView.sizeThatFits(
+      CGSize(width: max(1, width), height: CGFloat.greatestFiniteMagnitude)
+    )
+    return ceil(max(Self.rowHeight, size.height))
+  }
+
+  private func updateScrollState(contentHeight: CGFloat) {
+    textView.isScrollEnabled = contentHeight > maxHeight
+  }
+
+  @objc private func handleTextTap(_ recognizer: UITapGestureRecognizer) {
+    guard recognizer.state == .ended,
+          textView.selectedRange.length == 0,
+          let rowIndex = rowIndex(at: recognizer.location(in: textView)),
+          rowIndex < rows.count,
+          let nodeID = rows[rowIndex].nodeID,
+          rows[rowIndex].disclosureExpanded != nil else {
+      return
+    }
+    toggleNode(nodeID)
+  }
+
+  func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer,
+    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+  ) -> Bool {
+    true
+  }
+
+  private func rowIndex(at location: CGPoint) -> Int? {
+    guard !rowRanges.isEmpty else {
+      return nil
+    }
+
+    if let position = textView.closestPosition(to: location) {
+      let characterIndex = textView.offset(from: textView.beginningOfDocument, to: position)
+      if let rowIndex = rowIndex(containing: characterIndex) {
+        return rowIndex
+      }
+    }
+
+    var textContainerLocation = location
+    textContainerLocation.x -= textView.textContainerInset.left
+    textContainerLocation.y -= textView.textContainerInset.top
+
+    textView.layoutManager.ensureLayout(for: textView.textContainer)
+    let usedRect = textView.layoutManager.usedRect(for: textView.textContainer)
+    guard textContainerLocation.y >= usedRect.minY,
+          textContainerLocation.y <= usedRect.maxY else {
+      return nil
+    }
+
+    let glyphIndex = textView.layoutManager.glyphIndex(
+      for: textContainerLocation,
+      in: textView.textContainer
+    )
+    let characterIndex = textView.layoutManager.characterIndexForGlyph(at: glyphIndex)
+    return rowIndex(containing: characterIndex)
+  }
+
+  private func rowIndex(containing characterIndex: Int) -> Int? {
+    return rowRanges.firstIndex { range in
+      characterIndex >= range.location && characterIndex < range.location + range.length
+    }
   }
 
   private func appendValue(
@@ -5622,72 +5659,6 @@ private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UI
         ]
       )
     )
-  }
-}
-
-private final class InAppDebuggerJSONTreeCell: UITableViewCell {
-  private static let indentationWidth: CGFloat = 14
-  private static let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-
-  private let indentationView = UIView()
-  private let codeLabel = UILabel()
-  private var indentationWidthConstraint: NSLayoutConstraint?
-
-  override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-    super.init(style: style, reuseIdentifier: reuseIdentifier)
-
-    backgroundColor = .clear
-    contentView.backgroundColor = .clear
-    selectionStyle = .default
-
-    let selectedView = UIView()
-    selectedView.backgroundColor = UIColor(red: 0.90, green: 0.94, blue: 1.00, alpha: 1)
-    selectedBackgroundView = selectedView
-
-    codeLabel.numberOfLines = 0
-    codeLabel.lineBreakMode = .byCharWrapping
-    codeLabel.font = Self.codeFont
-    codeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-    contentView.addSubview(indentationView)
-    contentView.addSubview(codeLabel)
-    indentationView.translatesAutoresizingMaskIntoConstraints = false
-    codeLabel.translatesAutoresizingMaskIntoConstraints = false
-
-    let indentationWidthConstraint = indentationView.widthAnchor.constraint(equalToConstant: 0)
-    self.indentationWidthConstraint = indentationWidthConstraint
-
-    NSLayoutConstraint.activate([
-      indentationView.topAnchor.constraint(equalTo: contentView.topAnchor),
-      indentationView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-      indentationView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-      indentationWidthConstraint,
-
-      codeLabel.leadingAnchor.constraint(equalTo: indentationView.trailingAnchor, constant: 4),
-      codeLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
-      codeLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 3),
-      codeLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -3),
-    ])
-  }
-
-  required init?(coder: NSCoder) {
-    nil
-  }
-
-  func configure(
-    depth: Int,
-    isExpandable: Bool,
-    attributedText: NSAttributedString
-  ) {
-    indentationWidthConstraint?.constant = CGFloat(depth) * Self.indentationWidth
-    if isExpandable {
-      accessibilityTraits.insert(.button)
-      selectionStyle = .default
-    } else {
-      accessibilityTraits.remove(.button)
-      selectionStyle = .none
-    }
-    codeLabel.attributedText = attributedText
   }
 }
 
