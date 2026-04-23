@@ -3571,6 +3571,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private let scrollView = UIScrollView()
   private let stack = UIStackView()
   private var expandedJSONNodeIDs: Set<String> = []
+  private var jsonTreePayloadCache: [String: (signature: String, payload: JSONTreePayload?)] = [:]
   private var notificationObserver: NSObjectProtocol?
   private var scheduledReloadWorkItem: DispatchWorkItem?
 
@@ -3653,10 +3654,11 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
       return
     }
     entry = latestEntry
-    renderSections()
+    renderSections(preservingScrollOffset: true)
   }
 
-  private func renderSections() {
+  private func renderSections(preservingScrollOffset: Bool = false) {
+    let previousOffset = scrollView.contentOffset
     for arrangedSubview in stack.arrangedSubviews {
       stack.removeArrangedSubview(arrangedSubview)
       arrangedSubview.removeFromSuperview()
@@ -3696,6 +3698,20 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     if let error = entry.error, !error.isEmpty {
       stack.addArrangedSubview(makeSection(title: "Error", body: error, monospace: true))
     }
+
+    guard preservingScrollOffset else {
+      return
+    }
+    view.layoutIfNeeded()
+    let minY = -scrollView.adjustedContentInset.top
+    let maxY = max(
+      minY,
+      scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    )
+    scrollView.setContentOffset(
+      CGPoint(x: previousOffset.x, y: min(max(previousOffset.y, minY), maxY)),
+      animated: false
+    )
   }
 
   private func httpSections() -> [(title: String, body: String, monospace: Bool)] {
@@ -4245,6 +4261,17 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return nil
   }
 
+  private func cachedJSONTreePayload(for title: String, body: String) -> JSONTreePayload? {
+    let signature = "\(body.count):\(body.hashValue)"
+    if let cached = jsonTreePayloadCache[title], cached.signature == signature {
+      return cached.payload
+    }
+
+    let payload = jsonTreePayload(from: body)
+    jsonTreePayloadCache[title] = (signature: signature, payload: payload)
+    return payload
+  }
+
   private func appendJSONCandidate(_ candidate: String, to candidates: inout [String]) {
     let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty, !candidates.contains(trimmed) else {
@@ -4469,61 +4496,27 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     body: String,
     bodyMaxHeight: CGFloat?
   ) -> UIView? {
-    guard let payload = jsonTreePayload(from: body) else {
+    guard let payload = cachedJSONTreePayload(for: title, body: body) else {
       return nil
     }
 
     let treeView = InAppDebuggerJSONTreeView(
       root: payload.root,
       nodeIDPrefix: "\(entryId):\(title)",
-      expandedNodeIDs: expandedJSONNodeIDs
-    ) { [weak self] nodeID in
-      guard let self else {
-        return
-      }
-      if self.expandedJSONNodeIDs.contains(nodeID) {
-        self.expandedJSONNodeIDs.remove(nodeID)
+      expandedNodeIDs: expandedJSONNodeIDs,
+      maxHeight: bodyMaxHeight ?? Self.maxScrollableSectionHeight
+    ) { [weak self] nodeID, isExpanded in
+      if isExpanded {
+        self?.expandedJSONNodeIDs.insert(nodeID)
       } else {
-        self.expandedJSONNodeIDs.insert(nodeID)
+        self?.expandedJSONNodeIDs.remove(nodeID)
       }
-      self.renderSections()
     }
-
-    let scrollContentView = UIView()
-    let scrollView = InAppDebuggerIntrinsicScrollView()
-    scrollView.maxHeight = bodyMaxHeight ?? Self.maxScrollableSectionHeight
-    scrollView.alwaysBounceVertical = true
-    scrollView.showsVerticalScrollIndicator = true
-    scrollView.showsHorizontalScrollIndicator = false
-    scrollView.delaysContentTouches = false
-    scrollView.clipsToBounds = true
-    scrollView.backgroundColor = UIColor(red: 0.985, green: 0.99, blue: 1.00, alpha: 1)
-    scrollView.layer.cornerRadius = 8
-    scrollView.layer.borderWidth = 1
-    scrollView.layer.borderColor = UIColor(red: 0.80, green: 0.87, blue: 1.00, alpha: 1).cgColor
-    scrollView.addSubview(scrollContentView)
-    scrollContentView.addSubview(treeView)
-    scrollView.translatesAutoresizingMaskIntoConstraints = false
-    scrollContentView.translatesAutoresizingMaskIntoConstraints = false
-    treeView.translatesAutoresizingMaskIntoConstraints = false
-
-    NSLayoutConstraint.activate([
-      scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: bodyMaxHeight ?? Self.maxScrollableSectionHeight),
-      scrollContentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-      scrollContentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
-      scrollContentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
-      scrollContentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-      scrollContentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
-
-      treeView.topAnchor.constraint(equalTo: scrollContentView.topAnchor, constant: 12),
-      treeView.leadingAnchor.constraint(equalTo: scrollContentView.leadingAnchor, constant: 12),
-      treeView.trailingAnchor.constraint(equalTo: scrollContentView.trailingAnchor, constant: -12),
-      treeView.bottomAnchor.constraint(equalTo: scrollContentView.bottomAnchor, constant: -12),
-    ])
+    treeView.accessibilityLabel = title
 
     return makeSection(
       title: title,
-      bodyView: scrollView,
+      bodyView: treeView,
       copyText: payload.copyText
     )
   }
@@ -5253,61 +5246,204 @@ private struct InAppDebuggerJSONTreeParser {
   }
 }
 
-private final class InAppDebuggerJSONTreeView: UIView {
-  private struct LineSegment {
-    let text: String
-    let color: UIColor
+private final class InAppDebuggerJSONTreeView: UIView, UITableViewDataSource, UITableViewDelegate {
+  private enum TokenKind {
+    case primitive
+    case punctuation
+    case compact
   }
 
+  private struct RenderedRow {
+    let nodeID: String?
+    let disclosureExpanded: Bool?
+    let depth: Int
+    let key: String?
+    let token: String
+    let tokenKind: TokenKind
+    let trailingComma: Bool
+  }
+
+  private static let cellReuseIdentifier = "InAppDebuggerJSONTreeCell"
+  private static let rowHeight: CGFloat = 24
   private static let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-  private static let punctuationColor = UIColor(red: 0.24, green: 0.30, blue: 0.39, alpha: 1)
-  private static let keyColor = UIColor(red: 0.75, green: 0.23, blue: 0.16, alpha: 1)
-  private static let valueColor = UIColor(red: 0.66, green: 0.35, blue: 0.08, alpha: 1)
-  private static let guideColor = UIColor(red: 0.49, green: 0.59, blue: 0.73, alpha: 1)
-  private static let indentationWidth: CGFloat = 16
-  private static let disclosureWidth: CGFloat = 18
+  private static let punctuationColor = UIColor(red: 0.31, green: 0.35, blue: 0.42, alpha: 1)
+  private static let keyColor = UIColor(red: 0.35, green: 0.25, blue: 0.69, alpha: 1)
+  private static let stringColor = UIColor(red: 0.12, green: 0.43, blue: 0.26, alpha: 1)
+  private static let numberColor = UIColor(red: 0.04, green: 0.35, blue: 0.68, alpha: 1)
+  private static let keywordColor = UIColor(red: 0.68, green: 0.24, blue: 0.18, alpha: 1)
+  private static let guideColor = UIColor(red: 0.50, green: 0.56, blue: 0.66, alpha: 1)
 
   private let root: InAppDebuggerJSONTreeValue
   private let nodeIDPrefix: String
-  private let expandedNodeIDs: Set<String>
-  private let onToggle: (String) -> Void
-  private let stack = UIStackView()
+  private let maxHeight: CGFloat
+  private let onNodeExpansionChanged: (String, Bool) -> Void
+  private var expandedNodeIDs: Set<String>
+  private var rows: [RenderedRow] = []
+  private let tableView = UITableView(frame: .zero, style: .plain)
+  private var lastMeasuredContentHeight: CGFloat = 0
+
+  override var intrinsicContentSize: CGSize {
+    let estimatedHeight = CGFloat(rows.count) * Self.rowHeight
+      + tableView.contentInset.top
+      + tableView.contentInset.bottom
+    let contentHeight = tableView.contentSize.height > 0
+      ? tableView.contentSize.height
+      : estimatedHeight
+    return CGSize(
+      width: UIView.noIntrinsicMetric,
+      height: ceil(min(max(contentHeight, Self.rowHeight), maxHeight))
+    )
+  }
 
   init(
     root: InAppDebuggerJSONTreeValue,
     nodeIDPrefix: String,
     expandedNodeIDs: Set<String>,
-    onToggle: @escaping (String) -> Void
+    maxHeight: CGFloat,
+    onNodeExpansionChanged: @escaping (String, Bool) -> Void
   ) {
     self.root = root
     self.nodeIDPrefix = nodeIDPrefix
     self.expandedNodeIDs = expandedNodeIDs
-    self.onToggle = onToggle
+    self.maxHeight = maxHeight
+    self.onNodeExpansionChanged = onNodeExpansionChanged
     super.init(frame: .zero)
 
-    stack.axis = .vertical
-    stack.spacing = 2
-    addSubview(stack)
-    stack.translatesAutoresizingMaskIntoConstraints = false
+    backgroundColor = UIColor(red: 0.985, green: 0.988, blue: 0.994, alpha: 1)
+    layer.cornerRadius = 8
+    layer.borderWidth = 1
+    layer.borderColor = UIColor(red: 0.83, green: 0.87, blue: 0.93, alpha: 1).cgColor
+    clipsToBounds = true
+
+    tableView.backgroundColor = .clear
+    tableView.separatorStyle = .none
+    tableView.rowHeight = UITableView.automaticDimension
+    tableView.estimatedRowHeight = Self.rowHeight
+    tableView.dataSource = self
+    tableView.delegate = self
+    tableView.showsVerticalScrollIndicator = true
+    tableView.showsHorizontalScrollIndicator = false
+    tableView.delaysContentTouches = false
+    tableView.alwaysBounceVertical = false
+    tableView.contentInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+    tableView.register(
+      InAppDebuggerJSONTreeCell.self,
+      forCellReuseIdentifier: Self.cellReuseIdentifier
+    )
+
+    addSubview(tableView)
+    tableView.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      stack.topAnchor.constraint(equalTo: topAnchor),
-      stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-      stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-      stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+      tableView.topAnchor.constraint(equalTo: topAnchor),
+      tableView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      tableView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      tableView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      heightAnchor.constraint(lessThanOrEqualToConstant: maxHeight),
     ])
 
-    render()
+    rebuildRows()
+    tableView.reloadData()
   }
 
   required init?(coder: NSCoder) {
     nil
   }
 
-  private func render() {
-    renderValue(root, key: nil, depth: 0, path: "root", trailingComma: false)
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let contentHeight = tableView.contentSize.height
+    guard abs(contentHeight - lastMeasuredContentHeight) > 0.5 else {
+      return
+    }
+    lastMeasuredContentHeight = contentHeight
+    tableView.isScrollEnabled = contentHeight > maxHeight
+    invalidateIntrinsicContentSize()
   }
 
-  private func renderValue(
+  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+    rows.count
+  }
+
+  func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    guard indexPath.row < rows.count,
+          let cell = tableView.dequeueReusableCell(
+            withIdentifier: Self.cellReuseIdentifier,
+            for: indexPath
+          ) as? InAppDebuggerJSONTreeCell else {
+      return UITableViewCell()
+    }
+
+    let row = rows[indexPath.row]
+    cell.configure(
+      depth: row.depth,
+      isExpandable: row.disclosureExpanded != nil,
+      attributedText: attributedLine(for: row)
+    )
+    return cell
+  }
+
+  func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
+    guard indexPath.row < rows.count else {
+      return false
+    }
+    return rows[indexPath.row].disclosureExpanded != nil
+  }
+
+  func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    tableView.deselectRow(at: indexPath, animated: true)
+    guard indexPath.row < rows.count,
+          let nodeID = rows[indexPath.row].nodeID,
+          rows[indexPath.row].disclosureExpanded != nil else {
+      return
+    }
+    toggleNode(nodeID)
+  }
+
+  private func toggleNode(_ nodeID: String) {
+    let previousOffset = tableView.contentOffset
+    let isExpanded: Bool
+    if expandedNodeIDs.contains(nodeID) {
+      expandedNodeIDs.remove(nodeID)
+      isExpanded = false
+    } else {
+      expandedNodeIDs.insert(nodeID)
+      isExpanded = true
+    }
+
+    rebuildRows()
+    onNodeExpansionChanged(nodeID, isExpanded)
+    UIView.performWithoutAnimation {
+      tableView.reloadData()
+      tableView.layoutIfNeeded()
+    }
+    invalidateIntrinsicContentSize()
+    restoreTableOffset(previousOffset)
+  }
+
+  private func restoreTableOffset(_ previousOffset: CGPoint) {
+    let minY = -tableView.adjustedContentInset.top
+    let maxY = max(
+      minY,
+      tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
+    )
+    let restoredY = min(max(previousOffset.y, minY), maxY)
+    tableView.setContentOffset(CGPoint(x: previousOffset.x, y: restoredY), animated: false)
+  }
+
+  private func rebuildRows() {
+    rows.removeAll(keepingCapacity: true)
+    appendValue(root, key: nil, depth: 0, path: "root", trailingComma: false)
+    let estimatedHeight = CGFloat(rows.count) * Self.rowHeight
+      + tableView.contentInset.top
+      + tableView.contentInset.bottom
+    let contentHeight = tableView.contentSize.height > 0
+      ? tableView.contentSize.height
+      : estimatedHeight
+    tableView.isScrollEnabled = contentHeight > maxHeight
+    invalidateIntrinsicContentSize()
+  }
+
+  private func appendValue(
     _ value: InAppDebuggerJSONTreeValue,
     key: String?,
     depth: Int,
@@ -5316,16 +5452,20 @@ private final class InAppDebuggerJSONTreeView: UIView {
   ) {
     switch value {
     case .primitive(let literal):
-      addLine(
-        key: key,
-        valueSegments: [LineSegment(text: literal, color: Self.valueColor)],
-        depth: depth,
-        trailingComma: trailingComma,
-        disclosure: nil
+      rows.append(
+        RenderedRow(
+          nodeID: nil,
+          disclosureExpanded: nil,
+          depth: depth,
+          key: key,
+          token: literal,
+          tokenKind: .primitive,
+          trailingComma: trailingComma
+        )
       )
 
     case .object(let members):
-      renderContainer(
+      appendContainer(
         value: value,
         key: key,
         depth: depth,
@@ -5333,7 +5473,7 @@ private final class InAppDebuggerJSONTreeView: UIView {
         trailingComma: trailingComma
       ) {
         for (index, member) in members.enumerated() {
-          renderValue(
+          appendValue(
             member.value,
             key: member.key,
             depth: depth + 1,
@@ -5344,7 +5484,7 @@ private final class InAppDebuggerJSONTreeView: UIView {
       }
 
     case .array(let values):
-      renderContainer(
+      appendContainer(
         value: value,
         key: key,
         depth: depth,
@@ -5352,7 +5492,7 @@ private final class InAppDebuggerJSONTreeView: UIView {
         trailingComma: trailingComma
       ) {
         for (index, item) in values.enumerated() {
-          renderValue(
+          appendValue(
             item,
             key: nil,
             depth: depth + 1,
@@ -5364,157 +5504,112 @@ private final class InAppDebuggerJSONTreeView: UIView {
     }
   }
 
-  private func renderContainer(
+  private func appendContainer(
     value: InAppDebuggerJSONTreeValue,
     key: String?,
     depth: Int,
     path: String,
     trailingComma: Bool,
-    renderChildren: () -> Void
+    appendChildren: () -> Void
   ) {
     guard value.isExpandable else {
-      addLine(
-        key: key,
-        valueSegments: tokenSegments(value.compactToken),
-        depth: depth,
-        trailingComma: trailingComma,
-        disclosure: nil
+      rows.append(
+        RenderedRow(
+          nodeID: nil,
+          disclosureExpanded: nil,
+          depth: depth,
+          key: key,
+          token: value.compactToken,
+          tokenKind: .punctuation,
+          trailingComma: trailingComma
+        )
       )
       return
     }
 
     let nodeID = "\(nodeIDPrefix):\(path)"
     let expanded = depth == 0 || expandedNodeIDs.contains(nodeID)
-    let disclosure = depth == 0
-      ? nil
-      : (nodeID: nodeID, expanded: expanded)
+    let disclosureExpanded = depth == 0 ? nil : expanded
 
     if !expanded {
-      addLine(
-        key: key,
-        valueSegments: tokenSegments(value.compactToken),
-        depth: depth,
-        trailingComma: trailingComma,
-        disclosure: disclosure
+      rows.append(
+        RenderedRow(
+          nodeID: nodeID,
+          disclosureExpanded: disclosureExpanded,
+          depth: depth,
+          key: key,
+          token: value.compactToken,
+          tokenKind: .compact,
+          trailingComma: trailingComma
+        )
       )
       return
     }
 
-    addLine(
-      key: key,
-      valueSegments: tokenSegments(value.openingToken),
-      depth: depth,
-      trailingComma: false,
-      disclosure: disclosure
+    rows.append(
+      RenderedRow(
+        nodeID: nodeID,
+        disclosureExpanded: disclosureExpanded,
+        depth: depth,
+        key: key,
+        token: value.openingToken,
+        tokenKind: .punctuation,
+        trailingComma: false
+      )
     )
-    renderChildren()
-    addLine(
-      key: nil,
-      valueSegments: tokenSegments(value.closingToken),
-      depth: depth,
-      trailingComma: trailingComma,
-      disclosure: nil
+    appendChildren()
+    rows.append(
+      RenderedRow(
+        nodeID: nil,
+        disclosureExpanded: nil,
+        depth: depth,
+        key: nil,
+        token: value.closingToken,
+        tokenKind: .punctuation,
+        trailingComma: trailingComma
+      )
     )
   }
 
-  private func tokenSegments(_ token: String) -> [LineSegment] {
-    guard token.contains("...") else {
-      return [LineSegment(text: token, color: Self.punctuationColor)]
-    }
-
-    var segments: [LineSegment] = []
-    for character in token {
-      let text = String(character)
-      segments.append(
-        LineSegment(
-          text: text,
-          color: text == "." ? Self.guideColor : Self.punctuationColor
-        )
-      )
-    }
-    return segments
-  }
-
-  private func addLine(
-    key: String?,
-    valueSegments: [LineSegment],
-    depth: Int,
-    trailingComma: Bool,
-    disclosure: (nodeID: String, expanded: Bool)?
-  ) {
-    let row = UIStackView()
-    row.axis = .horizontal
-    row.alignment = .top
-    row.spacing = 2
-    row.isLayoutMarginsRelativeArrangement = true
-    row.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0)
-
-    let indentationView = UIView()
-    indentationView.translatesAutoresizingMaskIntoConstraints = false
-    indentationView.widthAnchor.constraint(equalToConstant: CGFloat(depth) * Self.indentationWidth).isActive = true
-    row.addArrangedSubview(indentationView)
-
-    if let disclosure {
-      let button = UIButton(type: .system)
-      button.tintColor = Self.guideColor
-      button.accessibilityLabel = disclosure.expanded ? "Collapse JSON node" : "Expand JSON node"
-      button.setImage(
-        UIImage(systemName: disclosure.expanded ? "chevron.down" : "chevron.right"),
-        for: .normal
-      )
-      button.addAction(
-        UIAction { [onToggle] _ in
-          onToggle(disclosure.nodeID)
-        },
-        for: .touchUpInside
-      )
-      button.translatesAutoresizingMaskIntoConstraints = false
-      NSLayoutConstraint.activate([
-        button.widthAnchor.constraint(equalToConstant: Self.disclosureWidth),
-        button.heightAnchor.constraint(equalToConstant: 18),
-      ])
-      row.addArrangedSubview(button)
-    } else {
-      let disclosureSpacer = UIView()
-      disclosureSpacer.translatesAutoresizingMaskIntoConstraints = false
-      disclosureSpacer.widthAnchor.constraint(equalToConstant: Self.disclosureWidth).isActive = true
-      row.addArrangedSubview(disclosureSpacer)
-    }
-
-    let label = UILabel()
-    label.numberOfLines = 0
-    label.lineBreakMode = .byCharWrapping
-    label.attributedText = attributedLine(
-      key: key,
-      valueSegments: valueSegments,
-      trailingComma: trailingComma
-    )
-    label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    row.addArrangedSubview(label)
-    stack.addArrangedSubview(row)
-  }
-
-  private func attributedLine(
-    key: String?,
-    valueSegments: [LineSegment],
-    trailingComma: Bool
-  ) -> NSAttributedString {
+  private func attributedLine(for row: RenderedRow) -> NSAttributedString {
     let result = NSMutableAttributedString()
 
-    if let key {
+    if let key = row.key {
       append(key, color: Self.keyColor, to: result)
       append(": ", color: Self.punctuationColor, to: result)
     }
 
-    for segment in valueSegments {
-      append(segment.text, color: segment.color, to: result)
+    switch row.tokenKind {
+    case .primitive:
+      append(row.token, color: primitiveColor(for: row.token), to: result)
+    case .punctuation:
+      append(row.token, color: Self.punctuationColor, to: result)
+    case .compact:
+      appendCompactToken(row.token, to: result)
     }
 
-    if trailingComma {
+    if row.trailingComma {
       append(",", color: Self.punctuationColor, to: result)
     }
 
     return result
+  }
+
+  private func appendCompactToken(_ token: String, to result: NSMutableAttributedString) {
+    for character in token {
+      let text = String(character)
+      append(text, color: text == "." ? Self.guideColor : Self.punctuationColor, to: result)
+    }
+  }
+
+  private func primitiveColor(for token: String) -> UIColor {
+    if token.hasPrefix("\"") {
+      return Self.stringColor
+    }
+    if token == "true" || token == "false" || token == "null" {
+      return Self.keywordColor
+    }
+    return Self.numberColor
   }
 
   private func append(_ text: String, color: UIColor, to result: NSMutableAttributedString) {
@@ -5527,6 +5622,72 @@ private final class InAppDebuggerJSONTreeView: UIView {
         ]
       )
     )
+  }
+}
+
+private final class InAppDebuggerJSONTreeCell: UITableViewCell {
+  private static let indentationWidth: CGFloat = 14
+  private static let codeFont = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+  private let indentationView = UIView()
+  private let codeLabel = UILabel()
+  private var indentationWidthConstraint: NSLayoutConstraint?
+
+  override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    super.init(style: style, reuseIdentifier: reuseIdentifier)
+
+    backgroundColor = .clear
+    contentView.backgroundColor = .clear
+    selectionStyle = .default
+
+    let selectedView = UIView()
+    selectedView.backgroundColor = UIColor(red: 0.90, green: 0.94, blue: 1.00, alpha: 1)
+    selectedBackgroundView = selectedView
+
+    codeLabel.numberOfLines = 0
+    codeLabel.lineBreakMode = .byCharWrapping
+    codeLabel.font = Self.codeFont
+    codeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+    contentView.addSubview(indentationView)
+    contentView.addSubview(codeLabel)
+    indentationView.translatesAutoresizingMaskIntoConstraints = false
+    codeLabel.translatesAutoresizingMaskIntoConstraints = false
+
+    let indentationWidthConstraint = indentationView.widthAnchor.constraint(equalToConstant: 0)
+    self.indentationWidthConstraint = indentationWidthConstraint
+
+    NSLayoutConstraint.activate([
+      indentationView.topAnchor.constraint(equalTo: contentView.topAnchor),
+      indentationView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
+      indentationView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+      indentationWidthConstraint,
+
+      codeLabel.leadingAnchor.constraint(equalTo: indentationView.trailingAnchor, constant: 4),
+      codeLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
+      codeLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 3),
+      codeLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -3),
+    ])
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(
+    depth: Int,
+    isExpandable: Bool,
+    attributedText: NSAttributedString
+  ) {
+    indentationWidthConstraint?.constant = CGFloat(depth) * Self.indentationWidth
+    if isExpandable {
+      accessibilityTraits.insert(.button)
+      selectionStyle = .default
+    } else {
+      accessibilityTraits.remove(.button)
+      selectionStyle = .none
+    }
+    codeLabel.attributedText = attributedText
   }
 }
 
