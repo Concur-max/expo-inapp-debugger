@@ -1741,6 +1741,9 @@ private fun LogCard(
   val details = remember(log.details) {
     log.details?.trim().orEmpty()
   }
+  val message = remember(log.message) {
+    readableLogMessage(log.message)
+  }
   val canExpand = expanded || detailsOverflow || messageOverflow
 
   Card(
@@ -1825,7 +1828,7 @@ private fun LogCard(
               }
 
               Text(
-                text = log.message,
+                text = message,
                 style = MaterialTheme.typography.bodySmall.copy(
                   fontSize = LOG_LIST_BODY_TEXT_SIZE,
                   lineHeight = LOG_LIST_BODY_LINE_HEIGHT
@@ -2761,6 +2764,116 @@ private fun localizedExpandLabel(): String {
 
 private fun localizedCollapseLabel(): String {
   return "Collapse"
+}
+
+private fun readableLogMessage(message: String): String {
+  for (index in message.indices) {
+    val character = message[index]
+    if (character != '{' && character != '[') {
+      continue
+    }
+
+    val candidate = message.substring(index).trim()
+    val renderedPayload = readableJsonPayloadOrNull(candidate) ?: continue
+    val prefix = message.substring(0, index).trim()
+    return if (prefix.isEmpty()) {
+      renderedPayload
+    } else {
+      "$prefix\n$renderedPayload"
+    }
+  }
+
+  return message
+}
+
+private fun readableJsonPayloadOrNull(payload: String): String? {
+  val trimmed = payload.trim()
+  if (!hasJsonContainerBounds(trimmed)) {
+    return null
+  }
+
+  return runCatching {
+    JsonReader(StringReader(trimmed)).use { reader ->
+      reader.setLenient(false)
+      val rendered = readableJsonValue(reader, indentationLevel = 0) ?: return@use null
+      if (reader.peek() == JsonToken.END_DOCUMENT) {
+        rendered
+      } else {
+        null
+      }
+    }
+  }.getOrNull()
+}
+
+private fun readableJsonValue(reader: JsonReader, indentationLevel: Int): String? {
+  return when (reader.peek()) {
+    JsonToken.BEGIN_OBJECT -> readableJsonObject(reader, indentationLevel)
+    JsonToken.BEGIN_ARRAY -> readableJsonArray(reader, indentationLevel)
+    JsonToken.STRING -> reader.nextString()
+    JsonToken.NUMBER -> reader.nextString()
+    JsonToken.BOOLEAN -> reader.nextBoolean().toString()
+    JsonToken.NULL -> {
+      reader.nextNull()
+      "null"
+    }
+    else -> null
+  }
+}
+
+private fun readableJsonObject(reader: JsonReader, indentationLevel: Int): String? {
+  val indentation = " ".repeat(indentationLevel * 2)
+  val childIndentation = " ".repeat((indentationLevel + 1) * 2)
+
+  reader.beginObject()
+  if (!reader.hasNext()) {
+    reader.endObject()
+    return "{}"
+  }
+
+  val rows = mutableListOf<String>()
+  while (reader.hasNext()) {
+    val key = reader.nextName()
+    val rendered = readableJsonValue(reader, indentationLevel + 1) ?: return null
+    rows += if (rendered.contains('\n')) {
+      "$childIndentation$key:\n${indentMultiline(rendered, indentationLevel + 2)}"
+    } else {
+      "$childIndentation$key: $rendered"
+    }
+  }
+  reader.endObject()
+
+  return "{\n${rows.joinToString("\n")}\n$indentation}"
+}
+
+private fun readableJsonArray(reader: JsonReader, indentationLevel: Int): String? {
+  val indentation = " ".repeat(indentationLevel * 2)
+  val childIndentation = " ".repeat((indentationLevel + 1) * 2)
+
+  reader.beginArray()
+  if (!reader.hasNext()) {
+    reader.endArray()
+    return "[]"
+  }
+
+  val rows = mutableListOf<String>()
+  while (reader.hasNext()) {
+    val rendered = readableJsonValue(reader, indentationLevel + 1) ?: return null
+    rows += if (rendered.contains('\n')) {
+      indentMultiline(rendered, indentationLevel + 1)
+    } else {
+      "$childIndentation$rendered"
+    }
+  }
+  reader.endArray()
+
+  return "[\n${rows.joinToString(",\n")}\n$indentation]"
+}
+
+private fun indentMultiline(text: String, indentationLevel: Int): String {
+  val prefix = " ".repeat(indentationLevel * 2)
+  return text
+    .split('\n')
+    .joinToString("\n") { line -> prefix + line }
 }
 
 private fun buildCapabilitySummary(
