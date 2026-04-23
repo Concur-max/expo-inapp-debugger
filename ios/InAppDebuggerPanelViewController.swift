@@ -3538,6 +3538,11 @@ private final class InAppDebuggerPaddedLabel: UILabel {
 
 final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private static let maxScrollableSectionHeight: CGFloat = 280
+  private static let asyncJSONBodyRenderThreshold = 24_000
+  private static let jsonTreeRenderQueue = DispatchQueue(
+    label: "expo.inappdebugger.network-detail.json-tree",
+    qos: .userInitiated
+  )
 
   private struct ParsedMessageHeader {
     let timestamp: String?
@@ -3572,6 +3577,7 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
   private let stack = UIStackView()
   private var expandedJSONNodeIDs: Set<String> = []
   private var jsonTreePayloadCache: [String: (signature: String, payload: JSONTreePayload?)] = [:]
+  private var pendingJSONTreePayloadSignatures: [String: String] = [:]
   private var notificationObserver: NSObjectProtocol?
   private var scheduledReloadWorkItem: DispatchWorkItem?
 
@@ -3676,13 +3682,14 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
         stack.addArrangedSubview(
           makeWebSocketMessagesSection(title: title, raw: entry.messages, fallback: noMessagesText)
         )
-      } else if isHTTPBodySection(title),
-                let treeSection = makeJSONTreeSection(
-                  title: title,
-                  body: body,
-                  bodyMaxHeight: maxBodyHeight(forSectionTitle: title)
-                ) {
-        stack.addArrangedSubview(treeSection)
+      } else if isHTTPBodySection(title) {
+        stack.addArrangedSubview(
+          makeHTTPBodySection(
+            title: title,
+            body: body,
+            bodyMaxHeight: maxBodyHeight(forSectionTitle: title)
+          )
+        )
       } else {
         stack.addArrangedSubview(
           makeSection(
@@ -4261,8 +4268,15 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     return nil
   }
 
-  private func cachedJSONTreePayload(for title: String, body: String) -> JSONTreePayload? {
-    let signature = "\(body.count):\(body.hashValue)"
+  private func jsonBodySignature(for title: String, body: String) -> String {
+    "\(entryId):\(entry.updatedAt):\(title):\(body.utf16.count)"
+  }
+
+  private func isLargeBody(_ body: String) -> Bool {
+    body.utf16.count > Self.asyncJSONBodyRenderThreshold
+  }
+
+  private func cachedJSONTreePayload(for title: String, body: String, signature: String) -> JSONTreePayload? {
     if let cached = jsonTreePayloadCache[title], cached.signature == signature {
       return cached.payload
     }
@@ -4454,9 +4468,134 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     }
   }
 
-  private func makeSectionBodyView(body: String, monospace: Bool, scrollable: Bool = false) -> UIView {
+  private func makeHTTPBodySection(
+    title: String,
+    body: String,
+    bodyMaxHeight: CGFloat?
+  ) -> UIView {
+    let signature = jsonBodySignature(for: title, body: body)
+    let largeBody = isLargeBody(body)
+
+    if let cached = jsonTreePayloadCache[title], cached.signature == signature {
+      pendingJSONTreePayloadSignatures.removeValue(forKey: title)
+      if cached.payload != nil, let treeSection = makeJSONTreeSection(
+        title: title,
+        body: body,
+        bodyMaxHeight: bodyMaxHeight
+      ) {
+        return treeSection
+      }
+
+      if largeBody {
+        return makeFullPlainBodySection(
+          title: title,
+          body: body,
+          bodyMaxHeight: bodyMaxHeight
+        )
+      }
+
+      return makeSection(
+        title: title,
+        body: body,
+        monospace: true,
+        bodyMaxHeight: bodyMaxHeight
+      )
+    }
+
+    if largeBody {
+      scheduleJSONTreePayloadRender(title: title, body: body, signature: signature)
+      return makeLargeBodyPlaceholderSection(
+        title: title,
+        body: body,
+        message: "Rendering JSON tree..."
+      )
+    }
+
+    pendingJSONTreePayloadSignatures.removeValue(forKey: title)
+    if let treeSection = makeJSONTreeSection(title: title, body: body, bodyMaxHeight: bodyMaxHeight) {
+      return treeSection
+    }
+
+    return makeSection(
+      title: title,
+      body: body,
+      monospace: true,
+      bodyMaxHeight: bodyMaxHeight
+    )
+  }
+
+  private func scheduleJSONTreePayloadRender(title: String, body: String, signature: String) {
+    if pendingJSONTreePayloadSignatures[title] == signature {
+      return
+    }
+
+    pendingJSONTreePayloadSignatures[title] = signature
+    let bodyForRender = body
+
+    Self.jsonTreeRenderQueue.async { [weak self] in
+      guard let self else {
+        return
+      }
+      let payload = autoreleasepool {
+        self.jsonTreePayload(from: bodyForRender)
+      }
+
+      DispatchQueue.main.async { [weak self] in
+        guard let self,
+              self.pendingJSONTreePayloadSignatures[title] == signature else {
+          return
+        }
+
+        self.pendingJSONTreePayloadSignatures.removeValue(forKey: title)
+        self.jsonTreePayloadCache[title] = (signature: signature, payload: payload)
+        self.renderSections(preservingScrollOffset: true)
+      }
+    }
+  }
+
+  private func makeLargeBodyPlaceholderSection(title: String, body: String, message: String) -> UIView {
+    let bodyTextView = makeSectionBodyView(
+      body: message,
+      monospace: true,
+      scrollable: true,
+      structuredPresentationEnabled: false
+    )
+    bodyTextView.accessibilityLabel = title
+    bodyTextView.translatesAutoresizingMaskIntoConstraints = false
+    bodyTextView.heightAnchor.constraint(lessThanOrEqualToConstant: Self.maxScrollableSectionHeight).isActive = true
+    return makeSection(title: title, bodyView: bodyTextView, copyText: body)
+  }
+
+  private func makeFullPlainBodySection(title: String, body: String, bodyMaxHeight: CGFloat?) -> UIView {
+    let bodyTextView = makeSectionBodyView(
+      body: body,
+      monospace: true,
+      scrollable: bodyMaxHeight != nil,
+      structuredPresentationEnabled: false
+    )
+    bodyTextView.accessibilityLabel = title
+    if let bodyMaxHeight {
+      bodyTextView.translatesAutoresizingMaskIntoConstraints = false
+      bodyTextView.heightAnchor.constraint(lessThanOrEqualToConstant: bodyMaxHeight).isActive = true
+    }
+    return makeSection(title: title, bodyView: bodyTextView, copyText: nil)
+  }
+
+  private func makeSectionBodyView(
+    body: String,
+    monospace: Bool,
+    scrollable: Bool = false,
+    structuredPresentationEnabled: Bool = true
+  ) -> UIView {
     let bodyTextView = InAppDebuggerSelectableTextView()
-    let presentation = sectionBodyPresentation(body: body, monospace: monospace)
+    let presentation = structuredPresentationEnabled
+      ? sectionBodyPresentation(body: body, monospace: monospace)
+      : SectionBodyPresentation(
+        displayedText: body,
+        copyText: nil,
+        attributedText: nil,
+        usesCodeBlockStyle: false
+      )
     bodyTextView.presentsSelectionMenuAutomatically = true
     bodyTextView.font = monospace
       ? .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -4496,7 +4635,8 @@ final class InAppDebuggerNetworkDetailViewController: UIViewController {
     body: String,
     bodyMaxHeight: CGFloat?
   ) -> UIView? {
-    guard let payload = cachedJSONTreePayload(for: title, body: body) else {
+    let signature = jsonBodySignature(for: title, body: body)
+    guard let payload = cachedJSONTreePayload(for: title, body: body, signature: signature) else {
       return nil
     }
 
