@@ -217,21 +217,6 @@ private func localizedCollapseLabel() -> String {
   "Collapse"
 }
 
-private func combinedLogCellDetails(context: String?, details: String?) -> String {
-  let contextText = context?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-  let detailsText = details?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-  switch (contextText.isEmpty, detailsText.isEmpty) {
-  case (true, true):
-    return ""
-  case (true, false):
-    return detailsText
-  case (false, true):
-    return contextText
-  case (false, false):
-    return contextText + "\n" + detailsText
-  }
-}
-
 private func readableLogMessage(_ message: String) -> String {
   for index in message.indices {
     guard message[index] == "{" || message[index] == "[" else {
@@ -798,7 +783,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     super.viewDidAppear(animated)
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(true)
     syncNativeCaptureStates()
-    reloadFromStore()
+    reloadFromStore(reason: .dataOnly, changeSummary: .empty)
   }
 
   override func viewDidLayoutSubviews() {
@@ -1297,7 +1282,11 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
         withIdentifier: InAppDebuggerLogCell.reuseIdentifier,
         for: indexPath
       ) as? InAppDebuggerLogCell
-      cell?.configure(entry: entry, expanded: expandedLogIDs.contains(entry.id))
+      cell?.configure(
+        entry: entry,
+        expanded: expandedLogIDs.contains(entry.id),
+        availableWidth: tableView.bounds.width
+      )
       cell?.onExpansionToggle = { [weak self, weak tableView, weak cell] in
         guard let self, let tableView, let cell, let currentIndexPath = tableView.indexPath(for: cell) else {
           return
@@ -1398,8 +1387,10 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
       return
     }
 
-    cell.setExpanded(nextExpanded)
-    tableView.performBatchUpdates(nil)
+    cell.setExpanded(nextExpanded, animated: true)
+    tableView.performBatchUpdates(nil) { [weak cell] _ in
+      cell?.completeExpansionTransition()
+    }
   }
 
   private func reloadFromStore(
@@ -2654,16 +2645,18 @@ private final class InAppDebuggerLogCell: UITableViewCell {
   private let cardView = UIView()
   private let accentView = UIView()
   private let originLabel = InAppDebuggerPaddedLabel()
+  private let contextLabel = InAppDebuggerPaddedLabel()
   private let levelLabel = InAppDebuggerPaddedLabel()
   private let timeLabel = UILabel()
   private let detailsTextView = InAppDebuggerSelectableTextView()
   private let messageTextView = InAppDebuggerSelectableTextView()
   private let heightTransitionSpacer = UIView()
-  private let expansionFooterStack = UIStackView()
   private let expansionButton = UIButton(type: .system)
   private var isExpanded = false
   private var currentDetailsText = ""
   private var currentMessageText = ""
+  private var pendingFinalTextExpanded: Bool?
+  private var availableWidth: CGFloat = 0
   var onExpansionToggle: (() -> Void)?
 
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -2677,6 +2670,8 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
   override func prepareForReuse() {
     super.prepareForReuse()
+    pendingFinalTextExpanded = nil
+    clearForcedTextHeights()
     onExpansionToggle = nil
     messageTextView.selectedRange = NSRange(location: 0, length: 0)
     messageTextView.overrideCopyText = nil
@@ -2684,40 +2679,65 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     detailsTextView.overrideCopyText = nil
   }
 
-  func configure(entry: DebugLogEntry, expanded: Bool) {
+  func configure(entry: DebugLogEntry, expanded: Bool, availableWidth: CGFloat) {
     let tone = toneForLogLevel(entry.type)
+    pendingFinalTextExpanded = nil
+    clearForcedTextHeights()
     isExpanded = expanded
+    self.availableWidth = availableWidth
     accentView.backgroundColor = tone.foreground
     originLabel.text = localizedOriginTitle(entry.origin)
     originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
     originLabel.backgroundColor = isNativeOrigin(entry.origin) ? PanelColors.primary : PanelColors.controlBackground
+    let contextText = entry.context?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    contextLabel.text = contextText
+    contextLabel.isHidden = contextText.isEmpty
     levelLabel.text = entry.type.uppercased()
     levelLabel.textColor = tone.foreground
     levelLabel.backgroundColor = tone.background
     timeLabel.text = entry.timestamp
-    currentDetailsText = combinedLogCellDetails(context: entry.context, details: entry.details)
+    currentDetailsText = entry.details?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     currentMessageText = readableLogMessage(entry.message)
     detailsTextView.text = currentDetailsText
     detailsTextView.isHidden = currentDetailsText.isEmpty
     messageTextView.text = currentMessageText
     messageTextView.overrideCopyText = currentMessageText
     detailsTextView.overrideCopyText = currentDetailsText
-    applyExpansionState()
+    applyExpansionState(textExpanded: expanded)
     updateExpansionButtonVisibility()
   }
 
-  func setExpanded(_ expanded: Bool) {
+  func setExpanded(_ expanded: Bool, animated: Bool = false) {
     guard isExpanded != expanded else {
       return
     }
 
     isExpanded = expanded
-    applyExpansionState()
+    pendingFinalTextExpanded = nil
+    if animated, !expanded {
+      applyExpansionState(textExpanded: true)
+      applyCollapsedTextHeightTargets()
+      pendingFinalTextExpanded = false
+    } else {
+      clearForcedTextHeights()
+      applyExpansionState(textExpanded: expanded)
+    }
     updateExpansionButtonVisibility()
     setNeedsUpdateConstraints()
     contentView.setNeedsUpdateConstraints()
     setNeedsLayout()
     contentView.setNeedsLayout()
+  }
+
+  func completeExpansionTransition() {
+    guard let finalTextExpanded = pendingFinalTextExpanded else {
+      return
+    }
+
+    pendingFinalTextExpanded = nil
+    clearForcedTextHeights()
+    applyExpansionState(textExpanded: finalTextExpanded)
+    updateExpansionButtonVisibility()
   }
 
   private func buildUI() {
@@ -2735,10 +2755,21 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     originLabel.font = .systemFont(ofSize: 10, weight: .bold)
     originLabel.layer.cornerRadius = 8
     originLabel.layer.masksToBounds = true
+    originLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+    contextLabel.font = .systemFont(ofSize: 10, weight: .bold)
+    contextLabel.textColor = PanelColors.mutedText
+    contextLabel.backgroundColor = PanelColors.controlBackground
+    contextLabel.layer.cornerRadius = 8
+    contextLabel.layer.masksToBounds = true
+    contextLabel.numberOfLines = 1
+    contextLabel.lineBreakMode = .byTruncatingTail
+    contextLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
     levelLabel.font = .systemFont(ofSize: 10, weight: .bold)
     levelLabel.layer.cornerRadius = 8
     levelLabel.layer.masksToBounds = true
+    levelLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
     timeLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
     timeLabel.textColor = PanelColors.mutedText
@@ -2773,21 +2804,22 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     expansionButton.tintColor = PanelColors.primary
     expansionButton.contentHorizontalAlignment = .center
     expansionButton.accessibilityTraits.insert(.button)
+    expansionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
     expansionButton.setContentCompressionResistancePriority(.required, for: .vertical)
     expansionButton.addTarget(self, action: #selector(toggleExpansionTapped), for: .touchUpInside)
 
-    let headerStack = UIStackView(arrangedSubviews: [originLabel, levelLabel, timeLabel, UIView()])
+    let headerStack = UIStackView(arrangedSubviews: [
+      originLabel,
+      contextLabel,
+      levelLabel,
+      UIView(),
+      timeLabel,
+      expansionButton,
+    ])
     headerStack.axis = .horizontal
     headerStack.alignment = .center
     headerStack.spacing = 8
     headerStack.setContentHuggingPriority(.required, for: .vertical)
-
-    expansionFooterStack.axis = .horizontal
-    expansionFooterStack.alignment = .center
-    expansionFooterStack.spacing = 0
-    expansionFooterStack.addArrangedSubview(UIView())
-    expansionFooterStack.addArrangedSubview(expansionButton)
-    expansionFooterStack.setContentHuggingPriority(.required, for: .vertical)
 
     let bodyStack = UIStackView(
       arrangedSubviews: [
@@ -2795,12 +2827,11 @@ private final class InAppDebuggerLogCell: UITableViewCell {
         detailsTextView,
         messageTextView,
         heightTransitionSpacer,
-        expansionFooterStack,
       ]
     )
     bodyStack.axis = .vertical
     bodyStack.spacing = 8
-    bodyStack.setCustomSpacing(0, after: heightTransitionSpacer)
+    bodyStack.setCustomSpacing(0, after: messageTextView)
 
     cardView.addSubview(accentView)
     cardView.addSubview(bodyStack)
@@ -2834,13 +2865,13 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     updateExpansionButtonVisibility()
   }
 
-  private func applyExpansionState() {
-    let detailsLineLimit = isExpanded ? 0 : Self.collapsedDetailsLineLimit
-    let messageLineLimit = isExpanded ? 0 : Self.collapsedMessageLineLimit
+  private func applyExpansionState(textExpanded: Bool) {
+    let detailsLineLimit = textExpanded ? 0 : Self.collapsedDetailsLineLimit
+    let messageLineLimit = textExpanded ? 0 : Self.collapsedMessageLineLimit
     detailsTextView.textContainer.maximumNumberOfLines = detailsLineLimit
     messageTextView.textContainer.maximumNumberOfLines = messageLineLimit
-    detailsTextView.textContainer.lineBreakMode = isExpanded ? .byCharWrapping : .byTruncatingTail
-    messageTextView.textContainer.lineBreakMode = isExpanded ? .byCharWrapping : .byTruncatingTail
+    detailsTextView.textContainer.lineBreakMode = textExpanded ? .byCharWrapping : .byTruncatingTail
+    messageTextView.textContainer.lineBreakMode = textExpanded ? .byCharWrapping : .byTruncatingTail
 
     var configuration = expansionButton.configuration ?? UIButton.Configuration.plain()
     configuration.title = nil
@@ -2853,10 +2884,31 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     messageTextView.setNeedsLayout()
   }
 
+  private func applyCollapsedTextHeightTargets() {
+    let fittingWidth = resolvedTextFittingWidth()
+    if currentDetailsText.isEmpty || detailsTextView.isHidden {
+      detailsTextView.forcedIntrinsicHeight = nil
+    } else {
+      detailsTextView.forcedIntrinsicHeight = detailsTextView.measuredHeight(
+        width: fittingWidth,
+        maximumNumberOfLines: Self.collapsedDetailsLineLimit,
+        lineBreakMode: .byTruncatingTail
+      )
+    }
+    messageTextView.forcedIntrinsicHeight = messageTextView.measuredHeight(
+      width: fittingWidth,
+      maximumNumberOfLines: Self.collapsedMessageLineLimit,
+      lineBreakMode: .byTruncatingTail
+    )
+  }
+
+  private func clearForcedTextHeights() {
+    detailsTextView.forcedIntrinsicHeight = nil
+    messageTextView.forcedIntrinsicHeight = nil
+  }
+
   private func updateExpansionButtonVisibility() {
-    let fittingWidth = messageTextView.bounds.width > 0
-      ? messageTextView.bounds.width
-      : max(1, contentView.bounds.width - 28)
+    let fittingWidth = resolvedTextFittingWidth()
     let detailsOverflow =
       !currentDetailsText.isEmpty &&
       Self.textExceedsLineLimit(
@@ -2873,8 +2925,24 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     )
     let hidesExpansionControl = !isExpanded && !detailsOverflow && !messageOverflow
     heightTransitionSpacer.isHidden = hidesExpansionControl
-    expansionFooterStack.isHidden = hidesExpansionControl
     expansionButton.isHidden = hidesExpansionControl
+  }
+
+  private func resolvedTextFittingWidth() -> CGFloat {
+    if messageTextView.bounds.width > 0 {
+      return messageTextView.bounds.width
+    }
+    if availableWidth > 0 {
+      return max(1, availableWidth - 28)
+    }
+    if contentView.bounds.width > 0 {
+      return max(1, contentView.bounds.width - 28)
+    }
+    if bounds.width > 0 {
+      return max(1, bounds.width - 28)
+    }
+    let fallbackPanelWidth = window?.bounds.width ?? UIScreen.main.bounds.width
+    return max(1, fallbackPanelWidth - 56)
   }
 
   private static func textExceedsLineLimit(
@@ -4606,6 +4674,11 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
   private var selectionMenuTargetRect: CGRect = .null
   var overrideCopyText: String?
   var presentsSelectionMenuAutomatically = false
+  var forcedIntrinsicHeight: CGFloat? {
+    didSet {
+      invalidateIntrinsicContentSize()
+    }
+  }
 
   override var text: String! {
     didSet {
@@ -4620,6 +4693,10 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
   }
 
   override var intrinsicContentSize: CGSize {
+    if let forcedIntrinsicHeight {
+      return CGSize(width: UIView.noIntrinsicMetric, height: ceil(max(0, forcedIntrinsicHeight)))
+    }
+
     let fittingWidth = bounds.width > 0 ? bounds.width : UIScreen.main.bounds.width - 52
     let size = sizeThatFits(CGSize(width: fittingWidth, height: CGFloat.greatestFiniteMagnitude))
     return CGSize(width: UIView.noIntrinsicMetric, height: ceil(size.height))
@@ -4670,6 +4747,21 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
 
   required init?(coder: NSCoder) {
     nil
+  }
+
+  func measuredHeight(
+    width: CGFloat,
+    maximumNumberOfLines: Int,
+    lineBreakMode: NSLineBreakMode
+  ) -> CGFloat {
+    let originalLineLimit = textContainer.maximumNumberOfLines
+    let originalLineBreakMode = textContainer.lineBreakMode
+    textContainer.maximumNumberOfLines = maximumNumberOfLines
+    textContainer.lineBreakMode = lineBreakMode
+    let measuredSize = sizeThatFits(CGSize(width: max(1, width), height: CGFloat.greatestFiniteMagnitude))
+    textContainer.maximumNumberOfLines = originalLineLimit
+    textContainer.lineBreakMode = originalLineBreakMode
+    return ceil(measuredSize.height)
   }
 
   func textViewDidChangeSelection(_ textView: UITextView) {
