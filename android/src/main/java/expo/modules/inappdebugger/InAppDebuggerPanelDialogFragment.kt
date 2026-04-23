@@ -1,7 +1,5 @@
 package expo.modules.inappdebugger
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
@@ -20,6 +18,7 @@ import android.widget.ImageView
 import androidx.appcompat.widget.SearchView
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
@@ -46,9 +45,10 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Public
@@ -1737,10 +1737,9 @@ private fun LogCard(
   var expanded by remember(log.id) { mutableStateOf(false) }
   var detailsOverflow by remember(log.id) { mutableStateOf(false) }
   var messageOverflow by remember(log.id) { mutableStateOf(false) }
-  val context = LocalContext.current
   val tone = remember(log.type) { toneForLogLevel(log.type) }
-  val details = remember(log.context, log.details) {
-    combinedLogCardDetails(log.context, log.details)
+  val details = remember(log.details) {
+    log.details?.trim().orEmpty()
   }
   val canExpand = expanded || detailsOverflow || messageOverflow
 
@@ -1763,8 +1762,8 @@ private fun LogCard(
         modifier = Modifier
           .padding(12.dp)
       ) {
-        SelectionContainer(modifier = Modifier.fillMaxWidth()) {
-          Column(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+          DisableSelection {
             Row(verticalAlignment = Alignment.CenterVertically) {
               PanelChip(
                 text = localizedOriginTitle(log.origin),
@@ -1772,7 +1771,7 @@ private fun LogCard(
                 foreground = if (isNativeOrigin(log.origin)) Color.White else PanelColors.MutedText,
                 compact = true
               )
-              Spacer(modifier = Modifier.width(8.dp))
+              Spacer(modifier = Modifier.width(6.dp))
               PanelChip(
                 text = log.type.uppercase(Locale.ROOT),
                 background = tone.background,
@@ -1788,23 +1787,19 @@ private fun LogCard(
                 ),
                 color = PanelColors.MutedText
               )
-              DisableSelection {
-                IconButton(onClick = {
-                  copyToClipboard(
-                    text = formatLogCopyText(log),
-                    successMessage = "Copied to clipboard",
-                    context = context
-                  )
-                }) {
-                  Icon(
-                    imageVector = Icons.Outlined.ContentCopy,
-                    contentDescription = "Copy log entry",
-                    tint = tone.foreground
-                  )
-                }
+              if (canExpand) {
+                Spacer(modifier = Modifier.width(6.dp))
+                CompactLogHeaderButton(
+                  imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                  contentDescription = if (expanded) localizedCollapseLabel() else localizedExpandLabel(),
+                  tint = PanelColors.Primary,
+                  onClick = { expanded = !expanded }
+                )
               }
             }
+          }
 
+          SelectionContainer(modifier = Modifier.fillMaxWidth()) {
             Column(
               modifier = Modifier
                 .fillMaxWidth()
@@ -1847,20 +1842,6 @@ private fun LogCard(
                     messageOverflow = layoutResult.hasVisualOverflow
                   }
                 }
-              )
-            }
-          }
-        }
-
-        if (canExpand) {
-          DisableSelection {
-            TextButton(onClick = { expanded = !expanded }) {
-              Text(
-                text = if (expanded) localizedCollapseLabel() else localizedExpandLabel(),
-                style = MaterialTheme.typography.labelMedium.copy(
-                  fontSize = LOG_LIST_META_TEXT_SIZE,
-                  lineHeight = LOG_LIST_META_LINE_HEIGHT
-                )
               )
             }
           }
@@ -1955,21 +1936,6 @@ private fun NetworkCard(
       }
     }
   }
-}
-
-private fun combinedLogCardDetails(context: String?, details: String?): String {
-  val hasContext = !context.isNullOrBlank()
-  val hasDetails = !details.isNullOrBlank()
-  if (!hasContext && !hasDetails) {
-    return ""
-  }
-  if (!hasContext) {
-    return details.orEmpty()
-  }
-  if (!hasDetails) {
-    return context.orEmpty()
-  }
-  return context + "\n" + details
 }
 
 @Composable
@@ -2109,11 +2075,37 @@ private fun EmptyState(
 }
 
 @Composable
+private fun CompactLogHeaderButton(
+  imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+  contentDescription: String,
+  tint: Color,
+  onClick: () -> Unit
+) {
+  Box(
+    modifier = Modifier
+      .size(30.dp)
+      .background(PanelColors.Control, RoundedCornerShape(8.dp))
+      .clickable(onClick = onClick),
+    contentAlignment = Alignment.Center
+  ) {
+    Icon(
+      imageVector = imageVector,
+      contentDescription = contentDescription,
+      tint = tint,
+      modifier = Modifier.size(16.dp)
+    )
+  }
+}
+
+@Composable
 private fun PanelChip(
   text: String,
   background: Color,
   foreground: Color,
-  compact: Boolean = false
+  compact: Boolean = false,
+  modifier: Modifier = Modifier,
+  maxLines: Int = Int.MAX_VALUE,
+  overflow: TextOverflow = TextOverflow.Clip
 ) {
   val textStyle = if (compact) {
     MaterialTheme.typography.labelSmall.copy(
@@ -2125,6 +2117,7 @@ private fun PanelChip(
   }
 
   Surface(
+    modifier = modifier,
     color = background,
     shape = RoundedCornerShape(8.dp)
   ) {
@@ -2132,6 +2125,8 @@ private fun PanelChip(
       text = text,
       color = foreground,
       style = textStyle,
+      maxLines = maxLines,
+      overflow = overflow,
       modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
     )
   }
@@ -3990,14 +3985,6 @@ private fun formatNetworkSummaryText(
   return parts.joinToString(" | ")
 }
 
-private fun formatLogCopyText(entry: DebugLogEntry): String {
-  val metadataLines = mutableListOf("timestamp: ${entry.fullTimestamp.ifBlank { entry.timestamp }}")
-  metadataLines += "origin: ${entry.origin}"
-  entry.context?.takeIf { it.isNotBlank() }?.let { metadataLines += "context: $it" }
-  entry.details?.takeIf { it.isNotBlank() }?.let { metadataLines += it }
-  return metadataLines.joinToString("\n") + "\n\n" + entry.message
-}
-
 private fun formatByteCount(context: Context, count: Int?): String {
   return if (count == null) {
     "-"
@@ -4100,11 +4087,4 @@ private fun buildSearchText(vararg parts: String?): String {
     }
   }
   return result.toString()
-}
-
-private fun copyToClipboard(text: String, successMessage: String, context: Context?) {
-  val actualContext = context ?: return
-  val clipboard = actualContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-  clipboard.setPrimaryClip(ClipData.newPlainText("expo-inapp-debugger", text))
-  android.widget.Toast.makeText(actualContext, successMessage, android.widget.Toast.LENGTH_SHORT).show()
 }

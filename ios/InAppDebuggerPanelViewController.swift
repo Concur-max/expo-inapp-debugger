@@ -2701,7 +2701,6 @@ private final class InAppDebuggerLogCell: UITableViewCell {
   private let cardView = UIView()
   private let accentView = UIView()
   private let originLabel = InAppDebuggerPaddedLabel()
-  private let contextLabel = InAppDebuggerPaddedLabel()
   private let levelLabel = InAppDebuggerPaddedLabel()
   private let timeLabel = UILabel()
   private let detailsTextView = InAppDebuggerSelectableTextView()
@@ -2745,9 +2744,6 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     originLabel.text = localizedOriginTitle(entry.origin)
     originLabel.textColor = isNativeOrigin(entry.origin) ? .white : PanelColors.mutedText
     originLabel.backgroundColor = isNativeOrigin(entry.origin) ? PanelColors.primary : PanelColors.controlBackground
-    let contextText = entry.context?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    contextLabel.text = contextText
-    contextLabel.isHidden = contextText.isEmpty
     levelLabel.text = entry.type.uppercased()
     levelLabel.textColor = tone.foreground
     levelLabel.backgroundColor = tone.background
@@ -2813,15 +2809,6 @@ private final class InAppDebuggerLogCell: UITableViewCell {
     originLabel.layer.masksToBounds = true
     originLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-    contextLabel.font = .systemFont(ofSize: 10, weight: .bold)
-    contextLabel.textColor = PanelColors.mutedText
-    contextLabel.backgroundColor = PanelColors.controlBackground
-    contextLabel.layer.cornerRadius = 8
-    contextLabel.layer.masksToBounds = true
-    contextLabel.numberOfLines = 1
-    contextLabel.lineBreakMode = .byTruncatingTail
-    contextLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
     levelLabel.font = .systemFont(ofSize: 10, weight: .bold)
     levelLabel.layer.cornerRadius = 8
     levelLabel.layer.masksToBounds = true
@@ -2866,7 +2853,6 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
     let headerStack = UIStackView(arrangedSubviews: [
       originLabel,
-      contextLabel,
       levelLabel,
       UIView(),
       timeLabel,

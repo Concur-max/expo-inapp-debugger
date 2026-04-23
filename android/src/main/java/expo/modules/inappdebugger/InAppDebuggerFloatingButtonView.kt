@@ -2,8 +2,10 @@ package expo.modules.inappdebugger
 
 import android.content.Context
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -35,6 +37,9 @@ class InAppDebuggerFloatingButtonView(
   private var startX = 0f
   private var startY = 0f
   private var moved = false
+  private var hasResolvedPosition = false
+  private var pendingPreDrawObserver: ViewTreeObserver? = null
+  private var pendingPreDrawListener: ViewTreeObserver.OnPreDrawListener? = null
 
   init {
     clipChildren = false
@@ -42,6 +47,7 @@ class InAppDebuggerFloatingButtonView(
     elevation = dp(20f)
     isClickable = true
     isFocusable = true
+    visibility = View.INVISIBLE
 
     addView(
       ComposeView(context).apply {
@@ -59,16 +65,13 @@ class InAppDebuggerFloatingButtonView(
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
-    post {
-      val parentView = parent as? ViewGroup ?: return@post
-      if (translationX == 0f && translationY == 0f) {
-        translationX = (parentView.width - width - dp(20)).coerceAtLeast(0).toFloat()
-        translationY = dp(96).toFloat()
-      } else {
-        translationX = translationX.coerceIn(0f, (parentView.width - width).toFloat().coerceAtLeast(0f))
-        translationY = translationY.coerceIn(0f, (parentView.height - height).toFloat().coerceAtLeast(0f))
-      }
-    }
+    visibility = View.INVISIBLE
+    positionBeforeFirstDraw()
+  }
+
+  override fun onDetachedFromWindow() {
+    clearPendingPreDrawListener()
+    super.onDetachedFromWindow()
   }
 
   override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -120,6 +123,55 @@ class InAppDebuggerFloatingButtonView(
   private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
   private fun dp(value: Float): Float = value * resources.displayMetrics.density
+
+  private fun positionBeforeFirstDraw() {
+    clearPendingPreDrawListener()
+
+    val observer = viewTreeObserver
+    val listener = object : ViewTreeObserver.OnPreDrawListener {
+      override fun onPreDraw(): Boolean {
+        if (resolvePositionInParent()) {
+          clearPendingPreDrawListener()
+          visibility = View.VISIBLE
+        }
+        return true
+      }
+    }
+
+    pendingPreDrawObserver = observer
+    pendingPreDrawListener = listener
+    observer.addOnPreDrawListener(listener)
+  }
+
+  private fun resolvePositionInParent(): Boolean {
+    val parentView = parent as? ViewGroup ?: return false
+    if (parentView.width <= 0 || width <= 0 || height <= 0) {
+      return false
+    }
+
+    val maxX = (parentView.width - width).toFloat().coerceAtLeast(0f)
+    val maxY = (parentView.height - height).toFloat().coerceAtLeast(0f)
+    if (!hasResolvedPosition) {
+      translationX = (parentView.width - width - dp(20)).toFloat().coerceIn(0f, maxX)
+      translationY = dp(96f).coerceIn(0f, maxY)
+      hasResolvedPosition = true
+    } else {
+      translationX = translationX.coerceIn(0f, maxX)
+      translationY = translationY.coerceIn(0f, maxY)
+    }
+
+    return true
+  }
+
+  private fun clearPendingPreDrawListener() {
+    val listener = pendingPreDrawListener
+    val observer = pendingPreDrawObserver
+    if (listener != null && observer?.isAlive == true) {
+      observer.removeOnPreDrawListener(listener)
+    }
+    pendingPreDrawObserver = null
+    pendingPreDrawListener = null
+  }
 }
 
 @Composable
