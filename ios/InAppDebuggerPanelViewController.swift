@@ -4754,6 +4754,48 @@ private extension String {
   }
 }
 
+private extension Character {
+  var inAppDebuggerIsASCIIIdentifierStart: Bool {
+    guard let scalar = unicodeScalars.first, unicodeScalars.count == 1 else {
+      return false
+    }
+
+    return (scalar.value >= 65 && scalar.value <= 90)
+      || (scalar.value >= 97 && scalar.value <= 122)
+      || scalar.value == 95
+      || scalar.value == 36
+  }
+
+  var inAppDebuggerIsASCIIIdentifierPart: Bool {
+    guard let scalar = unicodeScalars.first, unicodeScalars.count == 1 else {
+      return false
+    }
+
+    return inAppDebuggerIsASCIIIdentifierStart || (scalar.value >= 48 && scalar.value <= 57)
+  }
+
+  var inAppDebuggerIsJSONNumberStart: Bool {
+    guard let scalar = unicodeScalars.first, unicodeScalars.count == 1 else {
+      return false
+    }
+
+    return scalar.value == 45 || (scalar.value >= 48 && scalar.value <= 57)
+  }
+
+  var inAppDebuggerIsJSONNumberPart: Bool {
+    guard let scalar = unicodeScalars.first, unicodeScalars.count == 1 else {
+      return false
+    }
+
+    return scalar.value == 43
+      || scalar.value == 45
+      || scalar.value == 46
+      || scalar.value == 69
+      || scalar.value == 101
+      || (scalar.value >= 48 && scalar.value <= 57)
+  }
+}
+
 // Formats JSON by rewriting whitespace only. All original token text is preserved verbatim.
 private struct InAppDebuggerJSONPrettyPrinter {
   private let source: String
@@ -5061,6 +5103,11 @@ private enum InAppDebuggerJSONTreeValue {
   case array([InAppDebuggerJSONTreeValue])
   case primitive(String)
 
+  private static let compactPreviewMaxItems = 12
+  private static let compactPreviewMaxCharacters = 156
+  private static let nestedCompactPreviewMaxCharacters = 112
+  private static let primitivePreviewMaxCharacters = 72
+
   var isExpandable: Bool {
     switch self {
     case .object(let members):
@@ -5095,21 +5142,158 @@ private enum InAppDebuggerJSONTreeValue {
   }
 
   var compactToken: String {
+    compactPreview(depth: 0)
+  }
+
+  private func compactPreview(depth: Int) -> String {
     switch self {
     case .object(let members):
-      return members.isEmpty ? "{}" : "{...}"
-    case .array(let values):
-      guard !values.isEmpty else {
-        return "[]"
+      return Self.compactContainerPreview(
+        openingToken: "{",
+        closingToken: "}",
+        itemCount: members.count,
+        maxCharacters: Self.compactPreviewMaxCharacters(forDepth: depth)
+      ) { index in
+        let member = members[index]
+        return "\(Self.compactKeyPreview(member.key)): \(member.value.compactPreview(depth: depth + 1))"
       }
-      let countText = NumberFormatter.localizedString(
-        from: NSNumber(value: values.count),
-        number: .decimal
-      )
-      return "[ \(countText) \(values.count == 1 ? "item" : "items") ]"
+    case .array(let values):
+      return Self.compactContainerPreview(
+        openingToken: "[",
+        closingToken: "]",
+        itemCount: values.count,
+        maxCharacters: Self.compactPreviewMaxCharacters(forDepth: depth)
+      ) { index in
+        values[index].compactPreview(depth: depth + 1)
+      }
     case .primitive(let literal):
-      return literal
+      return Self.compactPrimitivePreview(literal)
     }
+  }
+
+  private static func compactPreviewMaxCharacters(forDepth depth: Int) -> Int {
+    depth <= 1 ? compactPreviewMaxCharacters : nestedCompactPreviewMaxCharacters
+  }
+
+  private static func compactContainerPreview(
+    openingToken: String,
+    closingToken: String,
+    itemCount: Int,
+    maxCharacters: Int,
+    itemPreview: (Int) -> String
+  ) -> String {
+    guard itemCount > 0 else {
+      return "\(openingToken)\(closingToken)"
+    }
+
+    var items: [String] = []
+    var omittedItems = false
+    let displayLimit = min(itemCount, compactPreviewMaxItems)
+
+    for index in 0..<displayLimit {
+      let item = itemPreview(index)
+      let hasMoreItemsAfterCandidate = index < itemCount - 1
+      let candidate = joinedCompactContainerPreview(
+        openingToken: openingToken,
+        items: items + [item],
+        omittedItems: hasMoreItemsAfterCandidate,
+        closingToken: closingToken
+      )
+
+      if candidate.count > maxCharacters {
+        if items.isEmpty {
+          items.append(
+            truncatedText(
+              item,
+              maxCharacters: max(12, maxCharacters - openingToken.count - closingToken.count - 6)
+            )
+          )
+          omittedItems = hasMoreItemsAfterCandidate
+        } else {
+          omittedItems = true
+        }
+        break
+      }
+
+      items.append(item)
+      omittedItems = hasMoreItemsAfterCandidate
+    }
+
+    if displayLimit < itemCount {
+      omittedItems = true
+    }
+
+    return joinedCompactContainerPreview(
+      openingToken: openingToken,
+      items: items,
+      omittedItems: omittedItems,
+      closingToken: closingToken
+    )
+  }
+
+  private static func joinedCompactContainerPreview(
+    openingToken: String,
+    items: [String],
+    omittedItems: Bool,
+    closingToken: String
+  ) -> String {
+    var fragments = items
+    if omittedItems {
+      fragments.append("...")
+    }
+    return "\(openingToken)\(fragments.joined(separator: ", "))\(closingToken)"
+  }
+
+  private static func compactKeyPreview(_ key: String) -> String {
+    guard key.hasPrefix("\""),
+          key.hasSuffix("\""),
+          key.count >= 2 else {
+      return compactPrimitivePreview(key)
+    }
+
+    let content = String(key.dropFirst().dropLast())
+    guard isSimpleIdentifier(content) else {
+      return compactPrimitivePreview(key)
+    }
+    return content
+  }
+
+  private static func isSimpleIdentifier(_ text: String) -> Bool {
+    guard let firstCharacter = text.first,
+          firstCharacter.inAppDebuggerIsASCIIIdentifierStart else {
+      return false
+    }
+    return text.dropFirst().allSatisfy { $0.inAppDebuggerIsASCIIIdentifierPart }
+  }
+
+  private static func compactPrimitivePreview(_ literal: String) -> String {
+    truncatedStringLiteral(literal) ?? truncatedText(
+      literal,
+      maxCharacters: primitivePreviewMaxCharacters
+    )
+  }
+
+  private static func truncatedStringLiteral(_ literal: String) -> String? {
+    guard literal.hasPrefix("\""),
+          literal.hasSuffix("\""),
+          literal.count > primitivePreviewMaxCharacters else {
+      return nil
+    }
+
+    var content = String(literal.dropFirst().dropLast())
+    let contentLimit = max(1, primitivePreviewMaxCharacters - 5)
+    content = String(content.prefix(contentLimit))
+    if content.last == "\\" {
+      content.removeLast()
+    }
+    return "\"\(content)...\""
+  }
+
+  private static func truncatedText(_ text: String, maxCharacters: Int) -> String {
+    guard text.count > maxCharacters else {
+      return text
+    }
+    return "\(text.prefix(max(1, maxCharacters - 3)))..."
   }
 }
 
@@ -5792,33 +5976,99 @@ private final class InAppDebuggerJSONTreeView: UIView, UIGestureRecognizerDelega
   }
 
   private func appendCompactToken(_ token: String, to result: NSMutableAttributedString) {
-    if appendArrayCountToken(token, to: result) {
-      return
-    }
+    var index = token.startIndex
 
-    for character in token {
-      let text = String(character)
-      append(text, color: text == "." ? Self.guideColor : Self.punctuationColor, to: result)
+    while index < token.endIndex {
+      let character = token[index]
+
+      if character == "\"" {
+        let start = index
+        index = compactStringEnd(startingAt: index, in: token)
+        let text = String(token[start..<index])
+        let color = nextNonWhitespaceCharacter(after: index, in: token) == ":"
+          ? Self.keyColor
+          : Self.stringColor
+        append(text, color: color, to: result)
+        continue
+      }
+
+      if character.inAppDebuggerIsASCIIIdentifierStart {
+        let start = index
+        token.formIndex(after: &index)
+        while index < token.endIndex, token[index].inAppDebuggerIsASCIIIdentifierPart {
+          token.formIndex(after: &index)
+        }
+
+        let text = String(token[start..<index])
+        let color: UIColor
+        if nextNonWhitespaceCharacter(after: index, in: token) == ":" {
+          color = Self.keyColor
+        } else if text == "true" || text == "false" || text == "null" {
+          color = Self.keywordColor
+        } else {
+          color = Self.keyColor
+        }
+        append(text, color: color, to: result)
+        continue
+      }
+
+      if character.inAppDebuggerIsJSONNumberStart {
+        let start = index
+        token.formIndex(after: &index)
+        while index < token.endIndex, token[index].inAppDebuggerIsJSONNumberPart {
+          token.formIndex(after: &index)
+        }
+        append(String(token[start..<index]), color: Self.numberColor, to: result)
+        continue
+      }
+
+      if character == "." {
+        let start = index
+        token.formIndex(after: &index)
+        while index < token.endIndex, token[index] == "." {
+          token.formIndex(after: &index)
+        }
+        append(String(token[start..<index]), color: Self.guideColor, to: result)
+        continue
+      }
+
+      append(String(character), color: Self.punctuationColor, to: result)
+      token.formIndex(after: &index)
     }
   }
 
-  private func appendArrayCountToken(_ token: String, to result: NSMutableAttributedString) -> Bool {
-    guard token.hasPrefix("[ "), token.hasSuffix(" ]") else {
-      return false
+  private func compactStringEnd(startingAt start: String.Index, in token: String) -> String.Index {
+    var index = token.index(after: start)
+
+    while index < token.endIndex {
+      let character = token[index]
+      token.formIndex(after: &index)
+
+      if character == "\\" {
+        if index < token.endIndex {
+          token.formIndex(after: &index)
+        }
+        continue
+      }
+
+      if character == "\"" {
+        break
+      }
     }
 
-    let summary = String(token.dropFirst(2).dropLast(2))
-    guard let separatorIndex = summary.firstIndex(of: " ") else {
-      return false
-    }
+    return index
+  }
 
-    append("[", color: Self.punctuationColor, to: result)
-    append(" ", color: Self.guideColor, to: result)
-    append(String(summary[..<separatorIndex]), color: Self.numberColor, to: result)
-    append(String(summary[separatorIndex...]), color: Self.guideColor, to: result)
-    append(" ", color: Self.guideColor, to: result)
-    append("]", color: Self.punctuationColor, to: result)
-    return true
+  private func nextNonWhitespaceCharacter(after start: String.Index, in token: String) -> Character? {
+    var index = start
+    while index < token.endIndex {
+      let character = token[index]
+      if character != " " && character != "\n" && character != "\r" && character != "\t" {
+        return character
+      }
+      token.formIndex(after: &index)
+    }
+    return nil
   }
 
   private func primitiveColor(for token: String) -> UIColor {
