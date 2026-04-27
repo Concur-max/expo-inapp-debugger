@@ -19,6 +19,7 @@ import androidx.appcompat.widget.SearchView
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
@@ -97,8 +98,12 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -274,6 +279,10 @@ private val REQUEST_DETAIL_TITLE_TEXT_SIZE = 13.sp
 private val REQUEST_DETAIL_TITLE_LINE_HEIGHT = 16.sp
 private val REQUEST_DETAIL_BODY_TEXT_SIZE = 12.sp
 private val REQUEST_DETAIL_BODY_LINE_HEIGHT = 16.sp
+private const val JSON_TREE_COMPACT_PREVIEW_MAX_ITEMS = 12
+private const val JSON_TREE_COMPACT_PREVIEW_MAX_CHARS = 156
+private const val JSON_TREE_NESTED_COMPACT_PREVIEW_MAX_CHARS = 112
+private const val JSON_TREE_PRIMITIVE_PREVIEW_MAX_CHARS = 72
 
 private enum class DebugTab {
   Logs,
@@ -314,6 +323,13 @@ private object PanelColors {
   val Text = Color(0xFF111827)
   val MutedText = Color(0xFF6B7280)
   val Control = Color(0xFFEFF1F5)
+  val JsonTreeBackground = Color(0xFFFBFCFF)
+  val JsonPunctuation = Color(0xFF4F596B)
+  val JsonKey = Color(0xFF5A40B0)
+  val JsonString = Color(0xFF1F6E42)
+  val JsonNumber = Color(0xFF0A59AD)
+  val JsonKeyword = Color(0xFFAD3D2E)
+  val JsonGuide = Color(0xFF8090A8)
 }
 
 private data class PanelTone(
@@ -325,7 +341,56 @@ private data class DetailItem(
   val title: String,
   val content: String,
   val monospace: Boolean = false,
-  val contentMaxHeight: Dp? = null
+  val contentMaxHeight: Dp? = null,
+  val jsonTree: AndroidJsonTreeValue? = null
+)
+
+private data class AndroidJsonTreeMember(
+  val key: String,
+  val value: AndroidJsonTreeValue
+)
+
+private sealed class AndroidJsonTreeValue {
+  data class ObjectValue(val members: List<AndroidJsonTreeMember>) : AndroidJsonTreeValue()
+  data class ArrayValue(val values: List<AndroidJsonTreeValue>) : AndroidJsonTreeValue()
+  data class Primitive(val literal: String) : AndroidJsonTreeValue()
+
+  val isExpandable: Boolean
+    get() = when (this) {
+      is ObjectValue -> members.isNotEmpty()
+      is ArrayValue -> values.isNotEmpty()
+      is Primitive -> false
+    }
+
+  val openingToken: String
+    get() = when (this) {
+      is ObjectValue -> "{"
+      is ArrayValue -> "["
+      is Primitive -> ""
+    }
+
+  val closingToken: String
+    get() = when (this) {
+      is ObjectValue -> "}"
+      is ArrayValue -> "]"
+      is Primitive -> ""
+    }
+}
+
+private enum class AndroidJsonTreeTokenKind {
+  Primitive,
+  Punctuation,
+  Compact
+}
+
+private data class AndroidJsonTreeRow(
+  val nodeId: String?,
+  val disclosureExpanded: Boolean?,
+  val depth: Int,
+  val key: String?,
+  val token: String,
+  val tokenKind: AndroidJsonTreeTokenKind,
+  val trailingComma: Boolean
 )
 
 private data class FilterMenuItem(
@@ -1436,8 +1501,16 @@ private fun NetworkDetailScreen(
   }
 
   val resolvedEntry = entry ?: return
+  var expandedJsonNodeIds by remember(entryId) { mutableStateOf<Set<String>>(emptySet()) }
+  val initialSections = remember(resolvedEntry, context) {
+    if (isWebSocketKind(resolvedEntry.kind)) {
+      buildWebSocketSections(resolvedEntry, context, formatMessages = false)
+    } else {
+      buildHttpSections(resolvedEntry, context, parseBodies = false)
+    }
+  }
   val sections by produceState(
-    initialValue = emptyList<DetailItem>(),
+    initialValue = initialSections,
     resolvedEntry,
     context
   ) {
@@ -1446,7 +1519,7 @@ private fun NetworkDetailScreen(
         if (isWebSocketKind(resolvedEntry.kind)) {
           buildWebSocketSections(resolvedEntry, context)
         } else {
-          buildHttpSections(resolvedEntry, context)
+          buildHttpSections(resolvedEntry, context, parseBodies = true)
         }
       }
   }
@@ -1483,13 +1556,30 @@ private fun NetworkDetailScreen(
       verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
       itemsIndexed(sections, key = { index, item -> "${item.title}#$index" }) { _, item ->
-        DetailSection(
-          title = item.title,
-          content = item.content,
-          monospace = item.monospace,
-          contentMaxHeight = item.contentMaxHeight,
-          compact = true
-        )
+        if (item.jsonTree != null) {
+          JsonTreeDetailSection(
+            title = item.title,
+            root = item.jsonTree,
+            nodeIdPrefix = "${resolvedEntry.id}:${item.title}",
+            expandedNodeIds = expandedJsonNodeIds,
+            contentMaxHeight = item.contentMaxHeight ?: NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT,
+            onNodeExpansionChanged = { nodeId, expanded ->
+              expandedJsonNodeIds = if (expanded) {
+                expandedJsonNodeIds + nodeId
+              } else {
+                expandedJsonNodeIds - nodeId
+              }
+            }
+          )
+        } else {
+          DetailSection(
+            title = item.title,
+            content = item.content,
+            monospace = item.monospace,
+            contentMaxHeight = item.contentMaxHeight,
+            compact = true
+          )
+        }
       }
       item("network_detail_footer") {
         Spacer(modifier = Modifier.height(12.dp))
@@ -1755,7 +1845,15 @@ private fun LogCard(
     border = BorderStroke(1.dp, PanelColors.Border),
     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
   ) {
-    Row(modifier = Modifier.fillMaxWidth()) {
+    Row(
+      modifier = Modifier
+        .fillMaxWidth()
+        .clickable(
+          enabled = canExpand,
+          indication = null,
+          interactionSource = remember { MutableInteractionSource() }
+        ) { expanded = !expanded }
+    ) {
       Box(
         modifier = Modifier
           .width(4.dp)
@@ -2012,6 +2110,123 @@ private fun DetailSection(
           )
         }
       }
+    }
+  }
+}
+
+@Composable
+private fun JsonTreeDetailSection(
+  title: String,
+  root: AndroidJsonTreeValue,
+  nodeIdPrefix: String,
+  expandedNodeIds: Set<String>,
+  contentMaxHeight: Dp,
+  onNodeExpansionChanged: (String, Boolean) -> Unit
+) {
+  val rows = remember(root, nodeIdPrefix, expandedNodeIds) {
+    buildAndroidJsonTreeRows(
+      root = root,
+      nodeIdPrefix = nodeIdPrefix,
+      expandedNodeIds = expandedNodeIds
+    )
+  }
+  val titleStyle = MaterialTheme.typography.titleSmall.copy(
+    fontSize = REQUEST_DETAIL_TITLE_TEXT_SIZE,
+    lineHeight = REQUEST_DETAIL_TITLE_LINE_HEIGHT
+  )
+  val rowStyle = MaterialTheme.typography.bodySmall.copy(
+    fontSize = REQUEST_DETAIL_BODY_TEXT_SIZE,
+    lineHeight = REQUEST_DETAIL_BODY_LINE_HEIGHT
+  )
+
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    colors = CardDefaults.cardColors(containerColor = PanelColors.Surface),
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, PanelColors.Border),
+    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+  ) {
+    Column(modifier = Modifier.padding(12.dp)) {
+      Text(
+        text = title,
+        style = titleStyle,
+        color = PanelColors.Text
+      )
+      Spacer(modifier = Modifier.height(6.dp))
+      Surface(
+        modifier = Modifier
+          .fillMaxWidth()
+          .heightIn(max = contentMaxHeight),
+        color = PanelColors.JsonTreeBackground,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, PanelColors.Border)
+      ) {
+        LazyColumn(
+          modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = contentMaxHeight),
+          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+          verticalArrangement = Arrangement.spacedBy(0.dp)
+        ) {
+          itemsIndexed(
+            items = rows,
+            key = { index, _ -> "$nodeIdPrefix:$index" }
+          ) { _, row ->
+            JsonTreeRow(
+              row = row,
+              style = rowStyle,
+              onToggle = { nodeId ->
+                onNodeExpansionChanged(nodeId, row.disclosureExpanded != true)
+              }
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun JsonTreeRow(
+  row: AndroidJsonTreeRow,
+  style: androidx.compose.ui.text.TextStyle,
+  onToggle: (String) -> Unit
+) {
+  val toggleNodeId = row.nodeId.takeIf { row.disclosureExpanded != null }
+  val rowModifier = Modifier
+    .fillMaxWidth()
+    .then(
+      if (toggleNodeId != null) {
+        Modifier.clickable { onToggle(toggleNodeId) }
+      } else {
+        Modifier
+      }
+    )
+    .padding(vertical = 1.dp)
+
+  Row(
+    modifier = rowModifier,
+    verticalAlignment = Alignment.Top
+  ) {
+    Spacer(modifier = Modifier.width((row.depth * 14).dp))
+    Text(
+      text = when (row.disclosureExpanded) {
+        true -> "▾"
+        false -> "▸"
+        null -> ""
+      },
+      style = style,
+      color = PanelColors.JsonGuide,
+      fontFamily = FontFamily.Monospace,
+      modifier = Modifier.width(14.dp)
+    )
+    SelectionContainer(modifier = Modifier.weight(1f)) {
+      Text(
+        text = annotatedJsonTreeLine(row),
+        style = style,
+        fontFamily = FontFamily.Monospace,
+        modifier = Modifier.fillMaxWidth()
+      )
     }
   }
 }
@@ -2316,7 +2531,8 @@ private fun matchesNetworkQuery(
 
 private fun buildHttpSections(
   entry: DebugNetworkEntry,
-  context: Context
+  context: Context,
+  parseBodies: Boolean = true
 ): List<DetailItem> {
   val items = mutableListOf(
     DetailItem(localizedOriginTitleLabel(), localizedOriginTitle(entry.origin)),
@@ -2328,17 +2544,17 @@ private fun buildHttpSections(
     DetailItem("Duration", entry.durationMs?.let { "${it}ms" } ?: "-"),
     DetailItem("Request Headers", headerText(entry.requestHeaders), monospace = true),
     DetailItem("Response Headers", headerText(entry.responseHeaders), monospace = true),
-    DetailItem(
+    structuredBodyDetailItem(
       "Request Body",
-      formattedStructuredContent(entry.requestBody, "No request body"),
-      monospace = true,
-      contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
+      entry.requestBody,
+      "No request body",
+      parseBody = parseBodies
     ),
-    DetailItem(
+    structuredBodyDetailItem(
       "Response Body",
-      formattedStructuredContent(entry.responseBody, "No response body"),
-      monospace = true,
-      contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
+      entry.responseBody,
+      "No response body",
+      parseBody = parseBodies
     )
   )
 
@@ -2373,12 +2589,55 @@ private fun buildHttpSections(
   return items
 }
 
+private fun structuredBodyDetailItem(
+  title: String,
+  raw: String?,
+  fallback: String,
+  parseBody: Boolean = true
+): DetailItem {
+  val source = raw?.takeIf { it.isNotBlank() } ?: return DetailItem(
+    title = title,
+    content = fallback,
+    monospace = true,
+    contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
+  )
+
+  if (!parseBody) {
+    return DetailItem(
+      title = title,
+      content = if (looksLikeJsonContainer(source)) {
+        "Rendering JSON body..."
+      } else {
+        "Rendering body..."
+      },
+      monospace = true,
+      contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
+    )
+  }
+
+  val jsonTree = jsonTreeValueOrNull(source)
+  return DetailItem(
+    title = title,
+    content = if (jsonTree == null) {
+      formattedStructuredContent(source, fallback)
+    } else {
+      ""
+    },
+    monospace = true,
+    contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT,
+    jsonTree = jsonTree
+  )
+}
+
 private fun buildWebSocketSections(
   entry: DebugNetworkEntry,
-  context: Context
+  context: Context,
+  formatMessages: Boolean = true
 ): List<DetailItem> {
-  val inferredIncoming = entry.messageCountIn ?: countMessages(entry.messages, "<<")
-  val inferredOutgoing = entry.messageCountOut ?: countMessages(entry.messages, ">>")
+  val inferredIncoming = entry.messageCountIn?.toString()
+    ?: if (formatMessages) countMessages(entry.messages, "<<").toString() else "-"
+  val inferredOutgoing = entry.messageCountOut?.toString()
+    ?: if (formatMessages) countMessages(entry.messages, ">>").toString() else "-"
   val items = mutableListOf(
     DetailItem(localizedOriginTitleLabel(), localizedOriginTitle(entry.origin)),
     DetailItem(localizedNetworkTypeTitle(), localizedNetworkKindTitle(entry.kind)),
@@ -2415,7 +2674,13 @@ private fun buildWebSocketSections(
   items += DetailItem("Event timeline", entry.events ?: localizedNoEventsText(), monospace = true)
   items += DetailItem(
     "Messages",
-    formattedWebSocketMessagesText(entry.messages, "No messages"),
+    if (formatMessages) {
+      formattedWebSocketMessagesText(entry.messages, "No messages")
+    } else if (entry.messages.isNullOrBlank()) {
+      "No messages"
+    } else {
+      "Rendering messages..."
+    },
     monospace = true
   )
 
@@ -3894,6 +4159,533 @@ private fun formattedStructuredContent(raw: String?, fallback: String): String {
   return prettyJsonOrOriginal(source)
 }
 
+private fun looksLikeJsonContainer(raw: String): Boolean {
+  return hasJsonContainerBounds(raw.trim())
+}
+
+private fun jsonTreeValueOrNull(raw: String): AndroidJsonTreeValue? {
+  val candidates = ArrayList<String>(6)
+
+  fun addCandidate(candidate: String?) {
+    val trimmed = candidate?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    if (trimmed !in candidates) {
+      candidates += trimmed
+    }
+  }
+
+  fun addStructuredCandidates(candidate: String?) {
+    val trimmed = candidate?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    addCandidate(trimmed)
+    addCandidate(extractedStructuredJson(trimmed))
+  }
+
+  addStructuredCandidates(raw)
+  addStructuredCandidates(normalizedPlainText(raw))
+  addStructuredCandidates(decodedJsonStringLiteral(raw))
+  addStructuredCandidates(normalizedEscapedJsonContainer(raw))
+
+  for (candidate in candidates) {
+    parseAndroidJsonTree(candidate)?.let { tree ->
+      return tree
+    }
+  }
+
+  return null
+}
+
+private fun parseAndroidJsonTree(raw: String): AndroidJsonTreeValue? {
+  val trimmed = raw.trim()
+  if (!hasJsonContainerBounds(trimmed)) {
+    return null
+  }
+
+  return runCatching {
+    JsonReader(StringReader(trimmed)).use { reader ->
+      reader.setLenient(false)
+      val value = when (reader.peek()) {
+        JsonToken.BEGIN_OBJECT,
+        JsonToken.BEGIN_ARRAY -> readAndroidJsonTreeValue(reader)
+        else -> null
+      } ?: return@use null
+
+      if (reader.peek() == JsonToken.END_DOCUMENT) {
+        value
+      } else {
+        null
+      }
+    }
+  }.getOrNull()
+}
+
+private fun readAndroidJsonTreeValue(reader: JsonReader): AndroidJsonTreeValue? {
+  return when (reader.peek()) {
+    JsonToken.BEGIN_OBJECT -> {
+      reader.beginObject()
+      val members = mutableListOf<AndroidJsonTreeMember>()
+      while (reader.hasNext()) {
+        val key = reader.nextName()
+        val value = readAndroidJsonTreeValue(reader) ?: return null
+        members += AndroidJsonTreeMember(key, value)
+      }
+      reader.endObject()
+      AndroidJsonTreeValue.ObjectValue(members)
+    }
+    JsonToken.BEGIN_ARRAY -> {
+      reader.beginArray()
+      val values = mutableListOf<AndroidJsonTreeValue>()
+      while (reader.hasNext()) {
+        values += readAndroidJsonTreeValue(reader) ?: return null
+      }
+      reader.endArray()
+      AndroidJsonTreeValue.ArrayValue(values)
+    }
+    JsonToken.STRING -> AndroidJsonTreeValue.Primitive(jsonStringLiteral(reader.nextString()))
+    JsonToken.NUMBER -> AndroidJsonTreeValue.Primitive(reader.nextString())
+    JsonToken.BOOLEAN -> AndroidJsonTreeValue.Primitive(reader.nextBoolean().toString())
+    JsonToken.NULL -> {
+      reader.nextNull()
+      AndroidJsonTreeValue.Primitive("null")
+    }
+    else -> null
+  }
+}
+
+private fun buildAndroidJsonTreeRows(
+  root: AndroidJsonTreeValue,
+  nodeIdPrefix: String,
+  expandedNodeIds: Set<String>
+): List<AndroidJsonTreeRow> {
+  val rows = mutableListOf<AndroidJsonTreeRow>()
+
+  fun appendContainer(
+    value: AndroidJsonTreeValue,
+    key: String?,
+    depth: Int,
+    path: String,
+    trailingComma: Boolean,
+    appendChildren: () -> Unit
+  ) {
+    if (!value.isExpandable) {
+      rows += AndroidJsonTreeRow(
+        nodeId = null,
+        disclosureExpanded = null,
+        depth = depth,
+        key = key,
+        token = value.compactToken(),
+        tokenKind = AndroidJsonTreeTokenKind.Punctuation,
+        trailingComma = trailingComma
+      )
+      return
+    }
+
+    val nodeId = "$nodeIdPrefix:$path"
+    val expanded = depth == 0 || nodeId in expandedNodeIds
+    val disclosureExpanded = if (depth == 0) null else expanded
+
+    if (!expanded) {
+      rows += AndroidJsonTreeRow(
+        nodeId = nodeId,
+        disclosureExpanded = disclosureExpanded,
+        depth = depth,
+        key = key,
+        token = value.compactToken(),
+        tokenKind = AndroidJsonTreeTokenKind.Compact,
+        trailingComma = trailingComma
+      )
+      return
+    }
+
+    rows += AndroidJsonTreeRow(
+      nodeId = nodeId,
+      disclosureExpanded = disclosureExpanded,
+      depth = depth,
+      key = key,
+      token = value.openingToken,
+      tokenKind = AndroidJsonTreeTokenKind.Punctuation,
+      trailingComma = false
+    )
+    appendChildren()
+    rows += AndroidJsonTreeRow(
+      nodeId = null,
+      disclosureExpanded = null,
+      depth = depth,
+      key = null,
+      token = value.closingToken,
+      tokenKind = AndroidJsonTreeTokenKind.Punctuation,
+      trailingComma = trailingComma
+    )
+  }
+
+  fun appendValue(
+    value: AndroidJsonTreeValue,
+    key: String?,
+    depth: Int,
+    path: String,
+    trailingComma: Boolean
+  ) {
+    when (value) {
+      is AndroidJsonTreeValue.Primitive -> {
+        rows += AndroidJsonTreeRow(
+          nodeId = null,
+          disclosureExpanded = null,
+          depth = depth,
+          key = key,
+          token = value.literal,
+          tokenKind = AndroidJsonTreeTokenKind.Primitive,
+          trailingComma = trailingComma
+        )
+      }
+      is AndroidJsonTreeValue.ObjectValue -> {
+        appendContainer(
+          value = value,
+          key = key,
+          depth = depth,
+          path = path,
+          trailingComma = trailingComma
+        ) {
+          value.members.forEachIndexed { index, member ->
+            appendValue(
+              value = member.value,
+              key = compactJsonKeyPreview(member.key),
+              depth = depth + 1,
+              path = "$path/m$index",
+              trailingComma = index < value.members.lastIndex
+            )
+          }
+        }
+      }
+      is AndroidJsonTreeValue.ArrayValue -> {
+        appendContainer(
+          value = value,
+          key = key,
+          depth = depth,
+          path = path,
+          trailingComma = trailingComma
+        ) {
+          value.values.forEachIndexed { index, child ->
+            appendValue(
+              value = child,
+              key = index.toString(),
+              depth = depth + 1,
+              path = "$path/i$index",
+              trailingComma = index < value.values.lastIndex
+            )
+          }
+        }
+      }
+    }
+  }
+
+  appendValue(root, key = null, depth = 0, path = "root", trailingComma = false)
+  return rows
+}
+
+private fun AndroidJsonTreeValue.compactToken(): String {
+  return compactPreview(depth = 0)
+}
+
+private fun AndroidJsonTreeValue.compactPreview(depth: Int): String {
+  return when (this) {
+    is AndroidJsonTreeValue.ObjectValue -> compactJsonContainerPreview(
+      openingToken = "{",
+      closingToken = "}",
+      itemCount = members.size,
+      maxCharacters = compactPreviewMaxCharacters(depth)
+    ) { index ->
+      val member = members[index]
+      "${compactJsonKeyPreview(member.key)}: ${member.value.compactPreview(depth + 1)}"
+    }
+    is AndroidJsonTreeValue.ArrayValue -> compactJsonContainerPreview(
+      openingToken = "[",
+      closingToken = "]",
+      itemCount = values.size,
+      maxCharacters = compactPreviewMaxCharacters(depth)
+    ) { index ->
+      values[index].compactPreview(depth + 1)
+    }
+    is AndroidJsonTreeValue.Primitive -> compactPrimitivePreview(literal)
+  }
+}
+
+private fun compactPreviewMaxCharacters(depth: Int): Int {
+  return if (depth <= 1) {
+    JSON_TREE_COMPACT_PREVIEW_MAX_CHARS
+  } else {
+    JSON_TREE_NESTED_COMPACT_PREVIEW_MAX_CHARS
+  }
+}
+
+private fun compactJsonContainerPreview(
+  openingToken: String,
+  closingToken: String,
+  itemCount: Int,
+  maxCharacters: Int,
+  itemPreview: (Int) -> String
+): String {
+  if (itemCount == 0) {
+    return "$openingToken$closingToken"
+  }
+
+  val items = mutableListOf<String>()
+  var omittedItems = false
+  val displayLimit = minOf(itemCount, JSON_TREE_COMPACT_PREVIEW_MAX_ITEMS)
+
+  for (index in 0 until displayLimit) {
+    val item = itemPreview(index)
+    val hasMoreItemsAfterCandidate = index < itemCount - 1
+    val candidate = joinCompactJsonContainerPreview(
+      openingToken = openingToken,
+      items = items + item,
+      omittedItems = hasMoreItemsAfterCandidate,
+      closingToken = closingToken
+    )
+
+    if (candidate.length > maxCharacters) {
+      if (items.isEmpty()) {
+        items += truncateText(
+          item,
+          maxCharacters = maxOf(12, maxCharacters - openingToken.length - closingToken.length - 6)
+        )
+        omittedItems = hasMoreItemsAfterCandidate
+      } else {
+        omittedItems = true
+      }
+      break
+    }
+
+    items += item
+    omittedItems = hasMoreItemsAfterCandidate
+  }
+
+  if (displayLimit < itemCount) {
+    omittedItems = true
+  }
+
+  return joinCompactJsonContainerPreview(
+    openingToken = openingToken,
+    items = items,
+    omittedItems = omittedItems,
+    closingToken = closingToken
+  )
+}
+
+private fun joinCompactJsonContainerPreview(
+  openingToken: String,
+  items: List<String>,
+  omittedItems: Boolean,
+  closingToken: String
+): String {
+  val fragments = if (omittedItems) {
+    items + "..."
+  } else {
+    items
+  }
+  return "$openingToken${fragments.joinToString(", ")}$closingToken"
+}
+
+private fun compactJsonKeyPreview(key: String): String {
+  return if (isSimpleJsonIdentifier(key)) {
+    key
+  } else {
+    compactPrimitivePreview(jsonStringLiteral(key))
+  }
+}
+
+private fun isSimpleJsonIdentifier(text: String): Boolean {
+  val first = text.firstOrNull() ?: return false
+  if (!first.isAsciiIdentifierStart()) {
+    return false
+  }
+  return text.drop(1).all { it.isAsciiIdentifierPart() }
+}
+
+private fun compactPrimitivePreview(literal: String): String {
+  return truncatedStringLiteral(literal) ?: truncateText(
+    literal,
+    maxCharacters = JSON_TREE_PRIMITIVE_PREVIEW_MAX_CHARS
+  )
+}
+
+private fun truncatedStringLiteral(literal: String): String? {
+  if (!literal.startsWith("\"") ||
+    !literal.endsWith("\"") ||
+    literal.length <= JSON_TREE_PRIMITIVE_PREVIEW_MAX_CHARS
+  ) {
+    return null
+  }
+
+  var content = literal.substring(1, literal.length - 1)
+    .take((JSON_TREE_PRIMITIVE_PREVIEW_MAX_CHARS - 5).coerceAtLeast(1))
+  if (content.endsWith("\\")) {
+    content = content.dropLast(1)
+  }
+  return "\"$content...\""
+}
+
+private fun truncateText(text: String, maxCharacters: Int): String {
+  if (text.length <= maxCharacters) {
+    return text
+  }
+  return "${text.take((maxCharacters - 3).coerceAtLeast(1))}..."
+}
+
+private fun annotatedJsonTreeLine(row: AndroidJsonTreeRow): AnnotatedString {
+  return buildAnnotatedString {
+    row.key?.let { key ->
+      appendStyled(key, PanelColors.JsonKey)
+      appendStyled(": ", PanelColors.JsonPunctuation)
+    }
+
+    when (row.tokenKind) {
+      AndroidJsonTreeTokenKind.Primitive -> appendStyled(
+        row.token,
+        primitiveJsonColor(row.token)
+      )
+      AndroidJsonTreeTokenKind.Punctuation -> appendStyled(row.token, PanelColors.JsonPunctuation)
+      AndroidJsonTreeTokenKind.Compact -> appendCompactJsonToken(row.token)
+    }
+
+    if (row.trailingComma) {
+      appendStyled(",", PanelColors.JsonPunctuation)
+    }
+  }
+}
+
+private fun AnnotatedString.Builder.appendCompactJsonToken(token: String) {
+  var index = 0
+
+  while (index < token.length) {
+    val char = token[index]
+
+    if (char == '"') {
+      val start = index
+      index = compactJsonStringEnd(token, index)
+      val text = token.substring(start, index)
+      val color = if (nextNonWhitespaceChar(token, index) == ':') {
+        PanelColors.JsonKey
+      } else {
+        PanelColors.JsonString
+      }
+      appendStyled(text, color)
+      continue
+    }
+
+    if (char.isAsciiIdentifierStart()) {
+      val start = index
+      index += 1
+      while (index < token.length && token[index].isAsciiIdentifierPart()) {
+        index += 1
+      }
+
+      val text = token.substring(start, index)
+      val color = when {
+        nextNonWhitespaceChar(token, index) == ':' -> PanelColors.JsonKey
+        text == "true" || text == "false" || text == "null" -> PanelColors.JsonKeyword
+        else -> PanelColors.JsonKey
+      }
+      appendStyled(text, color)
+      continue
+    }
+
+    if (char.isJsonNumberStart()) {
+      val start = index
+      index += 1
+      while (index < token.length && token[index].isJsonNumberPart()) {
+        index += 1
+      }
+      appendStyled(token.substring(start, index), PanelColors.JsonNumber)
+      continue
+    }
+
+    if (char == '.') {
+      val start = index
+      index += 1
+      while (index < token.length && token[index] == '.') {
+        index += 1
+      }
+      appendStyled(token.substring(start, index), PanelColors.JsonGuide)
+      continue
+    }
+
+    appendStyled(char.toString(), PanelColors.JsonPunctuation)
+    index += 1
+  }
+}
+
+private fun AnnotatedString.Builder.appendStyled(text: String, color: Color) {
+  withStyle(SpanStyle(color = color)) {
+    append(text)
+  }
+}
+
+private fun compactJsonStringEnd(token: String, startIndex: Int): Int {
+  var index = startIndex + 1
+
+  while (index < token.length) {
+    val char = token[index]
+    index += 1
+
+    if (char == '\\') {
+      if (index < token.length) {
+        index += 1
+      }
+      continue
+    }
+
+    if (char == '"') {
+      break
+    }
+  }
+
+  return index
+}
+
+private fun nextNonWhitespaceChar(token: String, startIndex: Int): Char? {
+  var index = startIndex
+  while (index < token.length) {
+    val char = token[index]
+    if (!char.isJsonWhitespace()) {
+      return char
+    }
+    index += 1
+  }
+  return null
+}
+
+private fun primitiveJsonColor(token: String): Color {
+  return when {
+    token.startsWith("\"") -> PanelColors.JsonString
+    token == "true" || token == "false" || token == "null" -> PanelColors.JsonKeyword
+    else -> PanelColors.JsonNumber
+  }
+}
+
+private fun jsonStringLiteral(value: String): String {
+  return buildString(value.length + 2) {
+    append('"')
+    value.forEach { char ->
+      when (char) {
+        '"' -> append("\\\"")
+        '\\' -> append("\\\\")
+        '\b' -> append("\\b")
+        '\u000C' -> append("\\f")
+        '\n' -> append("\\n")
+        '\r' -> append("\\r")
+        '\t' -> append("\\t")
+        else -> {
+          if (char < ' ') {
+            append("\\u")
+            append(char.code.toString(16).padStart(4, '0'))
+          } else {
+            append(char)
+          }
+        }
+      }
+    }
+    append('"')
+  }
+}
+
 private fun formattedWebSocketMessagesText(raw: String?, fallback: String): String {
   val source = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return fallback
   val rendered = StringBuilder(source.length + 32)
@@ -4175,6 +4967,27 @@ private fun formatJsonWhitespaceOnly(raw: String): String {
 
 private fun Char.isJsonWhitespace(): Boolean {
   return this == ' ' || this == '\n' || this == '\r' || this == '\t'
+}
+
+private fun Char.isAsciiIdentifierStart(): Boolean {
+  return this in 'A'..'Z' || this in 'a'..'z' || this == '_' || this == '$'
+}
+
+private fun Char.isAsciiIdentifierPart(): Boolean {
+  return isAsciiIdentifierStart() || this in '0'..'9'
+}
+
+private fun Char.isJsonNumberStart(): Boolean {
+  return this == '-' || this in '0'..'9'
+}
+
+private fun Char.isJsonNumberPart(): Boolean {
+  return this == '+' ||
+    this == '-' ||
+    this == '.' ||
+    this == 'e' ||
+    this == 'E' ||
+    this in '0'..'9'
 }
 
 private fun closeRequestSummary(entry: DebugNetworkEntry): String {

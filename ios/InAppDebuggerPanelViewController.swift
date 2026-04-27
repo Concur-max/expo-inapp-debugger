@@ -2712,6 +2712,7 @@ private final class InAppDebuggerLogCell: UITableViewCell {
   private var currentMessageText = ""
   private var pendingFinalTextExpanded: Bool?
   private var availableWidth: CGFloat = 0
+  private var cardTapGesture: UITapGestureRecognizer!
   var onExpansionToggle: (() -> Void)?
 
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -2900,6 +2901,19 @@ private final class InAppDebuggerLogCell: UITableViewCell {
       expansionButton.widthAnchor.constraint(equalToConstant: 32),
       expansionButton.heightAnchor.constraint(equalToConstant: 28),
     ])
+
+    cardTapGesture = UITapGestureRecognizer(target: self, action: #selector(cardTapped))
+    cardTapGesture.delegate = self
+    cardView.addGestureRecognizer(cardTapGesture)
+
+    detailsTextView.onTap = { [weak self] in
+      guard let self, !self.expansionButton.isHidden else { return }
+      self.onExpansionToggle?()
+    }
+    messageTextView.onTap = { [weak self] in
+      guard let self, !self.expansionButton.isHidden else { return }
+      self.onExpansionToggle?()
+    }
   }
 
   override func layoutSubviews() {
@@ -3013,6 +3027,30 @@ private final class InAppDebuggerLogCell: UITableViewCell {
 
   @objc private func toggleExpansionTapped() {
     onExpansionToggle?()
+  }
+
+  @objc private func cardTapped() {
+    guard !expansionButton.isHidden else { return }
+    onExpansionToggle?()
+  }
+
+  override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    guard gestureRecognizer == cardTapGesture else { return super.gestureRecognizerShouldBegin(gestureRecognizer) }
+    guard !expansionButton.isHidden else { return false }
+    let point = gestureRecognizer.location(in: cardView)
+    let buttonFrame = expansionButton.convert(expansionButton.bounds, to: cardView)
+    if buttonFrame.contains(point) {
+      return false
+    }
+    let detailsFrame = detailsTextView.convert(detailsTextView.bounds, to: cardView)
+    if !detailsTextView.isHidden && detailsFrame.contains(point) {
+      return false
+    }
+    let messageFrame = messageTextView.convert(messageTextView.bounds, to: cardView)
+    if messageFrame.contains(point) {
+      return false
+    }
+    return true
   }
 }
 
@@ -6094,12 +6132,14 @@ private final class InAppDebuggerJSONTreeView: UIView, UIGestureRecognizerDelega
   }
 }
 
-private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate {
+private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDelegate, UIGestureRecognizerDelegate {
   private var lastMeasuredWidth: CGFloat = 0
   private var hasScheduledSelectionMenu = false
   private var selectionMenuTargetRect: CGRect = .null
+  private var cardTapGesture: UITapGestureRecognizer!
   var overrideCopyText: String?
   var presentsSelectionMenuAutomatically = false
+  var onTap: (() -> Void)?
   var forcedIntrinsicHeight: CGFloat? {
     didSet {
       invalidateIntrinsicContentSize()
@@ -6169,6 +6209,9 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     if #available(iOS 16.0, *) {
       addInteraction(UIEditMenuInteraction(delegate: self))
     }
+    cardTapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+    cardTapGesture.delegate = self
+    addGestureRecognizer(cardTapGesture)
   }
 
   required init?(coder: NSCoder) {
@@ -6188,6 +6231,27 @@ private final class InAppDebuggerSelectableTextView: UITextView, UITextViewDeleg
     textContainer.maximumNumberOfLines = originalLineLimit
     textContainer.lineBreakMode = originalLineBreakMode
     return ceil(measuredSize.height)
+  }
+
+  @objc private func handleTap() {
+    onTap?()
+  }
+
+  override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    if gestureRecognizer == cardTapGesture {
+      return selectedRange.length == 0 && onTap != nil
+    }
+    return super.gestureRecognizerShouldBegin(gestureRecognizer)
+  }
+
+  func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer,
+    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+  ) -> Bool {
+    if gestureRecognizer == cardTapGesture || otherGestureRecognizer == cardTapGesture {
+      return true
+    }
+    return false
   }
 
   func textViewDidChangeSelection(_ textView: UITextView) {
