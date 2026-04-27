@@ -116,7 +116,9 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
 import java.util.Locale
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -269,6 +271,9 @@ private val APP_INFO_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
 private val NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT = 280.dp
 private const val DETAIL_LAZY_TEXT_CHUNK_SIZE = 8_000
 private const val DETAIL_LAZY_TEXT_THRESHOLD = 24_000
+private const val MAX_STRUCTURED_BODY_PARSE_CHARS = 512_000
+private const val MAX_SEARCH_CACHE_ENTRIES = 4_096
+private const val FILTER_CANCELLATION_CHECK_INTERVAL = 64
 private val LOG_LIST_CHIP_TEXT_SIZE = 10.sp
 private val LOG_LIST_CHIP_LINE_HEIGHT = 12.sp
 private val LOG_LIST_META_TEXT_SIZE = 11.sp
@@ -2397,7 +2402,7 @@ private fun PanelChip(
   }
 }
 
-private fun filterLogs(
+private suspend fun filterLogs(
   source: List<DebugLogEntry>,
   query: String,
   sortOrder: SortOrder,
@@ -2415,24 +2420,33 @@ private fun filterLogs(
     return if (sortOrder == SortOrder.Asc) source else ReversedListView(source)
   }
 
+  val normalizedQuery = trimmedQuery.lowercase(Locale.ROOT)
+  val coroutineContext = currentCoroutineContext()
+  var inspectedCount = 0
   val result = ArrayList<DebugLogEntry>(source.size)
   if (sortOrder == SortOrder.Desc) {
     for (index in source.indices.reversed()) {
+      if (inspectedCount++ % FILTER_CANCELLATION_CHECK_INTERVAL == 0) {
+        coroutineContext.ensureActive()
+      }
       val entry = source[index]
       if (entry.type !in selectedLevels || entry.origin !in selectedOrigins) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery, searchCache)) {
+      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, normalizedQuery, searchCache)) {
         continue
       }
       result.add(entry)
     }
   } else {
     for (entry in source) {
+      if (inspectedCount++ % FILTER_CANCELLATION_CHECK_INTERVAL == 0) {
+        coroutineContext.ensureActive()
+      }
       if (entry.type !in selectedLevels || entry.origin !in selectedOrigins) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, trimmedQuery, searchCache)) {
+      if (trimmedQuery.isNotEmpty() && !matchesLogQuery(entry, normalizedQuery, searchCache)) {
         continue
       }
       result.add(entry)
@@ -2442,7 +2456,7 @@ private fun filterLogs(
   return result
 }
 
-private fun filterNetwork(
+private suspend fun filterNetwork(
   source: List<DebugNetworkEntry>,
   query: String,
   sortOrder: SortOrder,
@@ -2460,26 +2474,35 @@ private fun filterNetwork(
     return if (sortOrder == SortOrder.Asc) source else ReversedListView(source)
   }
 
+  val normalizedQuery = trimmedQuery.lowercase(Locale.ROOT)
+  val coroutineContext = currentCoroutineContext()
+  var inspectedCount = 0
   val result = ArrayList<DebugNetworkEntry>(source.size)
   if (sortOrder == SortOrder.Desc) {
     for (index in source.indices.reversed()) {
+      if (inspectedCount++ % FILTER_CANCELLATION_CHECK_INTERVAL == 0) {
+        coroutineContext.ensureActive()
+      }
       val entry = source[index]
       val kind = normalizedNetworkKind(entry.kind)
       if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, kind, searchCache)) {
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, normalizedQuery, kind, searchCache)) {
         continue
       }
       result.add(entry)
     }
   } else {
     for (entry in source) {
+      if (inspectedCount++ % FILTER_CANCELLATION_CHECK_INTERVAL == 0) {
+        coroutineContext.ensureActive()
+      }
       val kind = normalizedNetworkKind(entry.kind)
       if (entry.origin !in selectedOrigins || kind.rawValue !in selectedKinds) {
         continue
       }
-      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, trimmedQuery, kind, searchCache)) {
+      if (trimmedQuery.isNotEmpty() && !matchesNetworkQuery(entry, normalizedQuery, kind, searchCache)) {
         continue
       }
       result.add(entry)
@@ -2610,6 +2633,15 @@ private fun structuredBodyDetailItem(
       } else {
         "Rendering body..."
       },
+      monospace = true,
+      contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
+    )
+  }
+
+  if (source.length > MAX_STRUCTURED_BODY_PARSE_CHARS) {
+    return DetailItem(
+      title = title,
+      content = source,
       monospace = true,
       contentMaxHeight = NETWORK_BODY_SCROLLABLE_DETAIL_MAX_HEIGHT
     )
@@ -5083,24 +5115,26 @@ private class SearchTextCache<T>(
     val text: String
   )
 
-  private val texts = object : LinkedHashMap<String, CachedSearchText<T>>(capacity, 0.75f, true) {
+  private val maxEntries = capacity.coerceIn(1, MAX_SEARCH_CACHE_ENTRIES)
+  private val texts = object : LinkedHashMap<String, CachedSearchText<T>>(maxEntries, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSearchText<T>>?): Boolean {
-      return size > capacity
+      return size > maxEntries
     }
   }
 
-  fun matches(entry: T, query: String): Boolean {
+  @Synchronized
+  fun matches(entry: T, normalizedQuery: String): Boolean {
     val key = keySelector(entry)
     val cached = texts[key]
     val searchText =
       if (cached?.entry === entry) {
         cached.text
       } else {
-        searchTextBuilder(entry).also { built ->
+        searchTextBuilder(entry).lowercase(Locale.ROOT).also { built ->
           texts[key] = CachedSearchText(entry = entry, text = built)
         }
       }
-    return searchText.contains(query, ignoreCase = true)
+    return searchText.contains(normalizedQuery)
   }
 }
 
