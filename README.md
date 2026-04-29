@@ -23,6 +23,8 @@ It adds a small native floating entry inside your app. When enabled, you can ins
 
 ### Screenshots
 
+These screenshots show selected pages and features from the example Expo app using this library.
+
 | Platform | Debug entry | Logs | Network | Request details |
 | --- | --- | --- | --- | --- |
 | iOS | <img src="docs/assets/screenshots/ios-debug-actions.png" alt="iOS debug actions" width="160" /> | <img src="docs/assets/screenshots/ios-logs-panel.png" alt="iOS logs panel" width="160" /> | <img src="docs/assets/screenshots/ios-network-panel.png" alt="iOS network panel" width="160" /> | <img src="docs/assets/screenshots/ios-request-details.png" alt="iOS request details" width="160" /> |
@@ -385,6 +387,8 @@ xcodebuild -workspace example/ios/ExpoInAppDebuggerExample.xcworkspace \
 - **多语言 UI**：支持 `en-US`、`zh-CN`、`zh-TW`、`ja`，也支持自定义文案。
 
 ### 截图
+
+以下截图来自示例 Expo 项目接入本库后的部分页面和功能展示。
 
 | 平台 | 调试入口 | 日志面板 | 网络面板 | 请求详情 |
 | --- | --- | --- | --- | --- |
