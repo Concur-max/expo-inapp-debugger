@@ -23,6 +23,7 @@
     "ios/*.podspec",
     "ios/*.swift",
     "src",
+    "docs/assets/screenshots",
     "expo-module.config.json",
     "README.md"
   ],

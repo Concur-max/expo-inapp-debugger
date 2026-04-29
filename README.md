@@ -21,6 +21,13 @@ It adds a small native floating entry inside your app. When enabled, you can ins
 - **Opt-in native capture**: native logs and native network collection are disabled by default and can be temporarily enabled from App Info.
 - **Localized UI**: supports `en-US`, `zh-CN`, `zh-TW`, `ja`, and custom strings.
 
+### Screenshots
+
+| Platform | Debug entry | Logs | Network | Request details |
+| --- | --- | --- | --- | --- |
+| iOS | <img src="docs/assets/screenshots/ios-debug-actions.png" alt="iOS debug actions" width="160" /> | <img src="docs/assets/screenshots/ios-logs-panel.png" alt="iOS logs panel" width="160" /> | <img src="docs/assets/screenshots/ios-network-panel.png" alt="iOS network panel" width="160" /> | <img src="docs/assets/screenshots/ios-request-details.png" alt="iOS request details" width="160" /> |
+| Android | <img src="docs/assets/screenshots/android-debug-actions.jpg" alt="Android debug actions" width="160" /> | <img src="docs/assets/screenshots/android-logs-panel.jpg" alt="Android logs panel" width="160" /> | <img src="docs/assets/screenshots/android-network-panel.jpg" alt="Android network panel" width="160" /> | <img src="docs/assets/screenshots/android-request-details.jpg" alt="Android request details" width="160" /> |
+
 ### Installation
 
 ```bash
@@ -376,6 +383,13 @@ xcodebuild -workspace example/ios/ExpoInAppDebuggerExample.xcworkspace \
 - **关闭态低开销**：`enabled={false}` 时不会安装采集 hook，runtime 保持休眠。
 - **原生采集显式开启**：native logs / native network 默认关闭，需要在 App Info 中临时打开或通过配置主动开启。
 - **多语言 UI**：支持 `en-US`、`zh-CN`、`zh-TW`、`ja`，也支持自定义文案。
+
+### 截图
+
+| 平台 | 调试入口 | 日志面板 | 网络面板 | 请求详情 |
+| --- | --- | --- | --- | --- |
+| iOS | <img src="docs/assets/screenshots/ios-debug-actions.png" alt="iOS 调试入口" width="160" /> | <img src="docs/assets/screenshots/ios-logs-panel.png" alt="iOS 日志面板" width="160" /> | <img src="docs/assets/screenshots/ios-network-panel.png" alt="iOS 网络面板" width="160" /> | <img src="docs/assets/screenshots/ios-request-details.png" alt="iOS 请求详情" width="160" /> |
+| Android | <img src="docs/assets/screenshots/android-debug-actions.jpg" alt="Android 调试入口" width="160" /> | <img src="docs/assets/screenshots/android-logs-panel.jpg" alt="Android 日志面板" width="160" /> | <img src="docs/assets/screenshots/android-network-panel.jpg" alt="Android 网络面板" width="160" /> | <img src="docs/assets/screenshots/android-request-details.jpg" alt="Android 请求详情" width="160" /> |
 
 ### 安装
 
