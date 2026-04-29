@@ -1,4 +1,5 @@
 import { requireOptionalNativeModule } from 'expo-modules-core';
+import type { EventSubscription } from 'expo-modules-core';
 import type { DebugSnapshot, InAppDebugStrings, ResolvedAndroidNativeLogsConfig } from './types';
 
 export type NativeLogWireEntry = [
@@ -80,6 +81,11 @@ export type NativeConfig = {
   strings: InAppDebugStrings;
 };
 
+export type NativePanelStateEvent = {
+  panelVisible?: boolean;
+  activeFeed?: string;
+};
+
 export type InAppDebugNativeModuleType = {
   configure(config: NativeConfig): Promise<void>;
   ingestBatch(
@@ -92,6 +98,7 @@ export type InAppDebugNativeModuleType = {
   hide(): Promise<void>;
   exportSnapshot(): Promise<DebugSnapshot>;
   emitDiagnostic?(source: string, message: string): Promise<void>;
+  addListener?(eventName: 'onPanelStateChange', listener: (event: NativePanelStateEvent) => void): EventSubscription;
 };
 
 const fallbackModule: InAppDebugNativeModuleType = {

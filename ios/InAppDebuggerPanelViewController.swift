@@ -5,6 +5,17 @@ private enum ActiveTab: Int {
   case logs
   case network
   case appInfo
+
+  var panelStateFeed: String {
+    switch self {
+    case .logs:
+      return "logs"
+    case .network:
+      return "network"
+    case .appInfo:
+      return "appinfo"
+    }
+  }
 }
 
 private let panelSearchPlaceholder = "Search logs..."
@@ -784,6 +795,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     InAppDebuggerStore.shared.setLiveUpdatesEnabled(true)
+    InAppDebuggerPanelStateEvents.emit(panelVisible: true, activeFeed: activeTab.panelStateFeed)
     syncNativeCaptureStates()
     reloadFromStore(reason: .dataOnly, changeSummary: .empty)
   }
@@ -819,6 +831,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
     InAppDebuggerNativeLogCapture.shared.setPanelActive(false)
     InAppDebuggerNativeNetworkCapture.shared.setPanelActive(false)
     InAppDebuggerNativeWebSocketCapture.shared.setPanelActive(false)
+    InAppDebuggerPanelStateEvents.emit(panelVisible: false, activeFeed: "none")
     isSuspendingLiveUpdatesForScroll = false
     InAppDebuggerOverlayManager.shared.panelDidDismiss()
   }
@@ -1130,6 +1143,7 @@ final class InAppDebuggerPanelViewController: UIViewController, UITableViewDeleg
 
     activeTab = resolvedTab
     persistPanelUIState()
+    InAppDebuggerPanelStateEvents.emit(panelVisible: true, activeFeed: activeTab.panelStateFeed)
     deactivateSearchInput()
     syncNativeCaptureStates()
     configureNavigationBar()

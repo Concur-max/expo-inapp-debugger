@@ -4,12 +4,40 @@ import com.facebook.react.bridge.ReadableArray
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
+private const val PANEL_STATE_EVENT = "onPanelStateChange"
+
+object InAppDebuggerPanelStateEvents {
+  @Volatile
+  private var listener: ((Boolean, DebugPanelFeed) -> Unit)? = null
+
+  fun setListener(nextListener: ((Boolean, DebugPanelFeed) -> Unit)?) {
+    listener = nextListener
+  }
+
+  fun emit(panelVisible: Boolean, activeFeed: DebugPanelFeed) {
+    listener?.invoke(panelVisible, activeFeed)
+  }
+}
+
 class InAppDebuggerModule : Module() {
   @Volatile
   private var nativeRuntimeActive = false
 
   override fun definition() = ModuleDefinition {
     Name("InAppDebugger")
+    Events(PANEL_STATE_EVENT)
+
+    OnCreate {
+      InAppDebuggerPanelStateEvents.setListener { panelVisible, activeFeed ->
+        sendEvent(
+          PANEL_STATE_EVENT,
+          mapOf(
+            "panelVisible" to panelVisible,
+            "activeFeed" to activeFeed.name.lowercase()
+          )
+        )
+      }
+    }
 
     AsyncFunction("configure") { rawConfig: Map<String, Any?> ->
       val rawAndroidNativeLogs = rawConfig["androidNativeLogs"] as? Map<*, *>
@@ -145,6 +173,7 @@ class InAppDebuggerModule : Module() {
     }
 
     OnDestroy {
+      InAppDebuggerPanelStateEvents.setListener(null)
       if (!nativeRuntimeActive) {
         return@OnDestroy
       }

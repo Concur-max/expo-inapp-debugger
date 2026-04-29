@@ -248,6 +248,7 @@ object InAppDebuggerStore {
       visibleUiHandlerThread?.quitSafely()
       visibleUiHandlerThread = null
       uiHandler = null
+      InAppDebuggerPanelStateEvents.emit(false, DebugPanelFeed.None)
     }
     InAppDebuggerNativeNetworkCapture.setPanelActive(false)
   }
@@ -327,6 +328,7 @@ object InAppDebuggerStore {
       } else {
         publishVisibleFeedNowLocked()
       }
+      InAppDebuggerPanelStateEvents.emit(panelVisible, activeFeed)
 
       val currentNetworkPanelActive = isLiveNetworkPanelActiveLocked()
       if (currentNetworkPanelActive != previousNetworkPanelActive) {
@@ -359,6 +361,7 @@ object InAppDebuggerStore {
       } else if (panelVisible) {
         publishVisibleFeedNowLocked()
       }
+      InAppDebuggerPanelStateEvents.emit(panelVisible, activeFeed)
 
       val currentNetworkPanelActive = isLiveNetworkPanelActiveLocked()
       if (currentNetworkPanelActive != previousNetworkPanelActive) {

@@ -1,10 +1,33 @@
 import ExpoModulesCore
 
 private var inAppDebuggerNativeRuntimeActive = false
+private let inAppDebuggerPanelStateEvent = "onPanelStateChange"
+
+enum InAppDebuggerPanelStateEvents {
+  private static var listener: ((Bool, String) -> Void)?
+
+  static func setListener(_ nextListener: ((Bool, String) -> Void)?) {
+    listener = nextListener
+  }
+
+  static func emit(panelVisible: Bool, activeFeed: String) {
+    listener?(panelVisible, activeFeed)
+  }
+}
 
 public final class InAppDebuggerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("InAppDebugger")
+    Events(inAppDebuggerPanelStateEvent)
+
+    OnCreate {
+      InAppDebuggerPanelStateEvents.setListener { [weak self] panelVisible, activeFeed in
+        self?.sendEvent(inAppDebuggerPanelStateEvent, [
+          "panelVisible": panelVisible,
+          "activeFeed": activeFeed,
+        ])
+      }
+    }
 
     AsyncFunction("configure") { (rawConfig: [String: Any]) in
       let config = DebugConfig(
@@ -78,6 +101,7 @@ public final class InAppDebuggerModule: Module {
     }
 
     OnDestroy {
+      InAppDebuggerPanelStateEvents.setListener(nil)
       guard inAppDebuggerNativeRuntimeActive else {
         return
       }

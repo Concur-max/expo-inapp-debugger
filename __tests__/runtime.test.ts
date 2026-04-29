@@ -2,6 +2,9 @@ import { DebugRuntime, formatMessage, resolveProviderConfig } from '../src/inter
 
 jest.useFakeTimers();
 
+const ACTIVE_FLUSH_DELAY_MS = 64;
+const BACKGROUND_FLUSH_DELAY_MS = 400;
+
 function flushPromises() {
   return Promise.resolve().then(() => undefined);
 }
@@ -117,7 +120,7 @@ describe('DebugRuntime', () => {
     console.info('details');
     console.error('boom');
 
-    jest.advanceTimersByTime(63);
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS - 1);
     await flushPromises();
     expect(nativeModule.ingestBatch).not.toHaveBeenCalled();
 
@@ -175,6 +178,7 @@ describe('DebugRuntime', () => {
 
     expect(networkCollector.enable).toHaveBeenCalledTimes(1);
     expect(networkCollector.disable).not.toHaveBeenCalled();
+    expect(networkCollector.updateOptions).toHaveBeenLastCalledWith({ maxRequests: 100 });
     expect(nativeModule.configure).toHaveBeenCalledWith(
       expect.objectContaining({
         enableNetworkTab: true,
@@ -182,6 +186,58 @@ describe('DebugRuntime', () => {
         enableNativeNetwork: false,
       })
     );
+  });
+
+  it('uses a shorter flush delay only while the Network panel is active', async () => {
+    let panelStateListener: ((event: { panelVisible?: boolean; activeFeed?: string }) => void) | undefined;
+    const nativeModule = {
+      configure: jest.fn().mockResolvedValue(undefined),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+      addListener: jest.fn((_eventName, listener) => {
+        panelStateListener = listener;
+        return { remove: jest.fn() };
+      }),
+    };
+    const networkCollector = {
+      enable: jest.fn(),
+      disable: jest.fn(),
+      updateOptions: jest.fn(),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => networkCollector,
+      consoleRef: {
+        log: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    });
+
+    await runtime.registerProvider(resolveProviderConfig({ enabled: true }));
+
+    expect(nativeModule.addListener).toHaveBeenCalledWith('onPanelStateChange', expect.any(Function));
+    expect(networkCollector.updateOptions).toHaveBeenLastCalledWith({ maxRequests: 100 });
+
+    runtime.log('log', ['background']);
+    jest.advanceTimersByTime(ACTIVE_FLUSH_DELAY_MS);
+    await flushPromises();
+    expect(nativeModule.ingestBatch).not.toHaveBeenCalled();
+
+    panelStateListener?.({ panelVisible: true, activeFeed: 'network' });
+    expect(networkCollector.updateOptions).toHaveBeenLastCalledWith({ maxRequests: 100 });
+
+    jest.advanceTimersByTime(ACTIVE_FLUSH_DELAY_MS);
+    await flushPromises();
+    expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
+
+    panelStateListener?.({ panelVisible: false, activeFeed: 'none' });
+    expect(networkCollector.updateOptions).toHaveBeenLastCalledWith({ maxRequests: 100 });
   });
 
   it('does not install React Native network collection when the network tab is disabled', async () => {
@@ -259,7 +315,7 @@ describe('DebugRuntime', () => {
       console.log(`log-${index}`);
     }
 
-    jest.advanceTimersByTime(64);
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
     await flushPromises();
 
     const [logs] = nativeModule.ingestBatch.mock.calls[0];
@@ -364,7 +420,7 @@ describe('DebugRuntime', () => {
     const handler = globalHandler as ((error: Error, isFatal?: boolean) => void) | null;
     handler?.(new Error('fatal crash'), true);
     listeners.get('unhandledrejection')?.({ reason: 'promise failed' });
-    jest.advanceTimersByTime(64);
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
     await flushPromises();
 
     const [logs, errors] = nativeModule.ingestBatch.mock.calls[0];
@@ -410,13 +466,13 @@ describe('DebugRuntime', () => {
 
     await runtime.registerProvider(resolveProviderConfig({ enabled: true }));
     runtime.log('log', ['first']);
-    jest.advanceTimersByTime(64);
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
     await flushPromises();
 
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
 
     runtime.log('log', ['second']);
-    jest.advanceTimersByTime(64);
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
     await flushPromises();
 
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
@@ -487,7 +543,7 @@ describe('DebugRuntime', () => {
       responseBody: '{"ok":true}',
     });
 
-    jest.advanceTimersByTime(64);
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
     await flushPromises();
 
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
@@ -498,6 +554,66 @@ describe('DebugRuntime', () => {
     expect(batch.network[0][10]).toBe(200);
     expect(batch.network[0][11]).toEqual(['accept', 'application/json']);
     expect(batch.network[0][12]).toEqual(['content-type', 'application/json']);
+    expect(batch.network[0][14]).toBe('{"ok":true}');
     expect(typeof batch.network[0][32]).toBe('number');
+  });
+
+  it('keeps full network previews while the Network panel is active', async () => {
+    let panelStateListener: ((event: { panelVisible?: boolean; activeFeed?: string }) => void) | undefined;
+    const nativeModule = {
+      configure: jest.fn().mockResolvedValue(undefined),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+      addListener: jest.fn((_eventName, listener) => {
+        panelStateListener = listener;
+        return { remove: jest.fn() };
+      }),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => ({
+        enable: jest.fn(),
+        disable: jest.fn(),
+        updateOptions: jest.fn(),
+      }),
+      consoleRef: {
+        log: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    });
+
+    await runtime.registerProvider(resolveProviderConfig({ enabled: true }));
+    panelStateListener?.({ panelVisible: true, activeFeed: 'network' });
+    runtime.captureNetwork({
+      id: 'http_full',
+      kind: 'http',
+      method: 'POST',
+      url: 'https://example.com/full',
+      origin: 'js',
+      state: 'success',
+      startedAt: 1,
+      updatedAt: 2,
+      endedAt: 2,
+      durationMs: 1,
+      status: 200,
+      requestBody: '{"name":"debug"}',
+      responseBody: '{"ok":true}',
+      messages: '>> hello',
+    });
+
+    jest.advanceTimersByTime(ACTIVE_FLUSH_DELAY_MS);
+    await flushPromises();
+
+    const network = nativeModule.ingestBatch.mock.calls[0][2];
+    expect(network).toHaveLength(1);
+    expect(network[0][13]).toBe('{"name":"debug"}');
+    expect(network[0][14]).toBe('{"ok":true}');
+    expect(network[0][31]).toBe('>> hello');
   });
 });

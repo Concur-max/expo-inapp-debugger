@@ -408,11 +408,11 @@ export class NetworkCollector {
     });
 
     this.webSocketInterceptor.setSendCallback?.((data: unknown, socketId: number) => {
-      this.appendMessage(socketId, `>> ${safeWebSocketPreview(data)}`);
+      this.appendMessage(socketId, 'out', data);
     });
 
     this.webSocketInterceptor.setOnMessageCallback?.((data: unknown, socketId: number) => {
-      this.appendMessage(socketId, `<< ${safeWebSocketPreview(data)}`);
+      this.appendMessage(socketId, 'in', data);
     });
 
     this.webSocketInterceptor.setOnErrorCallback?.((payload: { message?: string }, socketId: number) => {
@@ -463,11 +463,23 @@ export class NetworkCollector {
     this.options.onDiagnostic?.('JSNetwork', 'attachWebSocket enableInterception called');
   }
 
-  private appendMessage(socketId: number, message: string) {
+  private appendMessage(socketId: number, direction: 'in' | 'out', data: unknown) {
     const entry = this.requests.get(`ws_${socketId}`);
     if (!entry) return;
+    const preview = safeWebSocketPreview(data);
+    if (direction === 'in') {
+      entry.messageCountIn = (entry.messageCountIn ?? 0) + 1;
+      if (typeof data === 'string') {
+        entry.bytesIn = (entry.bytesIn ?? 0) + data.length;
+      }
+    } else {
+      entry.messageCountOut = (entry.messageCountOut ?? 0) + 1;
+      if (typeof data === 'string') {
+        entry.bytesOut = (entry.bytesOut ?? 0) + data.length;
+      }
+    }
     const messagesBuffer = entry.messagesBuffer ?? new CappedStringBuffer(MAX_WEBSOCKET_MESSAGE_HISTORY);
-    messagesBuffer.append(message);
+    messagesBuffer.append(`${direction === 'in' ? '<<' : '>>'} ${preview}`);
     entry.messagesBuffer = messagesBuffer;
     entry.messagesDirty = true;
     entry.updatedAt = now();

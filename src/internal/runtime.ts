@@ -4,6 +4,7 @@ import type {
   NativeErrorWireEntry,
   NativeLogWireEntry,
   NativeNetworkWireEntry,
+  NativePanelStateEvent,
 } from '../InAppDebugModule';
 import type {
   AndroidLogcatBuffer,
@@ -57,9 +58,14 @@ type RuntimeNativeModule = {
   hide(): Promise<void>;
   exportSnapshot(): Promise<any>;
   emitDiagnostic?: (source: string, message: string) => Promise<void>;
+  addListener?: (
+    eventName: 'onPanelStateChange',
+    listener: (event: NativePanelStateEvent) => void
+  ) => { remove(): void };
 };
 
-const FLUSH_DELAY_MS = 64;
+const ACTIVE_FLUSH_DELAY_MS = 64;
+const BACKGROUND_FLUSH_DELAY_MS = 400;
 const MAX_BUFFERED_BATCH_SIZE = 120;
 const MAX_QUEUE_OVERFLOW_MARGIN = MAX_BUFFERED_BATCH_SIZE;
 const MAX_LOG_MESSAGE_LENGTH = 12_000;
@@ -82,7 +88,11 @@ export type DebugRuntimeDependencies = {
     nextTimelineSequence: () => number;
     onInternalWarning?: (message: string, error?: unknown) => void;
     onDiagnostic?: (component: string, message: string) => void;
-  }) => { enable(): void; disable(): void; updateOptions(options: { maxRequests: number }): void };
+  }) => {
+    enable(): void;
+    disable(): void;
+    updateOptions(options: { maxRequests: number }): void;
+  };
 };
 
 type RuntimeIdentity = {
@@ -191,6 +201,9 @@ export class DebugRuntime {
   private lastAppliedConfig: ResolvedInAppDebugConfig | null = null;
   private originalGlobalHandler: ErrorUtilsHandler | null = null;
   private unhandledRejectionHandler: ((event: unknown) => void) | null = null;
+  private panelStateSubscription: { remove(): void } | null = null;
+  private panelVisible = false;
+  private activeFeed = 'none';
 
   constructor(private readonly dependencies: DebugRuntimeDependencies) {
     this.now = dependencies.now ?? Date.now;
@@ -227,7 +240,7 @@ export class DebugRuntime {
 
   primeProviderConfig(config: ResolvedInAppDebugConfig) {
     this.providerConfig = config;
-    this.networkCollector.updateOptions({ maxRequests: config.maxRequests });
+    this.updateNetworkCollectorOptions(config);
   }
 
   async registerProvider(config: ResolvedInAppDebugConfig) {
@@ -239,7 +252,7 @@ export class DebugRuntime {
           `maxLogs=${config.maxLogs} maxRequests=${config.maxRequests}`
       );
     }
-    this.networkCollector.updateOptions({ maxRequests: config.maxRequests });
+    this.updateNetworkCollectorOptions(config);
     await this.applyConfig();
   }
 
@@ -393,6 +406,7 @@ export class DebugRuntime {
     }
 
     if (nextConfig.enabled) {
+      this.installPanelStateListener();
       this.installCollectors(nextConfig.enableNetworkTab);
       this.lastAppliedConfig = nextConfig;
       return;
@@ -435,6 +449,7 @@ export class DebugRuntime {
     }
     this.installGlobalErrorHandler();
     this.installUnhandledRejectionHandler();
+    this.updateNetworkCollectorOptions(this.providerConfig);
     if (enableNetworkCapture) {
       this.networkCollector.enable();
     } else {
@@ -453,6 +468,9 @@ export class DebugRuntime {
     }
 
     this.networkCollector.disable();
+    this.removePanelStateListener();
+    this.panelVisible = false;
+    this.activeFeed = 'none';
 
     const globalScope = globalThis as RuntimeGlobal;
     if (globalScope.ErrorUtils?.setGlobalHandler && this.originalGlobalHandler) {
@@ -550,7 +568,44 @@ export class DebugRuntime {
     this.flushTimer = this.setTimeoutFn(() => {
       this.flushTimer = null;
       this.requestFlush();
-    }, FLUSH_DELAY_MS);
+    }, this.currentFlushDelayMs());
+  }
+
+  private installPanelStateListener() {
+    if (this.panelStateSubscription || !this.dependencies.nativeModule.addListener) {
+      return;
+    }
+
+    this.panelStateSubscription = this.dependencies.nativeModule.addListener('onPanelStateChange', (event) => {
+      const wasFull = this.isNetworkFeedActive();
+      this.panelVisible = event.panelVisible === true;
+      this.activeFeed = typeof event.activeFeed === 'string' ? event.activeFeed.toLowerCase() : 'none';
+      const isFull = this.isNetworkFeedActive();
+      this.updateNetworkCollectorOptions(this.providerConfig);
+      if (!wasFull && isFull && this.pendingEntryCount() > 0) {
+        this.cancelScheduledFlush();
+        this.scheduleFlushIfNeeded();
+      }
+    });
+  }
+
+  private removePanelStateListener() {
+    this.panelStateSubscription?.remove();
+    this.panelStateSubscription = null;
+  }
+
+  private updateNetworkCollectorOptions(config: ResolvedInAppDebugConfig) {
+    this.networkCollector.updateOptions({
+      maxRequests: config.maxRequests,
+    });
+  }
+
+  private currentFlushDelayMs() {
+    return this.isNetworkFeedActive() ? ACTIVE_FLUSH_DELAY_MS : BACKGROUND_FLUSH_DELAY_MS;
+  }
+
+  private isNetworkFeedActive() {
+    return this.panelVisible && this.activeFeed === 'network';
   }
 
   private pendingEntryCount(): number {

@@ -150,6 +150,8 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     expect(latestEntry()).toMatchObject({
       id: 'ws_7',
       state: 'open',
+      messageCountOut: 1,
+      bytesOut: 5,
       messages: '>> hello',
     });
 
@@ -229,6 +231,34 @@ describe('NetworkCollector WebSocket lifecycle', () => {
     expect(messages).toHaveLength(100);
     expect(messages?.[0]).toBe('>> msg-5');
     expect(messages?.[99]).toBe('>> msg-104');
+  });
+
+  it('captures websocket counters together with message previews', () => {
+    const { NetworkCollector, callbacks, materializeNetworkEntry } = loadNetworkCollector();
+    const entries: Array<Record<string, unknown>> = [];
+    const collector = new NetworkCollector({
+      maxRequests: 20,
+      onEntry: (entry) => {
+        entries.push(entry);
+      },
+    });
+    const latestEntry = () => materializeNetworkEntry(entries[entries.length - 1] as any);
+
+    collector.enable();
+
+    callbacks.connect?.('wss://echo.example/socket', null, null, 12);
+    callbacks.onOpen?.(12);
+    callbacks.send?.('hello', 12);
+    callbacks.onMessage?.('world', 12);
+
+    expect(latestEntry()).toMatchObject({
+      id: 'ws_12',
+      messageCountOut: 1,
+      messageCountIn: 1,
+      bytesOut: 5,
+      bytesIn: 5,
+      messages: '>> hello\n<< world',
+    });
   });
 
   it('normalizes Android XHR raw response headers into a header map', () => {
@@ -374,6 +404,7 @@ describe('NetworkCollector WebSocket lifecycle', () => {
       status: 200,
       responseBody: '{"ok":true}',
     });
+    expect(latestEntry()?.requestBody).toBe('{"name":"demo"}');
     expect(latestEntry()?.error).toBeUndefined();
   });
 
