@@ -2,368 +2,11 @@
 
 [中文](#中文) · [English](#english)
 
-Native in-app debugger for Expo and React Native apps.
+一个给 Expo / React Native 应用使用的原生应用内调试工具。
 
-It adds a small native floating entry inside your app. When enabled, you can inspect JS logs, React errors, global exceptions, network requests, WebSocket activity, native logs, native network hints, and basic app/runtime information directly on the device.
+它会在宿主 App 内放一个原生浮动入口。启用后，可以直接在设备上查看 JS 日志、React 错误、全局异常、网络请求、WebSocket、原生日志、原生网络提示，以及基础 App / runtime 信息。
 
-> This package includes iOS and Android native code. Expo Go is not supported. Use Expo Dev Client, Expo prebuild, or bare React Native.
-
----
-
-## English
-
-### Highlights
-
-- **On-device debugging**: inspect logs, errors, network requests, WebSocket events, and app info without attaching a computer.
-- **Expo / React Native friendly**: works with Expo Dev Client, Expo prebuild, and bare React Native projects.
-- **Production-gated by design**: keep the package in production builds, then enable it only for trusted users or hidden debug flows.
-- **Low idle overhead**: when `enabled={false}`, collectors are not installed and the runtime stays asleep.
-- **Opt-in native capture**: native logs and native network collection are disabled by default and can be temporarily enabled from App Info.
-- **Localized UI**: supports `en-US`, `zh-CN`, `zh-TW`, `ja`, and custom strings.
-
-### Screenshots
-
-These screenshots show selected pages and features from the example Expo app using this library.
-
-| Platform | Debug entry | Logs | Network | Request details |
-| --- | --- | --- | --- | --- |
-| iOS | <img src="docs/assets/screenshots/ios-debug-actions.png" alt="iOS debug actions" width="160" /> | <img src="docs/assets/screenshots/ios-logs-panel.png" alt="iOS logs panel" width="160" /> | <img src="docs/assets/screenshots/ios-network-panel.png" alt="iOS network panel" width="160" /> | <img src="docs/assets/screenshots/ios-request-details.png" alt="iOS request details" width="160" /> |
-| Android | <img src="docs/assets/screenshots/android-debug-actions.jpg" alt="Android debug actions" width="160" /> | <img src="docs/assets/screenshots/android-logs-panel.jpg" alt="Android logs panel" width="160" /> | <img src="docs/assets/screenshots/android-network-panel.jpg" alt="Android network panel" width="160" /> | <img src="docs/assets/screenshots/android-request-details.jpg" alt="Android request details" width="160" /> |
-
-### Installation
-
-```bash
-pnpm add expo-inapp-debugger
-```
-
-Other package managers also work:
-
-```bash
-npm install expo-inapp-debugger
-yarn add expo-inapp-debugger
-bun add expo-inapp-debugger
-```
-
-Rebuild the native app after installation:
-
-```bash
-npx expo prebuild
-npx expo run:ios
-# or
-npx expo run:android
-```
-
-For bare React Native projects, follow your existing CocoaPods / Gradle rebuild flow.
-
-### Quick Start
-
-The simplest integration is `InAppDebugRoot`:
-
-```tsx
-import { InAppDebugRoot } from 'expo-inapp-debugger';
-
-export default function Root() {
-  return (
-    <InAppDebugRoot enabled={__DEV__} locale="en-US">
-      <App />
-    </InAppDebugRoot>
-  );
-}
-```
-
-`InAppDebugRoot` is equivalent to `InAppDebugProvider + InAppDebugBoundary`. It is convenient when you want the debugger and the built-in React Error Boundary together.
-
-For production builds, `InAppDebugProvider` is usually the safest default because it does not change your app's React error handling semantics:
-
-```tsx
-import { InAppDebugProvider } from 'expo-inapp-debugger';
-
-export default function Root() {
-  return (
-    <InAppDebugProvider enabled={__DEV__} locale="en-US">
-      <App />
-    </InAppDebugProvider>
-  );
-}
-```
-
-### Integration Choices
-
-| API | Best for | Host app behavior | Disabled overhead |
-| --- | --- | --- | --- |
-| `InAppDebugProvider` | Production-safe integration | Does not add a React Error Boundary | Very low |
-| `InAppDebugRoot` | Fastest setup | Adds the built-in React Error Boundary | Low |
-| `InAppDebugBoundary` | Boundary-only usage | Captures React render errors and renders fallback UI | Independent from debugger state |
-
-`enabled` is the authoritative switch when `InAppDebugProvider` is mounted. Only when it becomes `true` will the debugger runtime be created and React Native collectors installed.
-
-Native logs and native network capture are still opt-in. They are disabled by default and can be enabled from the App Info panel or through explicit Provider props.
-
-### Production Gating
-
-You can ship the package in production, but the recommended pattern is to bind `enabled` to a trusted business switch instead of enabling it for every user.
-
-Good activation patterns include:
-
-- Tap a hidden area 5-10 times, such as the app version row on the About screen.
-- Enter a temporary debug passphrase in a specific internal input field.
-- Enable it only for internal accounts, QA users, or devices allowed by remote config.
-- Combine a local gesture with server-side permission so random users cannot discover it accidentally.
-- Turn it off immediately after the debugging session ends.
-
-Recommended production priority:
-
-1. **Lowest overhead**: do not import or mount the debugger until the trusted gate passes.
-2. **Balanced**: import the package, but mount `InAppDebugProvider enabled={debuggerEnabled}`.
-3. **Simplest**: use `InAppDebugRoot` if you accept the built-in Error Boundary behavior.
-
-If you want the non-enabled path to be as close to zero cost as possible, defer the import until the gate passes:
-
-```tsx
-export default function Root() {
-  const debuggerEnabled =
-    isInternalUser && remoteConfig.inAppDebuggerEnabled;
-
-  if (!debuggerEnabled) {
-    return <App />;
-  }
-
-  const { InAppDebugProvider } = require('expo-inapp-debugger');
-
-  return (
-    <InAppDebugProvider enabled locale="en-US">
-      <App />
-    </InAppDebugProvider>
-  );
-}
-```
-
-If you prefer normal static imports, keep `enabled` off for ordinary users:
-
-```tsx
-import { InAppDebugProvider } from 'expo-inapp-debugger';
-
-export default function Root() {
-  const debuggerEnabled =
-    isInternalUser && remoteConfig.inAppDebuggerEnabled;
-
-  return (
-    <InAppDebugProvider enabled={debuggerEnabled} locale="en-US">
-      <App />
-    </InAppDebugProvider>
-  );
-}
-```
-
-### Performance Notes
-
-- For typical applications, keeping the package installed does not create user-noticeable performance impact when the debugger is gated correctly.
-- With `enabled={false}`, the debugger stays in a dormant path: no JS log/network hooks are installed and no native collection is started. The impact is effectively close to zero and can usually be ignored.
-- When enabled, the debugger intentionally does work: it records logs, errors, requests, and UI state for debugging. Enable it only for targeted sessions.
-- Native logs and native network capture are heavier than JS-only capture, so they are opt-in and should be turned on temporarily.
-- Avoid unbounded buffers. Keep `maxLogs`, `maxErrors`, and `maxRequests` reasonable for your app.
-- Prefer fixed hidden activation flows, then disable the debugger when it is no longer needed.
-
-### Provider Options
-
-```tsx
-<InAppDebugProvider
-  enabled={__DEV__}
-  initialVisible
-  enableNetworkTab
-  enableNativeLogs={false}
-  enableNativeNetwork={false}
-  maxLogs={2000}
-  maxErrors={100}
-  maxRequests={100}
-  locale="en-US"
->
-  <App />
-</InAppDebugProvider>
-```
-
-| Prop | Default | Description |
-| --- | --- | --- |
-| `enabled` | `false` | Enables the debugger runtime and collectors. |
-| `initialVisible` | `true` | Shows the native floating entry when enabled. |
-| `enableNetworkTab` | `true` | Enables the network panel and JS network collection. |
-| `enableNativeLogs` | `false` | Starts native log capture immediately. Usually keep this off and enable temporarily from App Info. |
-| `enableNativeNetwork` | `false` | Starts native network capture immediately. Usually keep this off and enable temporarily from App Info. |
-| `maxLogs` | `2000` | Maximum number of log entries kept in memory/native store. |
-| `maxErrors` | `100` | Maximum number of error entries kept. |
-| `maxRequests` | `100` | Maximum number of network entries kept. |
-| `locale` | `auto` | UI locale: `auto`, `en-US`, `zh-CN`, `zh-TW`, or `ja`. |
-| `strings` | - | Partial custom UI strings. |
-| `androidNativeLogs` | - | Advanced Android native log options. |
-
-### What It Captures
-
-- JS console calls: `console.log`, `info`, `warn`, `error`, `debug`.
-- JS errors: global errors, unhandled Promise rejections, and React Error Boundary errors.
-- Manual entries through `inAppDebug.log()` and `inAppDebug.captureError()`.
-- Network activity from JS `fetch`, `XMLHttpRequest`, and `WebSocket`.
-- iOS native logs after opt-in: stdout, stderr, OSLog polling, uncaught exception markers, fatal signal markers, and partial URLSession information.
-- Android native logs after opt-in: app-process logcat, stdout, stderr, uncaught Java/Kotlin exceptions, and partial OkHttp HTTP / WebSocket information.
-
-### Manual Logs and Errors
-
-```tsx
-import { inAppDebug } from 'expo-inapp-debugger';
-
-inAppDebug.log('info', 'User tapped checkout', {
-  orderId: 'order_123',
-});
-
-inAppDebug.captureError('global', 'Checkout failed', error);
-```
-
-`inAppDebug.log(level, ...args)` supports:
-
-```ts
-'log' | 'info' | 'warn' | 'error' | 'debug'
-```
-
-### Runtime Control
-
-```tsx
-import { InAppDebugController } from 'expo-inapp-debugger';
-
-await InAppDebugController.show();
-await InAppDebugController.hide();
-
-await InAppDebugController.clear('logs');
-await InAppDebugController.clear('network');
-await InAppDebugController.clear('all');
-
-const snapshot = await InAppDebugController.exportSnapshot();
-console.log(snapshot.logs, snapshot.errors, snapshot.network);
-```
-
-If `InAppDebugProvider` is mounted, prefer controlling the debugger through its `enabled` prop. `enable()` and `disable()` are kept as compatibility APIs for setups without a Provider.
-
-### Android Native Network
-
-If your Android app or SDKs create their own `OkHttpClient`, wrap the client with the helper so native OkHttp requests can appear in the debugger when Native network is enabled:
-
-```kotlin
-import expo.modules.inappdebugger.InAppDebuggerOkHttpIntegration
-import okhttp3.OkHttpClient
-
-val client =
-  InAppDebuggerOkHttpIntegration
-    .newBuilder()
-    .build()
-```
-
-With an existing builder or client:
-
-```kotlin
-val builder = OkHttpClient.Builder()
-InAppDebuggerOkHttpIntegration.instrument(builder)
-
-val client = OkHttpClient()
-val instrumentedClient = InAppDebuggerOkHttpIntegration.instrument(client)
-```
-
-This is not system-wide packet capture. Non-OkHttp stacks such as `HttpURLConnection`, Cronet, or black-box SDK network layers may need separate integration.
-
-### Android Native Logs
-
-Android native logs are disabled by default. Enable them from App Info or explicitly through Provider options:
-
-```tsx
-<InAppDebugProvider
-  enabled
-  enableNativeLogs
-  androidNativeLogs={{
-    enabled: true,
-    captureLogcat: true,
-    captureStdoutStderr: true,
-    captureUncaughtExceptions: true,
-    logcatScope: 'app',
-    rootMode: 'off',
-    buffers: ['main', 'system', 'crash'],
-  }}
->
-  <App />
-</InAppDebugProvider>
-```
-
-On rooted test devices, you can explicitly opt in to broader device logcat access:
-
-```tsx
-import { InAppDebugController } from 'expo-inapp-debugger';
-
-await InAppDebugController.configureAndroidNativeLogs({
-  logcatScope: 'device',
-  rootMode: 'auto',
-  buffers: ['main', 'system', 'crash'],
-});
-```
-
-If root is unavailable, denied, or fails, capture falls back to app-only logcat.
-
-### iOS Notes
-
-- Native logs are disabled by default and are prepared only after Native logs is enabled.
-- stdout, stderr, and OSLog collection run only when native logs are enabled and relevant UI state requires them.
-- Native network capture is disabled by default and installs URLProtocol / URLSession paths only after opt-in.
-- iOS cannot guarantee replaying every log emitted before the debugger starts, but it tries to preserve uncaught crash reports.
-- Once native crash/signal handlers are installed in the current process, disabling native logs does not fully restore the exact same state as never enabling them.
-
-### Example App
-
-```bash
-cd example
-pnpm install
-npx expo prebuild
-npx expo run:ios
-# or
-npx expo run:android
-```
-
-Start Metro in another terminal:
-
-```bash
-cd example
-pnpm start
-```
-
-LAN device testing:
-
-```bash
-cd example
-pnpm start:lan
-```
-
-The example also includes local HTTP and WebSocket mock servers:
-
-```bash
-cd example
-pnpm http:mock
-pnpm ws:echo
-```
-
-If you see `No script URL provided`, start Metro first and reopen the installed dev client. If needed, run `npx expo run:ios` or `npx expo run:android` again.
-
-### Local Validation
-
-```bash
-pnpm typecheck
-pnpm test
-npm pack --dry-run
-```
-
-For iOS changes, also consider:
-
-```bash
-xcodebuild -workspace example/ios/ExpoInAppDebuggerExample.xcworkspace \
-  -scheme ExpoInAppDebuggerExample \
-  -configuration Debug \
-  -sdk iphonesimulator \
-  -destination 'generic/platform=iOS Simulator' \
-  build
-```
+> 这个库包含 iOS / Android 原生代码，Expo Go 不支持。请使用 Expo Dev Client、Expo prebuild，或 bare React Native。
 
 ---
 
@@ -720,6 +363,363 @@ npm pack --dry-run
 ```
 
 iOS 改动建议额外跑：
+
+```bash
+xcodebuild -workspace example/ios/ExpoInAppDebuggerExample.xcworkspace \
+  -scheme ExpoInAppDebuggerExample \
+  -configuration Debug \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  build
+```
+
+---
+
+## English
+
+### Highlights
+
+- **On-device debugging**: inspect logs, errors, network requests, WebSocket events, and app info without attaching a computer.
+- **Expo / React Native friendly**: works with Expo Dev Client, Expo prebuild, and bare React Native projects.
+- **Production-gated by design**: keep the package in production builds, then enable it only for trusted users or hidden debug flows.
+- **Low idle overhead**: when `enabled={false}`, collectors are not installed and the runtime stays asleep.
+- **Opt-in native capture**: native logs and native network collection are disabled by default and can be temporarily enabled from App Info.
+- **Localized UI**: supports `en-US`, `zh-CN`, `zh-TW`, `ja`, and custom strings.
+
+### Screenshots
+
+These screenshots show selected pages and features from the example Expo app using this library.
+
+| Platform | Debug entry | Logs | Network | Request details |
+| --- | --- | --- | --- | --- |
+| iOS | <img src="docs/assets/screenshots/ios-debug-actions.png" alt="iOS debug actions" width="160" /> | <img src="docs/assets/screenshots/ios-logs-panel.png" alt="iOS logs panel" width="160" /> | <img src="docs/assets/screenshots/ios-network-panel.png" alt="iOS network panel" width="160" /> | <img src="docs/assets/screenshots/ios-request-details.png" alt="iOS request details" width="160" /> |
+| Android | <img src="docs/assets/screenshots/android-debug-actions.jpg" alt="Android debug actions" width="160" /> | <img src="docs/assets/screenshots/android-logs-panel.jpg" alt="Android logs panel" width="160" /> | <img src="docs/assets/screenshots/android-network-panel.jpg" alt="Android network panel" width="160" /> | <img src="docs/assets/screenshots/android-request-details.jpg" alt="Android request details" width="160" /> |
+
+### Installation
+
+```bash
+pnpm add expo-inapp-debugger
+```
+
+Other package managers also work:
+
+```bash
+npm install expo-inapp-debugger
+yarn add expo-inapp-debugger
+bun add expo-inapp-debugger
+```
+
+Rebuild the native app after installation:
+
+```bash
+npx expo prebuild
+npx expo run:ios
+# or
+npx expo run:android
+```
+
+For bare React Native projects, follow your existing CocoaPods / Gradle rebuild flow.
+
+### Quick Start
+
+The simplest integration is `InAppDebugRoot`:
+
+```tsx
+import { InAppDebugRoot } from 'expo-inapp-debugger';
+
+export default function Root() {
+  return (
+    <InAppDebugRoot enabled={__DEV__} locale="en-US">
+      <App />
+    </InAppDebugRoot>
+  );
+}
+```
+
+`InAppDebugRoot` is equivalent to `InAppDebugProvider + InAppDebugBoundary`. It is convenient when you want the debugger and the built-in React Error Boundary together.
+
+For production builds, `InAppDebugProvider` is usually the safest default because it does not change your app's React error handling semantics:
+
+```tsx
+import { InAppDebugProvider } from 'expo-inapp-debugger';
+
+export default function Root() {
+  return (
+    <InAppDebugProvider enabled={__DEV__} locale="en-US">
+      <App />
+    </InAppDebugProvider>
+  );
+}
+```
+
+### Integration Choices
+
+| API | Best for | Host app behavior | Disabled overhead |
+| --- | --- | --- | --- |
+| `InAppDebugProvider` | Production-safe integration | Does not add a React Error Boundary | Very low |
+| `InAppDebugRoot` | Fastest setup | Adds the built-in React Error Boundary | Low |
+| `InAppDebugBoundary` | Boundary-only usage | Captures React render errors and renders fallback UI | Independent from debugger state |
+
+`enabled` is the authoritative switch when `InAppDebugProvider` is mounted. Only when it becomes `true` will the debugger runtime be created and React Native collectors installed.
+
+Native logs and native network capture are still opt-in. They are disabled by default and can be enabled from the App Info panel or through explicit Provider props.
+
+### Production Gating
+
+You can ship the package in production, but the recommended pattern is to bind `enabled` to a trusted business switch instead of enabling it for every user.
+
+Good activation patterns include:
+
+- Tap a hidden area 5-10 times, such as the app version row on the About screen.
+- Enter a temporary debug passphrase in a specific internal input field.
+- Enable it only for internal accounts, QA users, or devices allowed by remote config.
+- Combine a local gesture with server-side permission so random users cannot discover it accidentally.
+- Turn it off immediately after the debugging session ends.
+
+Recommended production priority:
+
+1. **Lowest overhead**: do not import or mount the debugger until the trusted gate passes.
+2. **Balanced**: import the package, but mount `InAppDebugProvider enabled={debuggerEnabled}`.
+3. **Simplest**: use `InAppDebugRoot` if you accept the built-in Error Boundary behavior.
+
+If you want the non-enabled path to be as close to zero cost as possible, defer the import until the gate passes:
+
+```tsx
+export default function Root() {
+  const debuggerEnabled =
+    isInternalUser && remoteConfig.inAppDebuggerEnabled;
+
+  if (!debuggerEnabled) {
+    return <App />;
+  }
+
+  const { InAppDebugProvider } = require('expo-inapp-debugger');
+
+  return (
+    <InAppDebugProvider enabled locale="en-US">
+      <App />
+    </InAppDebugProvider>
+  );
+}
+```
+
+If you prefer normal static imports, keep `enabled` off for ordinary users:
+
+```tsx
+import { InAppDebugProvider } from 'expo-inapp-debugger';
+
+export default function Root() {
+  const debuggerEnabled =
+    isInternalUser && remoteConfig.inAppDebuggerEnabled;
+
+  return (
+    <InAppDebugProvider enabled={debuggerEnabled} locale="en-US">
+      <App />
+    </InAppDebugProvider>
+  );
+}
+```
+
+### Performance Notes
+
+- For typical applications, keeping the package installed does not create user-noticeable performance impact when the debugger is gated correctly.
+- With `enabled={false}`, the debugger stays in a dormant path: no JS log/network hooks are installed and no native collection is started. The impact is effectively close to zero and can usually be ignored.
+- When enabled, the debugger intentionally does work: it records logs, errors, requests, and UI state for debugging. Enable it only for targeted sessions.
+- Native logs and native network capture are heavier than JS-only capture, so they are opt-in and should be turned on temporarily.
+- Avoid unbounded buffers. Keep `maxLogs`, `maxErrors`, and `maxRequests` reasonable for your app.
+- Prefer fixed hidden activation flows, then disable the debugger when it is no longer needed.
+
+### Provider Options
+
+```tsx
+<InAppDebugProvider
+  enabled={__DEV__}
+  initialVisible
+  enableNetworkTab
+  enableNativeLogs={false}
+  enableNativeNetwork={false}
+  maxLogs={2000}
+  maxErrors={100}
+  maxRequests={100}
+  locale="en-US"
+>
+  <App />
+</InAppDebugProvider>
+```
+
+| Prop | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Enables the debugger runtime and collectors. |
+| `initialVisible` | `true` | Shows the native floating entry when enabled. |
+| `enableNetworkTab` | `true` | Enables the network panel and JS network collection. |
+| `enableNativeLogs` | `false` | Starts native log capture immediately. Usually keep this off and enable temporarily from App Info. |
+| `enableNativeNetwork` | `false` | Starts native network capture immediately. Usually keep this off and enable temporarily from App Info. |
+| `maxLogs` | `2000` | Maximum number of log entries kept in memory/native store. |
+| `maxErrors` | `100` | Maximum number of error entries kept. |
+| `maxRequests` | `100` | Maximum number of network entries kept. |
+| `locale` | `auto` | UI locale: `auto`, `en-US`, `zh-CN`, `zh-TW`, or `ja`. |
+| `strings` | - | Partial custom UI strings. |
+| `androidNativeLogs` | - | Advanced Android native log options. |
+
+### What It Captures
+
+- JS console calls: `console.log`, `info`, `warn`, `error`, `debug`.
+- JS errors: global errors, unhandled Promise rejections, and React Error Boundary errors.
+- Manual entries through `inAppDebug.log()` and `inAppDebug.captureError()`.
+- Network activity from JS `fetch`, `XMLHttpRequest`, and `WebSocket`.
+- iOS native logs after opt-in: stdout, stderr, OSLog polling, uncaught exception markers, fatal signal markers, and partial URLSession information.
+- Android native logs after opt-in: app-process logcat, stdout, stderr, uncaught Java/Kotlin exceptions, and partial OkHttp HTTP / WebSocket information.
+
+### Manual Logs and Errors
+
+```tsx
+import { inAppDebug } from 'expo-inapp-debugger';
+
+inAppDebug.log('info', 'User tapped checkout', {
+  orderId: 'order_123',
+});
+
+inAppDebug.captureError('global', 'Checkout failed', error);
+```
+
+`inAppDebug.log(level, ...args)` supports:
+
+```ts
+'log' | 'info' | 'warn' | 'error' | 'debug'
+```
+
+### Runtime Control
+
+```tsx
+import { InAppDebugController } from 'expo-inapp-debugger';
+
+await InAppDebugController.show();
+await InAppDebugController.hide();
+
+await InAppDebugController.clear('logs');
+await InAppDebugController.clear('network');
+await InAppDebugController.clear('all');
+
+const snapshot = await InAppDebugController.exportSnapshot();
+console.log(snapshot.logs, snapshot.errors, snapshot.network);
+```
+
+If `InAppDebugProvider` is mounted, prefer controlling the debugger through its `enabled` prop. `enable()` and `disable()` are kept as compatibility APIs for setups without a Provider.
+
+### Android Native Network
+
+If your Android app or SDKs create their own `OkHttpClient`, wrap the client with the helper so native OkHttp requests can appear in the debugger when Native network is enabled:
+
+```kotlin
+import expo.modules.inappdebugger.InAppDebuggerOkHttpIntegration
+import okhttp3.OkHttpClient
+
+val client =
+  InAppDebuggerOkHttpIntegration
+    .newBuilder()
+    .build()
+```
+
+With an existing builder or client:
+
+```kotlin
+val builder = OkHttpClient.Builder()
+InAppDebuggerOkHttpIntegration.instrument(builder)
+
+val client = OkHttpClient()
+val instrumentedClient = InAppDebuggerOkHttpIntegration.instrument(client)
+```
+
+This is not system-wide packet capture. Non-OkHttp stacks such as `HttpURLConnection`, Cronet, or black-box SDK network layers may need separate integration.
+
+### Android Native Logs
+
+Android native logs are disabled by default. Enable them from App Info or explicitly through Provider options:
+
+```tsx
+<InAppDebugProvider
+  enabled
+  enableNativeLogs
+  androidNativeLogs={{
+    enabled: true,
+    captureLogcat: true,
+    captureStdoutStderr: true,
+    captureUncaughtExceptions: true,
+    logcatScope: 'app',
+    rootMode: 'off',
+    buffers: ['main', 'system', 'crash'],
+  }}
+>
+  <App />
+</InAppDebugProvider>
+```
+
+On rooted test devices, you can explicitly opt in to broader device logcat access:
+
+```tsx
+import { InAppDebugController } from 'expo-inapp-debugger';
+
+await InAppDebugController.configureAndroidNativeLogs({
+  logcatScope: 'device',
+  rootMode: 'auto',
+  buffers: ['main', 'system', 'crash'],
+});
+```
+
+If root is unavailable, denied, or fails, capture falls back to app-only logcat.
+
+### iOS Notes
+
+- Native logs are disabled by default and are prepared only after Native logs is enabled.
+- stdout, stderr, and OSLog collection run only when native logs are enabled and relevant UI state requires them.
+- Native network capture is disabled by default and installs URLProtocol / URLSession paths only after opt-in.
+- iOS cannot guarantee replaying every log emitted before the debugger starts, but it tries to preserve uncaught crash reports.
+- Once native crash/signal handlers are installed in the current process, disabling native logs does not fully restore the exact same state as never enabling them.
+
+### Example App
+
+```bash
+cd example
+pnpm install
+npx expo prebuild
+npx expo run:ios
+# or
+npx expo run:android
+```
+
+Start Metro in another terminal:
+
+```bash
+cd example
+pnpm start
+```
+
+LAN device testing:
+
+```bash
+cd example
+pnpm start:lan
+```
+
+The example also includes local HTTP and WebSocket mock servers:
+
+```bash
+cd example
+pnpm http:mock
+pnpm ws:echo
+```
+
+If you see `No script URL provided`, start Metro first and reopen the installed dev client. If needed, run `npx expo run:ios` or `npx expo run:android` again.
+
+### Local Validation
+
+```bash
+pnpm typecheck
+pnpm test
+npm pack --dry-run
+```
+
+For iOS changes, also consider:
 
 ```bash
 xcodebuild -workspace example/ios/ExpoInAppDebuggerExample.xcworkspace \
