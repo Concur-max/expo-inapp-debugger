@@ -148,6 +148,54 @@ describe('DebugRuntime', () => {
     expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
   });
 
+  it('buffers console entries emitted before native configure resolves', async () => {
+    let resolveConfigure!: () => void;
+    const nativeModule = {
+      configure: jest.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveConfigure = resolve;
+          })
+      ),
+      ingestBatch: jest.fn().mockResolvedValue(undefined),
+      clear: jest.fn().mockResolvedValue(undefined),
+      show: jest.fn().mockResolvedValue(undefined),
+      hide: jest.fn().mockResolvedValue(undefined),
+      exportSnapshot: jest.fn().mockResolvedValue(null),
+    };
+    const consoleRef = {
+      log: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+    };
+    const runtime = new DebugRuntime({
+      nativeModule,
+      networkFactory: () => ({
+        enable: jest.fn(),
+        disable: jest.fn(),
+        updateOptions: jest.fn(),
+      }),
+      consoleRef,
+    });
+
+    const registerPromise = runtime.registerProvider(resolveProviderConfig({ enabled: true }));
+    console.log('early boot log');
+
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
+    await flushPromises();
+    expect(nativeModule.ingestBatch).not.toHaveBeenCalled();
+
+    resolveConfigure();
+    await registerPromise;
+    jest.advanceTimersByTime(BACKGROUND_FLUSH_DELAY_MS);
+    await flushPromises();
+
+    expect(nativeModule.ingestBatch).toHaveBeenCalledTimes(1);
+    expect(nativeModule.ingestBatch.mock.calls[0][0][0][5]).toBe('early boot log');
+  });
+
   it('enables only the React Native network collector by default', async () => {
     const nativeModule = {
       configure: jest.fn().mockResolvedValue(undefined),

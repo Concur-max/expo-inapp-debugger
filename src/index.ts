@@ -25,6 +25,7 @@ type InAppDebugProviderComponent = typeof import('./InAppDebugProvider').InAppDe
 type InAppDebugBoundaryComponent = typeof import('./InAppDebugBoundary').InAppDebugBoundary;
 type InAppDebugControllerApi = typeof import('./InAppDebugController').InAppDebugController;
 type InAppDebugApi = typeof import('./inAppDebug').inAppDebug;
+type BootstrapConfig = import('./internal/bootstrap').InAppDebugBootstrapConfig;
 
 let reactModule: ReactModule | null = null;
 let inAppDebugProviderImpl: InAppDebugProviderComponent | null = null;
@@ -129,3 +130,8 @@ export const inAppDebug: InAppDebugApi = {
     return loadInAppDebug().captureError(source, ...args);
   },
 };
+
+export function configureInAppDebugBootstrap(config: BootstrapConfig) {
+  const { configureInAppDebugBootstrap: configure } = require('./internal/bootstrap') as typeof import('./internal/bootstrap');
+  configure(config);
+}

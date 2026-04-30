@@ -65,6 +65,38 @@ npx expo run:android
 
 ### 快速接入
 
+如果要捕获 App 刚启动就发出的 `console`、`fetch`、`XMLHttpRequest` 或 `WebSocket`，请在宿主 App 入口最前面接入 setup 入口。它会尽早安装 JS 采集 hook，并把原生面板初始化完成前产生的数据先缓存在 JS 队列里。
+
+推荐由宿主 App 自己把 `enabled` 保存到同步可读的持久化存储里。这样用户在 App 内打开调试器后，下次冷启动就能捕获初始化阶段的请求和日志；关闭后，下次启动不会提前安装 hook。
+
+```ts
+// inAppDebuggerBootstrap.ts
+import { configureInAppDebugBootstrap } from 'expo-inapp-debugger';
+
+const storage = globalThis.localStorage;
+
+configureInAppDebugBootstrap({
+  enabled: () => storage?.getItem('in-app-debugger-enabled') === '1',
+});
+
+// App 内切换调试器时，由宿主自己同步维护这个字段：
+// storage?.setItem('in-app-debugger-enabled', enabled ? '1' : '0');
+```
+
+入口文件里必须先导入 bootstrap 配置文件，再导入 setup。不要在同一个文件里先写 `configureInAppDebugBootstrap()` 再静态 `import 'expo-inapp-debugger/setup'`，因为 ES import 会被提前执行：
+
+```ts
+import './inAppDebuggerBootstrap';
+import 'expo-inapp-debugger/setup';
+import { registerRootComponent } from 'expo';
+
+import App from './App';
+
+registerRootComponent(App);
+```
+
+如果不需要启动期采集，可以跳过这个 setup 入口，只使用下面的 Provider / Root 接入。`setup` 默认不会启用调试器，只有 bootstrap 的 `enabled` 同步返回 `true` 时才会早期启动。
+
 最简单的接入方式是 `InAppDebugRoot`：
 
 ```tsx
@@ -99,11 +131,16 @@ export default function Root() {
 
 | API | 适用场景 | 对宿主行为的影响 | 关闭态开销 |
 | --- | --- | --- | --- |
+| `expo-inapp-debugger/setup` | 需要捕获启动期日志 / 请求 / WebSocket | 会提前安装 JS 采集 hook | 调试开启时生效 |
 | `InAppDebugProvider` | 生产环境更稳妥 | 不额外引入 React Error Boundary | 很低 |
 | `InAppDebugRoot` | 最快完成接入 | 会额外引入内置 React Error Boundary | 低 |
 | `InAppDebugBoundary` | 只想单独使用内置 Boundary | 会捕获 React 渲染错误并渲染 fallback UI | 与调试器开关无强绑定 |
 
 挂载 `InAppDebugProvider` 后，`enabled` 就是启停调试器的唯一权威开关。只有它变成 `true`，库才会创建 runtime 并安装 React Native 日志与网络采集。
+
+`setup` 入口适合调试启动期问题：它必须出现在入口文件其它业务 import 之前，否则在它之前已经执行的模块仍然无法被 JS hook 捕获。它只能读取同步状态，不能等待 AsyncStorage、远程配置或网络请求；如果你使用的是异步存储，建议在 App 内开关变化时同时写一份同步启动标记。它也只能捕获 JS 层可 hook 的请求；如果某些请求在 JS runtime 创建前已经由原生 SDK 发出，需要开启 native logs / native network，或在宿主原生层更早接入对应采集器。
+
+库不会替宿主 App 持久化 `enabled`；App 内的开关状态、权限判断和存储策略仍然应该由宿主自己维护，`configureInAppDebugBootstrap` 只负责在冷启动最早期同步读取这个结果。
 
 原生日志和原生网络仍然是 opt-in：默认关闭，需要在 App Info 面板里临时打开，或通过 Provider 参数显式开启。
 

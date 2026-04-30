@@ -197,6 +197,7 @@ export class DebugRuntime {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushInFlight: Promise<void> | null = null;
   private configured = false;
+  private captureActive = false;
   private consolePatched = false;
   private lastAppliedConfig: ResolvedInAppDebugConfig | null = null;
   private originalGlobalHandler: ErrorUtilsHandler | null = null;
@@ -399,20 +400,26 @@ export class DebugRuntime {
       );
     }
 
+    if (nextConfig.enabled) {
+      this.captureActive = true;
+      this.installPanelStateListener();
+      this.installCollectors(nextConfig.enableNetworkTab);
+    } else {
+      this.captureActive = false;
+      this.removeCollectors();
+    }
+
     await this.dependencies.nativeModule.configure(toNativeConfig(nextConfig));
     this.configured = true;
     if (JS_PIPELINE_DIAGNOSTICS_ENABLED) {
       this.emitDiagnostic('JSRuntime', 'applyConfig native configure resolved');
     }
 
-    if (nextConfig.enabled) {
-      this.installPanelStateListener();
-      this.installCollectors(nextConfig.enableNetworkTab);
-      this.lastAppliedConfig = nextConfig;
-      return;
+    if (nextConfig.enabled && this.pendingEntryCount() > 0) {
+      this.cancelScheduledFlush();
+      this.scheduleFlushIfNeeded();
     }
 
-    this.removeCollectors();
     this.lastAppliedConfig = nextConfig;
   }
 
@@ -620,6 +627,9 @@ export class DebugRuntime {
   }
 
   private requestFlush() {
+    if (!this.configured) {
+      return;
+    }
     if (this.flushInFlight) {
       return;
     }
@@ -702,7 +712,7 @@ export class DebugRuntime {
   }
 
   private isCaptureActive() {
-    return this.configured && this.providerConfig.enabled;
+    return this.captureActive && this.providerConfig.enabled;
   }
 
   private trimPendingLogQueue(exact: boolean) {
