@@ -11,3 +11,4 @@ android/build
 example/android
 example/ios
 .DS_Store
+.gitnexus

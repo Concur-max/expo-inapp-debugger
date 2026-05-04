@@ -1,0 +1,29 @@
+# Keep the AI graph focused on source, docs, tests, and examples.
+.DS_Store
+*.tgz
+AGENTS.md
+CLAUDE.md
+.claude/
+.gitnexus/
+
+example/.DS_Store
+example/.expo/
+example/.expo-shared/
+example/android/
+example/ios/
+example/node_modules/
+
+# GitNexus auto-filters some conventional folders; include repo-owned tests/examples.
+!__tests__/
+!__tests__/**
+!example/
+!example/App.tsx
+!example/app.json
+!example/babel.config.js
+!example/index.js
+!example/metro.config.js
+!example/package.json
+!example/pnpm-lock.yaml
+!example/scripts/
+!example/scripts/**
+!example/tsconfig.json
